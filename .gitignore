@@ -28,3 +28,4 @@ traces/*.jsonl
 # Local-only agent context (not shared on the repo)
 AGENTS.md
 cursor.md
+.cursor/rules/communication-style.mdc
