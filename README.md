@@ -11,8 +11,7 @@ failures.
 Agent  ->  Pathlayer  ->  LLM + Tools + APIs
 ```
 
-> Status: early scaffolding. See [`cursor.md`](cursor.md) for the full project
-> context, strategy, and V1 architecture.
+> Status: early scaffolding.
 
 ## Install
 

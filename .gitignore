@@ -24,3 +24,7 @@ traces/*.jsonl
 .DS_Store
 .idea/
 .vscode/
+
+# Local-only agent context (not shared on the repo)
+AGENTS.md
+cursor.md
