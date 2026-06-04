@@ -1,0 +1,2 @@
+# Labeled trace corpus (looping vs healthy runs) for tuning and validation.
+# Trace files (*.jsonl) are gitignored by default; commit curated samples explicitly.

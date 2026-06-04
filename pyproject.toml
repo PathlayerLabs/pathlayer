@@ -1,0 +1,24 @@
+[project]
+name = "pathlayer"
+version = "0.0.1"
+description = "Runtime guardrail layer for AI agents: detect loops, retries, cost explosions and lack of progress, and intervene during execution."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Pathlayer" }]
+keywords = ["ai", "agents", "guardrails", "circuit-breaker", "observability", "reliability"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pathlayer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
