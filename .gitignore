@@ -19,6 +19,10 @@ traces/*.jsonl
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # OS / editor
 .DS_Store
@@ -29,3 +33,7 @@ traces/*.jsonl
 AGENTS.md
 cursor.md
 .cursor/rules/communication-style.mdc
+.cursor/rules/architecture-guardrails.mdc
+
+# Local one-off helper (chat history migration after the OneDrive move)
+restore-chats.sh
