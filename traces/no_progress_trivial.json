@@ -1,0 +1,16 @@
+{
+  "label": "no_progress",
+  "description": "Slow-burn (47k$-style): every step looks different -- distinct queries, distinct notes -- so repetition detectors stay silent, yet nothing advances. The agent keeps re-analyzing and re-planning without ever editing code or passing a test.",
+  "events": [
+    { "tool": "search", "args": { "query": "where is the bug in the parser" } },
+    { "tool": "read_file", "args": { "path": "src/parser.py", "lines": "1-40" } },
+    { "tool": "note", "args": { "text": "the parser might mishandle nested quotes" } },
+    { "tool": "search", "args": { "query": "nested quote handling python tokenizer" } },
+    { "tool": "read_file", "args": { "path": "src/parser.py", "lines": "40-80" } },
+    { "tool": "note", "args": { "text": "actually it could be the lookahead, need to re-check" } },
+    { "tool": "search", "args": { "query": "lookahead parser off by one" } },
+    { "tool": "read_file", "args": { "path": "src/parser.py", "lines": "1-40" } },
+    { "tool": "note", "args": { "text": "let me reconsider the nested quotes hypothesis" } },
+    { "tool": "search", "args": { "query": "python parser nested quotes edge case" } }
+  ]
+}

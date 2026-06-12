@@ -1,0 +1,14 @@
+{
+  "label": "healthy",
+  "description": "A normal run: varied tools that each advance the task (list, read, edit, test). No action repeats and the run terminates. Must not trigger any intervention.",
+  "events": [
+    { "tool": "list_dir", "args": { "path": "src" } },
+    { "tool": "read_file", "args": { "path": "src/main.py" } },
+    { "tool": "edit_file", "args": { "path": "src/main.py", "patch": "add guard" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_main.py" } },
+    { "tool": "read_file", "args": { "path": "src/utils.py" } },
+    { "tool": "edit_file", "args": { "path": "src/utils.py", "patch": "fix off-by-one" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_utils.py" } },
+    { "tool": "git_commit", "args": { "message": "fix guard and off-by-one" } }
+  ]
+}
