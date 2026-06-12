@@ -8,7 +8,8 @@ Detection is deterministic/statistical: no LLM in the detection loop.
 """
 
 from pathlayer.pipeline import Pipeline
+from pathlayer.postmortem import PostMortem
 
 __version__ = "0.0.1"
 
-__all__ = ["Pipeline", "__version__"]
+__all__ = ["Pipeline", "PostMortem", "__version__"]
