@@ -8,5 +8,6 @@ CrewAI, AutoGen, browser-use. Long term: OpenTelemetry.
 """
 
 from pathlayer.adapters.base import Adapter
+from pathlayer.adapters.memory import InMemoryAdapter
 
-__all__ = ["Adapter"]
+__all__ = ["Adapter", "InMemoryAdapter"]
