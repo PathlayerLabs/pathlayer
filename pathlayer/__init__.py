@@ -7,6 +7,8 @@ intervene during execution.
 Detection is deterministic/statistical: no LLM in the detection loop.
 """
 
+from pathlayer.pipeline import Pipeline
+
 __version__ = "0.0.1"
 
-__all__ = ["__version__"]
+__all__ = ["Pipeline", "__version__"]
