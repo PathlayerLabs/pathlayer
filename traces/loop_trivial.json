@@ -1,0 +1,22 @@
+{
+  "label": "loop",
+  "description": "Trivial two-action loop: the agent lists a directory then reads the same file, over and over, making no progress. Each iteration carries a fresh request_id and timestamp so the events are not byte-identical; canonicalization collapses them so the loop is visible.",
+  "events": [
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-001", "at": "2026-06-09T08:00:00Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-002", "at": "2026-06-09T08:00:01Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-003", "at": "2026-06-09T08:00:02Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-004", "at": "2026-06-09T08:00:03Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-005", "at": "2026-06-09T08:00:04Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-006", "at": "2026-06-09T08:00:05Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-007", "at": "2026-06-09T08:00:06Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-008", "at": "2026-06-09T08:00:07Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-009", "at": "2026-06-09T08:00:08Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-010", "at": "2026-06-09T08:00:09Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-011", "at": "2026-06-09T08:00:10Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-012", "at": "2026-06-09T08:00:11Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-013", "at": "2026-06-09T08:00:12Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-014", "at": "2026-06-09T08:00:13Z"}},
+    {"tool": "list_dir", "args": {"path": "src", "request_id": "r-015", "at": "2026-06-09T08:00:14Z"}},
+    {"tool": "read_file", "args": {"path": "src/main.py", "request_id": "r-016", "at": "2026-06-09T08:00:15Z"}}
+  ]
+}
