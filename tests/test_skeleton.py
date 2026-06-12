@@ -74,7 +74,8 @@ def test_default_policy_config_matches_architecture() -> None:
 def test_policy_uses_provided_config() -> None:
     policy = Policy(config=PolicyConfig(max_cost_usd=1.0))
     assert policy.config.max_cost_usd == 1.0
-    assert policy.decide([Signal("loop", confidence=0.9)]) is Action.NONE
+    # A low-confidence signal must not trigger any action.
+    assert policy.decide([Signal("loop", confidence=0.1)]) is Action.NONE
 
 
 def test_tool_event_defaults() -> None:

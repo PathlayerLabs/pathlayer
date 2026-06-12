@@ -8,7 +8,7 @@ the loop -> STOP behavior is added in ARB-2/ACT-5.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import pytest
 
@@ -80,6 +80,29 @@ def test_defaults_to_a_policy() -> None:
     # No policy passed -> a default Policy is created and used.
     pipeline = Pipeline([LoopDetector()])
     assert pipeline.process(ToolEvent(tool="read")) is Action.NONE
+
+
+def test_loop_trace_drives_decision_to_stop(
+    trace: Callable[[str], list[ToolEvent]],
+) -> None:
+    # End-to-end at the decision level: real LoopDetector + default Policy on a
+    # looping trace must eventually decide STOP (execution lands in ACT-5).
+    pipeline = Pipeline([LoopDetector()])
+    actions = pipeline.run(trace("loop_trivial.json"))
+    assert Action.STOP in actions
+
+
+def test_healthy_trace_never_stops() -> None:
+    pipeline = Pipeline([LoopDetector()])
+    healthy = [
+        ToolEvent(tool="read", args={"path": "a.py"}),
+        ToolEvent(tool="edit", args={"path": "a.py"}),
+        ToolEvent(tool="run_tests", args={}),
+        ToolEvent(tool="read", args={"path": "b.py"}),
+        ToolEvent(tool="edit", args={"path": "b.py"}),
+    ]
+    actions = pipeline.run(healthy)
+    assert all(a is Action.NONE for a in actions)
 
 
 class _RecordingDetector(Detector):
