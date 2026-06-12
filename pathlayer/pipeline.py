@@ -14,10 +14,12 @@ default policy the pipeline simply yields ``Action.NONE``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.events import ToolEvent
+from pathlayer.observability import log_action, log_decision, log_signal
 from pathlayer.policies import Action, Policy
 from pathlayer.postmortem import PostMortem
 
@@ -38,6 +40,7 @@ class Pipeline:
         policy: Policy | None = None,
         *,
         recent_history: int = DEFAULT_RECENT_HISTORY,
+        logger: logging.Logger | None = None,
     ) -> None:
         if recent_history < 0:
             raise ValueError("recent_history must be >= 0")
@@ -46,6 +49,7 @@ class Pipeline:
         self._history: list[ToolEvent] = []
         self._actions: list[Action] = []
         self._recent_history = recent_history
+        self._logger = logger
         self._stopped = False
         self._post_mortem: PostMortem | None = None
 
@@ -89,6 +93,7 @@ class Pipeline:
             self._history.pop()
             raise
         self._actions.append(action)
+        self._log(event, signals, action)
         if action is Action.STOP:
             self._stopped = True
             self._post_mortem = self._build_post_mortem(signals)
@@ -106,6 +111,16 @@ class Pipeline:
     def sink(self, event: ToolEvent) -> None:
         """Adapter-compatible sink (see :data:`pathlayer.adapters.base.EventSink`)."""
         self.process(event)
+
+    def _log(self, event: ToolEvent, signals: list[Signal], action: Action) -> None:
+        if self._logger is None:
+            return
+        index = len(self._history) - 1
+        for signal in signals:
+            log_signal(self._logger, signal, index=index, ts=event.ts)
+        log_decision(self._logger, action, signals, index=index, ts=event.ts)
+        if action is not Action.NONE:
+            log_action(self._logger, action, index=index, ts=event.ts)
 
     def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:
         if signals:
