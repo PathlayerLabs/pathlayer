@@ -1,0 +1,14 @@
+{
+  "label": "healthy",
+  "description": "Near the false-positive boundary: a transient failure triggers two bounded retries of the same call, then it succeeds and the run moves on. Looks like the start of a retry loop but self-resolves quickly -- must NOT be flagged. Tests detectors that reset on genuine progress.",
+  "metadata": { "curated_by": "VAL-2", "boundary": "retry-then-succeed" },
+  "events": [
+    { "tool": "deploy", "args": { "service": "api", "env": "staging" }, "result": { "ok": false, "error": "registry timeout" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "staging" }, "result": { "ok": false, "error": "registry timeout" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "staging" }, "result": { "ok": true } },
+    { "tool": "run_smoke_tests", "args": { "env": "staging" }, "result": { "passed": 8, "failed": 0 } },
+    { "tool": "promote", "args": { "service": "api", "env": "production" }, "result": { "ok": true } },
+    { "tool": "run_smoke_tests", "args": { "env": "production" }, "result": { "passed": 8, "failed": 0 } },
+    { "tool": "notify", "args": { "channel": "#releases", "text": "api shipped to prod" } }
+  ]
+}

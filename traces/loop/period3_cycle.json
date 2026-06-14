@@ -1,0 +1,22 @@
+{
+  "label": "loop",
+  "description": "Longer cycle of period 3: the agent opens a file, runs the tests, then reverts its change -- then repeats the exact same three-step cycle forever. Distinct actions within the cycle, but the cycle as a whole replays identically, so the stream still compresses trivially.",
+  "metadata": { "period": 3, "curated_by": "VAL-2" },
+  "events": [
+    { "tool": "open_file", "args": { "path": "src/auth.py" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_auth.py" } },
+    { "tool": "revert_changes", "args": { "path": "src/auth.py" } },
+    { "tool": "open_file", "args": { "path": "src/auth.py" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_auth.py" } },
+    { "tool": "revert_changes", "args": { "path": "src/auth.py" } },
+    { "tool": "open_file", "args": { "path": "src/auth.py" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_auth.py" } },
+    { "tool": "revert_changes", "args": { "path": "src/auth.py" } },
+    { "tool": "open_file", "args": { "path": "src/auth.py" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_auth.py" } },
+    { "tool": "revert_changes", "args": { "path": "src/auth.py" } },
+    { "tool": "open_file", "args": { "path": "src/auth.py" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_auth.py" } },
+    { "tool": "revert_changes", "args": { "path": "src/auth.py" } }
+  ]
+}

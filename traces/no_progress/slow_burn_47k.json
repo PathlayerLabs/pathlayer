@@ -1,0 +1,19 @@
+{
+  "label": "no_progress",
+  "description": "The 47k$-style slow burn: an analyzer and a verifier debate endlessly. Every turn carries genuinely different text and a different cost, so repetition detectors never fire -- yet no file is ever edited and no test ever runs. Activity is high, cost climbs, real progress stays at zero.",
+  "metadata": { "curated_by": "VAL-2", "inspiration": "LangChain Analyzer<->Verifier 11-day burn" },
+  "events": [
+    { "tool": "analyzer", "args": { "thought": "the latency spike likely comes from the retry backoff being too aggressive" }, "cost_usd": 0.42, "ts": 1.0 },
+    { "tool": "verifier", "args": { "critique": "backoff is fine; consider connection pool exhaustion instead" }, "cost_usd": 0.39, "ts": 2.0 },
+    { "tool": "analyzer", "args": { "thought": "pool exhaustion is plausible, but metrics show idle connections, so maybe DNS" }, "cost_usd": 0.45, "ts": 3.0 },
+    { "tool": "verifier", "args": { "critique": "DNS resolves in 2ms per traces; look at TLS handshake renegotiation" }, "cost_usd": 0.41, "ts": 4.0 },
+    { "tool": "analyzer", "args": { "thought": "TLS renegotiation could explain the tail; or it is head-of-line blocking on h2" }, "cost_usd": 0.47, "ts": 5.0 },
+    { "tool": "verifier", "args": { "critique": "h2 multiplexing should absorb that; revisit the retry backoff hypothesis" }, "cost_usd": 0.40, "ts": 6.0 },
+    { "tool": "analyzer", "args": { "thought": "circling back, the backoff jitter window might be miscomputed under load" }, "cost_usd": 0.44, "ts": 7.0 },
+    { "tool": "verifier", "args": { "critique": "jitter looks correct in code review; could be the load balancer draining nodes" }, "cost_usd": 0.43, "ts": 8.0 },
+    { "tool": "analyzer", "args": { "thought": "LB draining is interesting -- though that would show as 503s, which we do not see" }, "cost_usd": 0.46, "ts": 9.0 },
+    { "tool": "verifier", "args": { "critique": "no 503s indeed; perhaps a slow downstream cache fill on cold keys" }, "cost_usd": 0.42, "ts": 10.0 },
+    { "tool": "analyzer", "args": { "thought": "cold cache fill matches the morning pattern; or it loops back to pool exhaustion" }, "cost_usd": 0.48, "ts": 11.0 },
+    { "tool": "verifier", "args": { "critique": "we already ruled out pool exhaustion; let me reconsider the TLS angle once more" }, "cost_usd": 0.45, "ts": 12.0 }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "label": "no_progress",
+  "description": "Real edits, zero progress: the agent makes a genuinely different patch every turn and runs the suite each time, so no action repeats -- but the test result is always '3 failed' (the ground-truth progress signal never moves). High activity, flat progress: the differentiating case CUSUM is meant to catch.",
+  "metadata": { "curated_by": "VAL-2", "progress_signal": "tests_passing stays 0" },
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "guard empty input" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "strip whitespace before split" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "use regex for delimiter" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "handle trailing comma" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "lowercase keys" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "catch ValueError and retry" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 11, "failed": 3 } }
+  ]
+}

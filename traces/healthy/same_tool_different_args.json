@@ -1,0 +1,17 @@
+{
+  "label": "healthy",
+  "description": "Near the false-positive boundary: the same tool (read_file) is called many times in a row, which a naive repeat detector might flag -- but every call targets a genuinely different file, so the agent is legitimately exploring a codebase. Canonicalization must keep these distinct (no false merge), then edits and a passing test close the task.",
+  "metadata": { "curated_by": "VAL-2", "boundary": "same-tool-different-args" },
+  "events": [
+    { "tool": "read_file", "args": { "path": "src/api/routes.py" } },
+    { "tool": "read_file", "args": { "path": "src/api/handlers.py" } },
+    { "tool": "read_file", "args": { "path": "src/api/models.py" } },
+    { "tool": "read_file", "args": { "path": "src/api/serializers.py" } },
+    { "tool": "read_file", "args": { "path": "src/api/validators.py" } },
+    { "tool": "read_file", "args": { "path": "src/api/errors.py" } },
+    { "tool": "edit_file", "args": { "path": "src/api/validators.py", "patch": "add email format check" } },
+    { "tool": "edit_file", "args": { "path": "src/api/errors.py", "patch": "add ValidationError" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_validators.py" }, "result": { "passed": 14, "failed": 0 } },
+    { "tool": "git_commit", "args": { "message": "validate email on signup" } }
+  ]
+}

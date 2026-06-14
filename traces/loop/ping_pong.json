@@ -1,0 +1,21 @@
+{
+  "label": "loop",
+  "description": "Two-action ping-pong: an analyzer hands off to a verifier which hands back to the analyzer, with identical payloads each turn. Classic A->B->A->B oscillation that never converges; the alternating stream compresses to a 2-token cycle.",
+  "metadata": { "period": 2, "curated_by": "VAL-2" },
+  "events": [
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } },
+    { "tool": "analyzer", "args": { "action": "propose_fix", "target": "module/cache.py" } },
+    { "tool": "verifier", "args": { "action": "reject_fix", "target": "module/cache.py" } }
+  ]
+}

@@ -60,14 +60,49 @@ t = load_trace("traces/loop_trivial.json")   # -> Trace(label="loop", events=[..
 dump_trace(t, "traces/copy.json")            # round-trips: load(dump(t)) == t
 ```
 
+## Layout
+
+- The three minimal **format examples** stay flat at the root of `traces/`
+  (`loop_trivial.json`, `no_progress_trivial.json`, `healthy_trivial.json`).
+- The curated **golden set** (VAL-2) lives in one subfolder per class:
+  `traces/loop/`, `traces/no_progress/`, `traces/healthy/`.
+
+Tests discover **every** `*.json` under `traces/` recursively, so the folder a
+trace sits in is cosmetic -- the `label` field is the source of truth. The
+golden set is guarded by `tests/test_golden_traces.py` (>= 5 traces per class,
+each well-formed and described).
+
 ## Current corpus
 
-These are minimal **format examples** (one per class). The curated golden set
-(~5 per class, incl. the flagship slow-burn) is VAL-2; programmatically
-generated/mutated traces are VAL-4/VAL-5.
+Curated golden set: VAL-2. Programmatically generated/mutated traces are
+VAL-4/VAL-5 (later).
 
-| File | Label |
+### `loop`
+
+| File | What makes it a loop |
 | --- | --- |
-| `loop_trivial.json` | `loop` |
-| `no_progress_trivial.json` | `no_progress` |
-| `healthy_trivial.json` | `healthy` |
+| `loop_trivial.json` | Two-action cycle (period 2), volatile ids per turn. |
+| `loop/single_action_repeat.json` | Period-1 exact repetition of one call. |
+| `loop/period3_cycle.json` | Longer cycle of period 3 replayed identically. |
+| `loop/volatile_ids.json` | Same call hidden behind fresh UUIDs/timestamps/cursors; visible only after canonicalization. |
+| `loop/ping_pong.json` | Analyzer <-> verifier A->B->A->B oscillation. |
+
+### `no_progress`
+
+| File | What makes it no-progress |
+| --- | --- |
+| `no_progress_trivial.json` | Re-analyze / re-plan, distinct each step, never edits. |
+| `no_progress/slow_burn_47k.json` | The 47k$-style analyzer/verifier debate: distinct text + cost each turn, zero real progress. |
+| `no_progress/replan_churn.json` | Plan rewritten over and over, never executed. |
+| `no_progress/failing_edit_churn.json` | Genuinely different patches each turn, but the test result never moves off `3 failed`. |
+| `no_progress/research_rabbit_hole.json` | Endless distinct searches/reads, no change applied. |
+
+### `healthy` (false-positive boundary)
+
+| File | Why it must NOT fire |
+| --- | --- |
+| `healthy_trivial.json` | Varied tools that each advance the task; terminates. |
+| `healthy/retry_then_succeed.json` | Bounded retries that self-resolve, then progress. |
+| `healthy/same_tool_different_args.json` | Same tool, genuinely different files (legit exploration). |
+| `healthy/expensive_but_legitimate.json` | High cumulative cost but real progress; terminates. |
+| `healthy/varied_long_run.json` | Long but progressing run; length alone is not a fault. |

@@ -1,0 +1,19 @@
+{
+  "label": "no_progress",
+  "description": "Planning churn: the agent writes a plan, critiques it, and rewrites it -- each revision has different content, so nothing repeats -- but it never executes a single step. The plan keeps changing while the world stays untouched (no edits, no tests, no commits).",
+  "metadata": { "curated_by": "VAL-2" },
+  "events": [
+    { "tool": "write_plan", "args": { "version": 1, "text": "1) refactor auth 2) add cache 3) write tests" } },
+    { "tool": "critique_plan", "args": { "note": "ordering is wrong, tests should come first" } },
+    { "tool": "write_plan", "args": { "version": 2, "text": "1) write tests 2) refactor auth 3) add cache" } },
+    { "tool": "critique_plan", "args": { "note": "cache before refactor risks rework, swap them" } },
+    { "tool": "write_plan", "args": { "version": 3, "text": "1) write tests 2) add cache 3) refactor auth" } },
+    { "tool": "critique_plan", "args": { "note": "tests need the refactor to exist first, contradiction" } },
+    { "tool": "write_plan", "args": { "version": 4, "text": "1) sketch refactor 2) write tests 3) implement 4) add cache" } },
+    { "tool": "critique_plan", "args": { "note": "four steps is too granular, collapse 1 and 3" } },
+    { "tool": "write_plan", "args": { "version": 5, "text": "1) refactor+implement 2) write tests 3) add cache" } },
+    { "tool": "critique_plan", "args": { "note": "we are back near version 1, reconsider from scratch" } },
+    { "tool": "write_plan", "args": { "version": 6, "text": "1) audit current auth 2) decide refactor scope 3) plan tests" } },
+    { "tool": "critique_plan", "args": { "note": "this is still planning, not doing -- needs more detail first" } }
+  ]
+}

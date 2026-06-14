@@ -1,0 +1,19 @@
+{
+  "label": "loop",
+  "description": "Period-1 exact repetition: the agent calls the same status-check tool with identical args turn after turn, never acting on the result. The simplest loop -- the action stream compresses to a single token.",
+  "metadata": { "period": 1, "curated_by": "VAL-2" },
+  "events": [
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } },
+    { "tool": "get_build_status", "args": { "job": "ci-main" } }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "label": "healthy",
+  "description": "A long but healthy run: many distinct tools chained toward a clear outcome (investigate, reproduce, fix, test, document, ship). Length alone must not trigger an intervention -- only lack of progress should. Every step advances the task and the run ends on a commit.",
+  "metadata": { "curated_by": "VAL-2", "boundary": "long-but-progressing" },
+  "events": [
+    { "tool": "search", "args": { "query": "NullPointer on checkout" } },
+    { "tool": "read_file", "args": { "path": "src/checkout/service.py" } },
+    { "tool": "reproduce_bug", "args": { "case": "empty cart checkout" }, "result": { "reproduced": true } },
+    { "tool": "read_file", "args": { "path": "src/checkout/cart.py" } },
+    { "tool": "edit_file", "args": { "path": "src/checkout/cart.py", "patch": "guard against empty items" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_cart.py" }, "result": { "passed": 9, "failed": 1 } },
+    { "tool": "edit_file", "args": { "path": "src/checkout/cart.py", "patch": "return 0 total for empty cart" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_cart.py" }, "result": { "passed": 10, "failed": 0 } },
+    { "tool": "run_tests", "args": { "target": "tests/test_checkout.py" }, "result": { "passed": 22, "failed": 0 } },
+    { "tool": "update_changelog", "args": { "entry": "fix empty-cart checkout crash" } },
+    { "tool": "git_commit", "args": { "message": "fix empty-cart checkout crash" } }
+  ]
+}

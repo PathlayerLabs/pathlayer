@@ -1,0 +1,19 @@
+{
+  "label": "no_progress",
+  "description": "Research rabbit hole: the agent keeps searching and reading, each query and document distinct (so nothing repeats), drilling ever deeper without ever applying a change. Pure information gathering that never converts into action -- progress stays flat despite constant activity.",
+  "metadata": { "curated_by": "VAL-2" },
+  "events": [
+    { "tool": "web_search", "args": { "query": "best way to debounce websocket reconnect" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "docs/ws/reconnect-strategies" }, "cost_usd": 0.02 },
+    { "tool": "web_search", "args": { "query": "exponential backoff jitter websocket libraries" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "blog/full-jitter-vs-equal-jitter" }, "cost_usd": 0.02 },
+    { "tool": "web_search", "args": { "query": "websocket heartbeat ping interval recommendation" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "rfc/6455-section-5.5.2" }, "cost_usd": 0.02 },
+    { "tool": "web_search", "args": { "query": "socket.io vs native websocket reconnection 2026" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "comparison/socketio-reconnect" }, "cost_usd": 0.02 },
+    { "tool": "web_search", "args": { "query": "how to test flaky websocket reconnect logic" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "guide/testing-websockets" }, "cost_usd": 0.02 },
+    { "tool": "web_search", "args": { "query": "browser tab throttling websocket keepalive" }, "cost_usd": 0.05 },
+    { "tool": "read_doc", "args": { "url": "mdn/page-visibility-and-sockets" }, "cost_usd": 0.02 }
+  ]
+}

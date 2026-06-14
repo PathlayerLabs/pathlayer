@@ -1,0 +1,19 @@
+{
+  "label": "loop",
+  "description": "Loop that is invisible without canonicalization: the agent polls the same job, but every call carries a fresh request_id (UUID), trace_id, wall-clock timestamp and pagination cursor. Byte-for-byte the events all differ; once the volatile fields are stripped they collapse to one repeated call.",
+  "metadata": { "period": 1, "curated_by": "VAL-2", "needs_canonicalization": true },
+  "events": [
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "8f1c2a9e-0001", "trace_id": "tr-aa01", "cursor": "p=0", "ts": "2026-06-10T09:00:00.123Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "b3d77c12-0002", "trace_id": "tr-aa02", "cursor": "p=17", "ts": "2026-06-10T09:00:05.481Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "4e90fa55-0003", "trace_id": "tr-aa03", "cursor": "p=34", "ts": "2026-06-10T09:00:10.902Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "c1a8b7d0-0004", "trace_id": "tr-aa04", "cursor": "p=51", "ts": "2026-06-10T09:00:16.220Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "7720de3f-0005", "trace_id": "tr-aa05", "cursor": "p=68", "ts": "2026-06-10T09:00:21.744Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "9aa14c6b-0006", "trace_id": "tr-aa06", "cursor": "p=85", "ts": "2026-06-10T09:00:27.013Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "2f0bb981-0007", "trace_id": "tr-aa07", "cursor": "p=102", "ts": "2026-06-10T09:00:32.560Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "d55e1a44-0008", "trace_id": "tr-aa08", "cursor": "p=119", "ts": "2026-06-10T09:00:38.099Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "61c0f2ab-0009", "trace_id": "tr-aa09", "cursor": "p=136", "ts": "2026-06-10T09:00:43.612Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "e8732bd5-0010", "trace_id": "tr-aa10", "cursor": "p=153", "ts": "2026-06-10T09:00:49.188Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "0a4d9c77-0011", "trace_id": "tr-aa11", "cursor": "p=170", "ts": "2026-06-10T09:00:54.701Z" } },
+    { "tool": "poll_job", "args": { "job": "export-42", "request_id": "5b21e0c8-0012", "trace_id": "tr-aa12", "cursor": "p=187", "ts": "2026-06-10T09:01:00.244Z" } }
+  ]
+}

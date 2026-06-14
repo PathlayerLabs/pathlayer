@@ -1,0 +1,13 @@
+{
+  "label": "healthy",
+  "description": "Near the false-positive boundary: a few very expensive calls (full test suite, a training step) push cumulative cost high, which a naive budget guard might trip -- but each step genuinely advances the task and the run terminates. High cost is not the same as no progress; this guards the budget detector against punishing legitimate heavy work.",
+  "metadata": { "curated_by": "VAL-2", "boundary": "expensive-but-legitimate" },
+  "events": [
+    { "tool": "prepare_dataset", "args": { "name": "intents-v3" }, "cost_usd": 0.30, "ts": 1.0 },
+    { "tool": "train_model", "args": { "config": "configs/intent_clf.yaml", "epochs": 3 }, "cost_usd": 3.80, "ts": 2.0, "result": { "val_accuracy": 0.91 } },
+    { "tool": "evaluate_model", "args": { "split": "test" }, "cost_usd": 0.90, "ts": 3.0, "result": { "test_accuracy": 0.89 } },
+    { "tool": "run_full_suite", "args": { "scope": "all" }, "cost_usd": 1.20, "ts": 4.0, "result": { "passed": 412, "failed": 0 } },
+    { "tool": "export_artifact", "args": { "name": "intent_clf", "version": "1.4.0" }, "cost_usd": 0.20, "ts": 5.0 },
+    { "tool": "git_commit", "args": { "message": "ship intent classifier v1.4.0 (acc 0.89)" }, "cost_usd": 0.0, "ts": 6.0 }
+  ]
+}
