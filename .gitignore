@@ -15,6 +15,9 @@ venv/
 traces/*.jsonl
 !traces/.gitkeep
 
+# Generated corpus (VAL-5): reproducible from a seed, not committed
+traces/generated/
+
 # Tooling
 .pytest_cache/
 .ruff_cache/

@@ -21,8 +21,9 @@ _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
 
 MIN_PER_CLASS = 5
 
-# Sorted for deterministic test ordering / ids.
-_TRACE_FILES = sorted(_TRACES_DIR.rglob("*.json"))
+# Sorted for deterministic test ordering / ids. The generated/ corpus (VAL-5)
+# is excluded: this test guards the hand-curated set, not synthetic output.
+_TRACE_FILES = sorted(p for p in _TRACES_DIR.rglob("*.json") if "generated" not in p.parts)
 
 
 def test_traces_dir_is_populated() -> None:

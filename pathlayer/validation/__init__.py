@@ -5,6 +5,7 @@ Everything here is built on :class:`pathlayer.events.ToolEvent` -- there is no
 parallel event schema.
 """
 
+from pathlayer.validation.corpus import CorpusSummary, build_corpus
 from pathlayer.validation.mutations import (
     inject_cost_spike,
     inject_loop,
@@ -31,9 +32,11 @@ from pathlayer.validation.traces import (
 
 __all__ = [
     "VALID_LABELS",
+    "CorpusSummary",
     "ReplayResult",
     "Report",
     "Trace",
+    "build_corpus",
     "dump_trace",
     "event_from_dict",
     "event_to_dict",
