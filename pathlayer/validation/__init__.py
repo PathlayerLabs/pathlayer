@@ -5,6 +5,12 @@ Everything here is built on :class:`pathlayer.events.ToolEvent` -- there is no
 parallel event schema.
 """
 
+from pathlayer.validation.mutations import (
+    inject_cost_spike,
+    inject_loop,
+    inject_no_progress,
+    inject_retry_storm,
+)
 from pathlayer.validation.traces import (
     VALID_LABELS,
     Trace,
@@ -22,6 +28,10 @@ __all__ = [
     "dump_trace",
     "event_from_dict",
     "event_to_dict",
+    "inject_cost_spike",
+    "inject_loop",
+    "inject_no_progress",
+    "inject_retry_storm",
     "load_trace",
     "trace_from_dict",
     "trace_to_dict",
