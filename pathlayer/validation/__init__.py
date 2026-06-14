@@ -11,6 +11,13 @@ from pathlayer.validation.mutations import (
     inject_no_progress,
     inject_retry_storm,
 )
+from pathlayer.validation.replay import (
+    ReplayResult,
+    Report,
+    load_traces,
+    replay_trace,
+    score,
+)
 from pathlayer.validation.traces import (
     VALID_LABELS,
     Trace,
@@ -24,6 +31,8 @@ from pathlayer.validation.traces import (
 
 __all__ = [
     "VALID_LABELS",
+    "ReplayResult",
+    "Report",
     "Trace",
     "dump_trace",
     "event_from_dict",
@@ -33,6 +42,9 @@ __all__ = [
     "inject_no_progress",
     "inject_retry_storm",
     "load_trace",
+    "load_traces",
+    "replay_trace",
+    "score",
     "trace_from_dict",
     "trace_to_dict",
 ]
