@@ -37,6 +37,7 @@ AGENTS.md
 cursor.md
 .cursor/rules/communication-style.mdc
 .cursor/rules/architecture-guardrails.mdc
+.cursor/rules/pr-self-review.mdc
 
 # Local one-off helper (chat history migration after the OneDrive move)
 restore-chats.sh

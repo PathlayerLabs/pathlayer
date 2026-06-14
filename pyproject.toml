@@ -13,7 +13,10 @@ dependencies = []
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.8",
+    # Exact pin: ruff's formatter output changes between releases. Keeping dev,
+    # CI and the pre-commit hook (.pre-commit-config.yaml rev) on the SAME ruff
+    # avoids format ping-pong. Bump both together on upgrade.
+    "ruff==0.15.17",
     "mypy>=1.11",
     "pre-commit>=3.8",
 ]

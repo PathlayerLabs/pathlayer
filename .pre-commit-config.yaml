@@ -13,8 +13,10 @@ repos:
         args: ["--maxkb=512"]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    # Must match the exact ruff pin in pyproject.toml ([dev]) so local commits
+    # and CI format identically. Bump both together.
+    rev: v0.15.17
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
