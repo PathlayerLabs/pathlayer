@@ -1,0 +1,13 @@
+{
+  "label": "loop",
+  "description": "Retry storm: the agent calls the same deploy endpoint with identical args and gets the same timeout error every time, never backing off or changing approach. Caught by the retry detector (same tool + args + error) and, structurally, by the loop detector (a period-1 repetition).",
+  "metadata": { "curated_by": "RET-1", "fault": "retry_same_error" },
+  "events": [
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } },
+    { "tool": "deploy", "args": { "service": "api", "env": "prod" }, "result": { "error": "ETIMEDOUT" } }
+  ]
+}
