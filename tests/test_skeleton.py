@@ -7,6 +7,8 @@ them (deterministic detectors, passive adapters, graded action ordering).
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from pathlayer.adapters import Adapter
@@ -16,24 +18,29 @@ from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
+from pathlayer.detectors.progress import coding_anchors
 from pathlayer.detectors.resource import ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import PolicyConfig
 
-ALL_DETECTORS = [
+# Factories so detectors that need wiring (NoProgressDetector takes anchors) are
+# built ready-to-use; the contract is identical across all of them.
+ALL_DETECTORS: list[tuple[Callable[[], Detector], str]] = [
     (LoopDetector, "loop"),
     (RetryDetector, "retry"),
     (BudgetDetector, "budget"),
-    (NoProgressDetector, "no_progress"),
+    (lambda: NoProgressDetector(coding_anchors()), "no_progress"),
     (ResourceDetector, "resource"),
 ]
 
 
-@pytest.mark.parametrize(("detector_cls", "expected_name"), ALL_DETECTORS)
-def test_detector_contract(detector_cls: type[Detector], expected_name: str) -> None:
-    detector = detector_cls()
+@pytest.mark.parametrize(
+    ("make_detector", "expected_name"), ALL_DETECTORS, ids=[name for _, name in ALL_DETECTORS]
+)
+def test_detector_contract(make_detector: Callable[[], Detector], expected_name: str) -> None:
+    detector = make_detector()
     assert isinstance(detector, Detector)
     assert detector.name == expected_name
 
@@ -43,10 +50,12 @@ def test_detector_contract(detector_cls: type[Detector], expected_name: str) -> 
     assert 0.0 <= signal.confidence <= 1.0
 
 
-@pytest.mark.parametrize(("detector_cls", "_name"), ALL_DETECTORS)
-def test_detector_is_deterministic(detector_cls: type[Detector], _name: str) -> None:
+@pytest.mark.parametrize(
+    ("make_detector", "_name"), ALL_DETECTORS, ids=[name for _, name in ALL_DETECTORS]
+)
+def test_detector_is_deterministic(make_detector: Callable[[], Detector], _name: str) -> None:
     history = [ToolEvent(tool="read", args={"path": "a.py"}, ts=float(i)) for i in range(5)]
-    detector = detector_cls()
+    detector = make_detector()
     first = detector.evaluate(history)
     second = detector.evaluate(history)
     assert first == second
