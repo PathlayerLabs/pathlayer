@@ -77,7 +77,6 @@ def test_default_policy_config_matches_architecture() -> None:
     assert config.max_same_error == 4
     assert config.max_tool_retries == 3
     assert config.max_cost_usd == 5.0
-    assert config.no_progress_steps == 5
 
 
 def test_policy_uses_provided_config() -> None:

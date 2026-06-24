@@ -135,11 +135,27 @@ def test_golden_healthy_have_no_false_positives() -> None:
     assert report.false_positives == 0
 
 
-def test_golden_no_progress_are_false_negatives_today() -> None:
-    # Documents the current coverage gap: NoProgressDetector is still a stub.
+def test_golden_no_progress_silent_under_default_policy() -> None:
+    # NOP-2 ships in observe mode: under the default policy no_progress is
+    # advisory, so the detector is computed but never STOPs on its own. The
+    # no_progress traces therefore still surface as (intentional) false negatives
+    # until NOP-3 + hysteresis give the signal STOP authority.
     report = score(load_traces(_TRACES_DIR / "no_progress"))
     assert report.true_positives == 0
     assert report.false_negatives == report.pathological_total
+
+
+def test_active_policy_catches_anchored_no_progress() -> None:
+    # Calibration: with the advisory exemption lifted, the one anchored stall in
+    # the corpus (ground-truth tests stay red) is caught, and no healthy trace
+    # turns into a false positive. The unanchored no_progress traces (no test /
+    # exit-code signal) stay out of reach -- they depend on ANC-1, not on these
+    # thresholds, so we do not bend the defaults for them.
+    active = Policy(PolicyConfig(advisory_signals=frozenset()))
+    churn = load_traces(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
+    assert replay_trace(churn[0], policy=active).intervened
+    healthy = score(load_traces(_TRACES_DIR / "healthy"), policy=active)
+    assert healthy.false_positives == 0
 
 
 # --------------------------------------------------------------------------- #

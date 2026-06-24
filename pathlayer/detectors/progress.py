@@ -71,26 +71,42 @@ def _evidence(event: ToolEvent, keys: tuple[str, ...]) -> Mapping[str, Any] | No
     return None
 
 
+def _test_target(event: ToolEvent) -> str:
+    """Key identifying which test suite an event reports on.
+
+    Uses the explicit ``target`` arg when present, else the tool name. This is
+    what lets the level be summed *per suite* instead of comparing the
+    passed-minus-failed of one suite against another (which would manufacture a
+    huge spurious delta when the agent switches suites)."""
+    target = event.args.get("target")
+    return str(target) if target is not None else event.tool
+
+
 class TestProgressAnchor(ProgressAnchor):
     """Ground-truth coding progress from test results.
 
-    The level is ``passed - failed`` of the most recent test event. Returns
-    ``None`` when the history carries no test evidence, so it abstains on a
-    test-less (e.g. non-coding) agent.
+    The level is the **sum over test suites** of ``passed - failed`` of each
+    suite's most recent run (suites keyed by :func:`_test_target`). Summing per
+    suite means switching suites or adding a new (initially red) suite changes
+    the level by that suite's real delta, never by an artefact of comparing two
+    different suites. Returns ``None`` when the history carries no test evidence,
+    so it abstains on a test-less (e.g. non-coding) agent.
     """
 
     name = "coding_tests"
 
     def measure(self, history: Sequence[ToolEvent]) -> float | None:
-        level: float | None = None
+        latest: dict[str, float] = {}
         for event in history:
             source = _evidence(event, _TEST_KEYS)
             if source is None:
                 continue
             passed = _as_int(source.get(_PASSED, 0), default=0)
             failed = _as_int(source.get(_FAILED, 0), default=0)
-            level = float(passed - failed)
-        return level
+            latest[_test_target(event)] = float(passed - failed)
+        if not latest:
+            return None
+        return sum(latest.values())
 
 
 class ExitCodeProgressAnchor(ProgressAnchor):
@@ -128,3 +144,18 @@ def coding_anchors() -> list[ProgressAnchor]:
     that report process status but no test results.
     """
     return [TestProgressAnchor(), ExitCodeProgressAnchor()]
+
+
+def progress_series(
+    anchor: ProgressAnchor, history: Sequence[ToolEvent], window: int
+) -> list[float | None]:
+    """Progress level after each of the last ``window`` events.
+
+    Entry ``i`` is ``anchor.measure`` over the prefix ending at that event, so a
+    detector recovers the progress *series* over time. ``None`` entries mark
+    events where the anchor has no opinion yet (no evidence so far). Pure: same
+    history -> same series.
+    """
+    n = len(history)
+    start = max(0, n - window)
+    return [anchor.measure(history[: i + 1]) for i in range(start, n)]

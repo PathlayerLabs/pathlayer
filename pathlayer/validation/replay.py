@@ -12,9 +12,12 @@ well the detectors behave:
 This is the rig that makes thresholds tunable against data: build a custom
 ``Policy`` and feed it to :func:`score`.
 
-Only ``LoopDetector`` is implemented today; the retry / budget / no_progress
-detectors are stubs, so traces in those classes currently surface as false
-negatives. The harness reports that honestly rather than hiding it.
+``LoopDetector`` and ``NoProgressDetector`` (CUSUM) are wired by default. NOP-2
+ships in observe mode -- ``no_progress`` is advisory in the default policy, so it
+is computed and measured but does not STOP. To measure its quality, replay with
+a policy that lifts the advisory exemption (``advisory_signals=frozenset()``).
+Retry / budget detectors are still stubs (confidence 0), so traces that depend
+on them surface as false negatives; the harness reports that honestly.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from typing import Any
 
 from pathlayer.detectors.base import Detector
 from pathlayer.detectors.loop import LoopDetector
+from pathlayer.detectors.no_progress import NoProgressDetector
+from pathlayer.detectors.progress import coding_anchors
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import PolicyConfig
@@ -36,8 +41,11 @@ HEALTHY_LABEL = "healthy"
 
 
 def _default_detectors() -> list[Detector]:
-    # Only the loop detector is real today; the rest are stubs (confidence 0).
-    return [LoopDetector()]
+    # LoopDetector intervenes; NoProgressDetector (CUSUM) ships in observe mode --
+    # its no_progress signal is advisory in the default policy, so it is computed
+    # and measured but does not STOP unless the policy lifts the exemption. The
+    # remaining retry / budget detectors are still stubs (confidence 0).
+    return [LoopDetector(), NoProgressDetector(coding_anchors())]
 
 
 @dataclass(slots=True)

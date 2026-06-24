@@ -1,4 +1,4 @@
-"""NOP-1: tests for the coding progress anchors and the NoProgressDetector."""
+"""NOP-2: tests for the coding progress anchors and the CUSUM NoProgressDetector."""
 
 from __future__ import annotations
 
@@ -16,13 +16,19 @@ from pathlayer.detectors.progress import (
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Policy
+from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation import load_trace
 
 _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
 
+# Policy that lets the (otherwise advisory) no_progress signal STOP, for
+# measuring detection quality directly.
+_ACTIVE = Policy(PolicyConfig(advisory_signals=frozenset()))
 
-def _tests(passed: int, failed: int) -> ToolEvent:
-    return ToolEvent(tool="run_tests", result={"passed": passed, "failed": failed})
+
+def _tests(passed: int, failed: int, target: str | None = None) -> ToolEvent:
+    args = {"target": target} if target is not None else {}
+    return ToolEvent(tool="run_tests", args=args, result={"passed": passed, "failed": failed})
 
 
 def _edit(patch: str = "tweak") -> ToolEvent:
@@ -37,7 +43,7 @@ def _email(to: str) -> ToolEvent:
     return ToolEvent(tool="send_email", args={"to": to})
 
 
-def _detector(**kwargs: int) -> NoProgressDetector:
+def _detector(**kwargs: float) -> NoProgressDetector:
     return NoProgressDetector(coding_anchors(), **kwargs)
 
 
@@ -60,8 +66,19 @@ def test_test_anchor_level_is_passed_minus_failed() -> None:
     assert TestProgressAnchor().measure([_tests(10, 3)]) == 7.0
 
 
-def test_test_anchor_uses_latest_test_event() -> None:
+def test_test_anchor_uses_latest_result_per_target() -> None:
+    # Same suite re-run -> latest result replaces the earlier one.
     assert TestProgressAnchor().measure([_tests(5, 5), _tests(8, 2)]) == 6.0
+
+
+def test_test_anchor_sums_across_targets() -> None:
+    # Switching to a second suite sums each suite's latest passed-failed instead
+    # of comparing the small suite's level against the big one's (which would
+    # manufacture a huge spurious drop).
+    big = _tests(50, 0, target="tests/test_big.py")
+    small = _tests(2, 8, target="tests/test_small.py")
+    assert TestProgressAnchor().measure([big]) == 50.0
+    assert TestProgressAnchor().measure([big, small]) == 44.0  # 50 + (2 - 8)
 
 
 def test_test_anchor_reads_metadata_evidence() -> None:
@@ -105,11 +122,24 @@ def test_requires_at_least_one_anchor() -> None:
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"no_progress_steps": 0}, {"window": 0}, {"no_progress_steps": 10, "window": 5}],
+    [
+        {"target_rate": 0.0},
+        {"target_rate": -1.0},
+        {"threshold": 0.0},
+        {"window": 10},  # one short of ceil(2.0/0.2) + 1 = 11 -> STOP unreachable
+    ],
 )
-def test_invalid_params_raise(kwargs: dict[str, int]) -> None:
+def test_invalid_params_raise(kwargs: dict[str, float]) -> None:
     with pytest.raises(ValueError):
         _detector(**kwargs)
+
+
+def test_min_window_is_reachable_boundary() -> None:
+    # window = ceil(h/k) + 1 is the smallest that keeps a STOP reachable: a full
+    # window of stagnant steps must push confidence to the default stop_threshold.
+    detector = _detector(window=11)  # defaults k=0.2, h=2.0
+    flat = [_tests(11, 3) for _ in range(11)]
+    assert detector.evaluate(flat).confidence >= 0.9
 
 
 # --------------------------------------------------------------------------- #
@@ -135,43 +165,72 @@ def test_silent_on_real_progress() -> None:
     assert _confidence(_detector(), *history) == 0.0
 
 
-def test_resets_on_improvement() -> None:
-    # Flat for a while, then a genuine improvement clears the stagnation.
+def test_tolerates_noisy_but_upward_progress() -> None:
+    # Upward zigzag (+2, -1, +2, ...): every climb sets a new record and resets
+    # the CUSUM, so genuine red/green churn must not be flagged.
+    history = [
+        _tests(11, 4),  # 7
+        _tests(13, 4),  # 9  record
+        _tests(12, 4),  # 8  dip -1
+        _tests(14, 4),  # 10 record
+        _tests(13, 4),  # 9  dip -1
+        _tests(15, 4),  # 11 record
+    ]
+    assert _confidence(_detector(), *history) == 0.0
+
+
+def test_does_not_fire_on_isolated_regression() -> None:
+    # A single -2 drop is just "no new record" (one stagnant step), never an
+    # instant stop -- the full patience must elapse before firing.
+    conf = _confidence(_detector(), _tests(11, 1), _tests(11, 3))  # 10 -> 8
+    assert conf == pytest.approx(0.1)
+
+
+def test_resets_on_new_record() -> None:
+    # Flat for a while, then a genuine improvement sets a record -> cleared.
     history = [_tests(11, 3), _tests(11, 3), _tests(11, 3), _tests(11, 0)]
     assert _confidence(_detector(), *history) == 0.0
+
+
+def test_cusum_resets_on_none_gap() -> None:
+    # Defensive: a None mid-series (anchor lost its baseline) resets the sum.
+    detector = _detector()
+    assert detector._cusum([8.0, 8.0, 8.0, 8.0]) == pytest.approx(0.6)  # 3 stagnant steps
+    assert detector._cusum([8.0, None, 8.0, 8.0]) == pytest.approx(0.2)  # gap resets, 1 step
 
 
 # --------------------------------------------------------------------------- #
 # NoProgressDetector: firing
 # --------------------------------------------------------------------------- #
 def test_ramps_with_stagnation() -> None:
-    detector = _detector(no_progress_steps=5)
-    # 3 identical test results -> 2 flat transitions -> 2/5.
-    assert _confidence(detector, _tests(11, 3), _tests(11, 3), _tests(11, 3)) == pytest.approx(0.4)
+    # 3 identical results -> 2 stagnant steps -> 2 * 0.2 / 2.0 = 0.2.
+    assert _confidence(_detector(), _tests(11, 3), _tests(11, 3), _tests(11, 3)) == pytest.approx(
+        0.2
+    )
 
 
 def test_fires_at_threshold() -> None:
-    detector = _detector(no_progress_steps=5)
-    # 6 identical test results -> 5 flat transitions -> saturates at 1.0.
-    signal = detector.evaluate([_tests(11, 3) for _ in range(6)])
+    detector = _detector()  # target_rate=0.2, threshold=2.0
+    # 13 identical results -> 12 stagnant steps -> C past threshold -> 1.0.
+    signal = detector.evaluate([_tests(11, 3) for _ in range(13)])
     assert signal.confidence == 1.0
-    assert "without progress" in signal.reason
+    assert "without new progress" in signal.reason
 
 
 def test_flat_with_interleaved_edits_fires() -> None:
     # Genuinely different edits each turn (no repetition) but the test result
-    # never moves: high activity, flat progress.
+    # never moves: high activity, flat progress -- the differentiating case.
     history: list[ToolEvent] = [_tests(11, 3)]
-    for i in range(5):
+    for i in range(10):
         history += [_edit(f"patch {i}"), _tests(11, 3)]
-    assert _confidence(_detector(no_progress_steps=5), *history) == 1.0
+    assert _confidence(_detector(), *history) == 1.0
 
 
 def test_fires_on_exit_code_stall_without_tests() -> None:
     # A shell-only agent (no test results) is measured by the exit-code anchor:
     # one success then a run of failures leaves the success count flat -> fires.
-    history = [_shell(0)] + [_shell(1) for _ in range(6)]
-    assert _confidence(_detector(no_progress_steps=5), *history) == 1.0
+    history = [_shell(0)] + [_shell(1) for _ in range(12)]
+    assert _confidence(_detector(), *history) == 1.0
 
 
 def test_exit_code_success_does_not_mask_test_stall() -> None:
@@ -179,39 +238,51 @@ def test_exit_code_success_does_not_mask_test_stall() -> None:
     # never move. The exit-code anchor abstains because tests are present, so the
     # test stall is not masked and the detector still fires.
     history: list[ToolEvent] = [_tests(11, 3)]
-    for _ in range(5):
+    for _ in range(10):
         history += [_shell(0), _tests(11, 3)]
-    assert _confidence(_detector(no_progress_steps=5), *history) == 1.0
+    assert _confidence(_detector(), *history) == 1.0
 
 
 def test_window_bounds_stagnation() -> None:
-    # The window caps how far back stagnation is counted: with window=5 and 10
-    # flat events, the streak is reported as 5, not 9.
-    detector = _detector(no_progress_steps=3, window=5)
-    signal = detector.evaluate([_tests(11, 3) for _ in range(10)])
-    assert signal.confidence == 1.0
-    assert "5 actions without progress" in signal.reason
+    # The window caps how far back stagnation accumulates: over 20 flat events a
+    # window of 11 only counts 10 stagnant steps, where window 64 counts all 19.
+    flat = [_tests(11, 3) for _ in range(20)]
+    assert "10 steps without new progress" in _detector(window=11).evaluate(flat).reason
+    assert "19 steps without new progress" in _detector(window=64).evaluate(flat).reason
 
 
 # --------------------------------------------------------------------------- #
-# arbitration + golden fixtures
+# arbitration (observe mode) + golden fixtures
 # --------------------------------------------------------------------------- #
-def _run(events: Sequence[ToolEvent]) -> Pipeline:
-    pipeline = Pipeline([_detector(no_progress_steps=5)], Policy())
+def _run(events: Sequence[ToolEvent], policy: Policy | None = None) -> Pipeline:
+    pipeline = Pipeline([_detector()], policy if policy is not None else Policy())
     pipeline.run(events)
     return pipeline
 
 
-def test_pipeline_stops_on_coding_stall() -> None:
+def test_observe_mode_computes_signal_but_does_not_stop() -> None:
+    # Under the default policy no_progress is advisory: the signal is computed
+    # (high confidence) but cannot STOP on its own.
     trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
-    assert _run(trace.events).stopped
-
-
-def test_pipeline_does_not_stop_on_healthy_progress() -> None:
-    trace = load_trace(_TRACES_DIR / "healthy" / "varied_long_run.json")
+    assert _detector().evaluate(trace.events).confidence >= 0.9
     assert not _run(trace.events).stopped
+
+
+def test_active_policy_stops_on_coding_stall() -> None:
+    # With the advisory exemption lifted, the same stall does STOP.
+    trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
+    assert _run(trace.events, _ACTIVE).stopped
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["varied_long_run.json", "noisy_progress.json", "retry_then_succeed.json"],
+)
+def test_active_policy_silent_on_healthy(name: str) -> None:
+    trace = load_trace(_TRACES_DIR / "healthy" / name)
+    assert not _run(trace.events, _ACTIVE).stopped
 
 
 def test_pipeline_does_not_stop_email_agent() -> None:
     # The coding anchor abstains end to end -> the run is never stopped.
-    assert not _run([_email(f"u{i}") for i in range(12)]).stopped
+    assert not _run([_email(f"u{i}") for i in range(12)], _ACTIVE).stopped
