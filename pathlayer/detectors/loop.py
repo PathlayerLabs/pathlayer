@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
-from pathlayer.detectors.canonical import canonicalize
+from pathlayer.detectors.canonical import ToolMasks, canonicalize
 from pathlayer.events import EventKind, ToolEvent
 
 
@@ -27,13 +27,14 @@ class LoopDetector(Detector):
     # consecutive LLM calls is not mistaken for a repeated action.
     event_kinds = frozenset({EventKind.TOOL_CALL})
 
-    def __init__(self, k: int = 2, window: int = 256) -> None:
+    def __init__(self, k: int = 2, window: int = 256, tool_masks: ToolMasks | None = None) -> None:
         if k < 2:
             raise ValueError("k must be >= 2: a loop needs at least two repetitions")
         if window < 2 * k:
             raise ValueError("window must be >= 2 * k to fit at least k repetitions")
         self._k = k
         self._window = window
+        self._tool_masks = tool_masks
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         history = self._relevant(history)
@@ -41,7 +42,7 @@ class LoopDetector(Detector):
         # scanned. Pipeline.process() runs every detector on every event, so an
         # unbounded scan would be ~O(N^3) over a long run; the window keeps it
         # O(window^2) per step regardless of history length.
-        tokens = [canonicalize(event) for event in history[-self._window :]]
+        tokens = [canonicalize(event, self._tool_masks) for event in history[-self._window :]]
         reps, period = self._max_trailing_repetition(tokens)
         if reps < self._k:
             return Signal(self.name, confidence=0.0)

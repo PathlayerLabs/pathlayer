@@ -1,0 +1,16 @@
+{
+  "label": "healthy",
+  "description": "CAN-3 boundary: the agent reads many genuinely different files addressed by a numeric file_id (not a path). The _id suffix must NOT be treated as volatile, otherwise these distinct reads collapse into a false loop. After exploring, an edit and a passing test close the task.",
+  "metadata": { "curated_by": "CAN-3", "boundary": "distinct-ids-not-merged" },
+  "events": [
+    { "tool": "read_file", "args": { "file_id": 101 } },
+    { "tool": "read_file", "args": { "file_id": 102 } },
+    { "tool": "read_file", "args": { "file_id": 103 } },
+    { "tool": "read_file", "args": { "file_id": 104 } },
+    { "tool": "read_file", "args": { "file_id": 105 } },
+    { "tool": "read_file", "args": { "file_id": 106 } },
+    { "tool": "edit_file", "args": { "file_id": 104, "patch": "fix off-by-one in pagination" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_pagination.py" }, "result": { "passed": 11, "failed": 0 } },
+    { "tool": "git_commit", "args": { "message": "fix off-by-one in pagination" } }
+  ]
+}

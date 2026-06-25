@@ -1,0 +1,13 @@
+{
+  "label": "healthy",
+  "description": "CAN-3 residual case: distinct files addressed by a UUID-valued file_id. The default value-shape masking collapses them into a false loop; a per-tool keep override restores distinctness. Lives outside traces/ on purpose: it is a known false positive without configuration, so it must not enter the golden corpus.",
+  "metadata": { "curated_by": "CAN-3", "boundary": "uuid-valued-id" },
+  "events": [
+    { "tool": "read_file", "args": { "file_id": "550e8400-e29b-41d4-a716-446655440000" } },
+    { "tool": "read_file", "args": { "file_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479" } },
+    { "tool": "read_file", "args": { "file_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8" } },
+    { "tool": "read_file", "args": { "file_id": "6ba7b811-9dad-11d1-80b4-00c04fd430c8" } },
+    { "tool": "read_file", "args": { "file_id": "6ba7b812-9dad-11d1-80b4-00c04fd430c8" } },
+    { "tool": "read_file", "args": { "file_id": "16fd2706-8baf-433b-82eb-8c7fada847da" } }
+  ]
+}

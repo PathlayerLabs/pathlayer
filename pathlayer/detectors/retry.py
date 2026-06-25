@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
-from pathlayer.detectors.canonical import canonicalize
+from pathlayer.detectors.canonical import ToolMasks, canonicalize
 from pathlayer.events import EventKind, ToolEvent
 
 
@@ -49,10 +49,11 @@ class RetryDetector(Detector):
     # must not break the streak, so reason over tool events only.
     event_kinds = frozenset({EventKind.TOOL_CALL})
 
-    def __init__(self, threshold: int = 3) -> None:
+    def __init__(self, threshold: int = 3, tool_masks: ToolMasks | None = None) -> None:
         if threshold < 2:
             raise ValueError("threshold must be >= 2: a retry needs at least two attempts")
         self._threshold = threshold
+        self._tool_masks = tool_masks
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         history = self._relevant(history)
@@ -65,10 +66,10 @@ class RetryDetector(Detector):
             # The most recent attempt did not fail -> not stuck retrying.
             return Signal(self.name, confidence=0.0)
 
-        token = canonicalize(last)
+        token = canonicalize(last, self._tool_masks)
         reps = 1
         for event in reversed(history[:-1]):
-            if canonicalize(event) == token and _error_of(event) == error:
+            if canonicalize(event, self._tool_masks) == token and _error_of(event) == error:
                 reps += 1
             else:
                 break

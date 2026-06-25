@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pathlayer.detectors.canonical import ToolMask
+from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import ToolEvent
 from pathlayer.policies import Policy
 from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation import (
     Report,
     Trace,
+    load_trace,
     load_traces,
     replay_trace,
     score,
@@ -17,6 +20,7 @@ from pathlayer.validation import (
 from pathlayer.validation.replay import main
 
 _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def _loop(label: str = "loop", *, repeats: int = 8, cost: float = 1.0) -> Trace:
@@ -157,6 +161,19 @@ def test_active_policy_catches_anchored_no_progress() -> None:
     assert replay_trace(churn[0], policy=active).intervened
     healthy = score(load_traces(_TRACES_DIR / "healthy"), policy=active)
     assert healthy.false_positives == 0
+
+
+# --------------------------------------------------------------------------- #
+# CAN-3: UUID-valued id false merge, fixed by a per-tool keep config
+# --------------------------------------------------------------------------- #
+def test_can3_uuid_id_false_loop_is_fixed_by_keep_config() -> None:
+    trace = load_trace(_FIXTURES_DIR / "can3_uuid_reads.json")
+    # Default canonicalization masks the UUID-valued file_id by value shape, so
+    # genuinely distinct reads collapse into one token -> false loop.
+    assert replay_trace(trace, detectors=[LoopDetector()]).intervened
+    # Declaring file_id as kept for read_file restores distinctness -> no loop.
+    masks = {"read_file": ToolMask(keep=frozenset({"file_id"}))}
+    assert not replay_trace(trace, detectors=[LoopDetector(tool_masks=masks)]).intervened
 
 
 # --------------------------------------------------------------------------- #
