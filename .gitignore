@@ -38,6 +38,8 @@ cursor.md
 .cursor/rules/communication-style.mdc
 .cursor/rules/architecture-guardrails.mdc
 .cursor/rules/pr-self-review.mdc
+.cursor/rules/work-plan.mdc
+.cursor/rules/copilot-comment-handling.mdc
 
 # Local one-off helper (chat history migration after the OneDrive move)
 restore-chats.sh
