@@ -20,10 +20,25 @@ delta CUSUM, a single regression (TDD red, a growing suite) is just "no new
 record" (one ``+target_rate`` step), so it never triggers an instant stop -- the
 full patience must elapse before firing.
 
-NOP-2 ships as an *advisory* signal (observe mode): the policy computes and logs
-its confidence but does not let it STOP on its own until NOP-3 (activity vs
-progress) and hysteresis (ARB-3) can tell "done" apart from "stuck". See
-``PolicyConfig.advisory_signals``.
+NOP-3 makes this signal *actionable* (it can STOP). The piece that earlier kept
+it advisory was telling "done" from "stuck": a flat level after success looks
+like a stall. That is now resolved by anchor success suppression -- the detector
+stays silent while any applicable anchor reports ``is_satisfied`` (e.g. a green
+test suite), so a succeeded agent is never stopped. A runaway that keeps acting
+*after* success is a cost/resource concern (``BudgetDetector`` /
+``ResourceDetector``), not a no-progress one.
+
+The "activity-without-progress ratio" sketched in the NOP-3 issue is not a
+separate mechanism here: the record-based CUSUM already counts the active steps
+that fail to advance, so a second ratio detector would be redundant under sane
+thresholds. The issue's intent is met by the CUSUM.
+
+Known limitation: the signal is only as good as its anchor. An agent that builds
+genuine code for a long stretch *before its first passing test* shows a flat (or
+falling) test level the whole time, which is indistinguishable from a real stall
+and can fire. This is an anchor blind spot, not a detector bug -- a richer anchor
+(e.g. NOP-4 git diff) or threshold calibration on labeled traces is the fix, not
+a special case here.
 """
 
 from __future__ import annotations
@@ -69,6 +84,12 @@ class NoProgressDetector(Detector):
         applicable = [anchor for anchor in self._anchors if anchor.measure(history) is not None]
         if not applicable:
             # No anchor can measure this agent -> stay silent.
+            return Signal(self.name, confidence=0.0)
+        # Success suppression: if any applicable anchor is at its success state
+        # (e.g. a green test suite), a flat level is "nothing left to fix", not a
+        # stall -- stay silent so a succeeded agent is never stopped. This is the
+        # brake that makes the no-progress signal safe to act on (STOP).
+        if any(anchor.is_satisfied(history) for anchor in applicable):
             return Signal(self.name, confidence=0.0)
         # One CUSUM per applicable anchor; take the most optimistic (smallest):
         # if any anchor still sets records the agent is advancing.

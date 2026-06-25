@@ -11,6 +11,13 @@ evidence in the history (e.g. the coding anchors on an email agent). ``None``
 means "no opinion", never "no progress" -- this is what prevents a false
 positive on an agent the anchor was never built for.
 
+Success suppression: ``is_satisfied`` reports when the signal is at its success
+state (e.g. a green test suite). A flat level *there* is normal, not a stall, so
+``NoProgressDetector`` stays silent while an applicable anchor is satisfied --
+the brake that lets the no-progress signal STOP without halting an agent that
+has actually succeeded. The default is ``False`` (an anchor with no notion of
+success never suppresses).
+
 The coding anchors are grounded on deterministic ground truth the events
 already carry -- test ``passed`` / ``failed`` counts and process ``exit_code``
 -- not text similarity. They are split so each anchor stays on a *single* scale:
@@ -52,6 +59,18 @@ class ProgressAnchor(ABC):
         """
         raise NotImplementedError
 
+    def is_satisfied(self, history: Sequence[ToolEvent]) -> bool:
+        """Whether the progress signal is currently at its *success* state.
+
+        "Satisfied" means "nothing broken left to fix right now" (e.g. a green
+        test suite), not "the whole task is provably finished". A flat progress
+        level *at* this state is normal, not a stall, so ``NoProgressDetector``
+        stays silent while an applicable anchor is satisfied. Default ``False``:
+        an anchor that has no notion of success never suppresses the detector.
+        Pure and deterministic, like :meth:`measure`.
+        """
+        return False
+
 
 def _as_int(value: Any, *, default: int) -> int:
     try:
@@ -82,6 +101,25 @@ def _test_target(event: ToolEvent) -> str:
     return str(target) if target is not None else event.tool
 
 
+def _latest_test_results(history: Sequence[ToolEvent]) -> dict[str, tuple[int, int]]:
+    """Most recent ``(passed, failed)`` per test suite, keyed by :func:`_test_target`.
+
+    Shared by :meth:`TestProgressAnchor.measure` (which sums ``passed - failed``)
+    and :meth:`TestProgressAnchor.is_satisfied` (which checks the totals), so both
+    aggregate per suite identically: a green re-run of suite A can never mask a
+    still-red suite B.
+    """
+    latest: dict[str, tuple[int, int]] = {}
+    for event in history:
+        source = _evidence(event, _TEST_KEYS)
+        if source is None:
+            continue
+        passed = _as_int(source.get(_PASSED, 0), default=0)
+        failed = _as_int(source.get(_FAILED, 0), default=0)
+        latest[_test_target(event)] = (passed, failed)
+    return latest
+
+
 class TestProgressAnchor(ProgressAnchor):
     """Ground-truth coding progress from test results.
 
@@ -91,22 +129,29 @@ class TestProgressAnchor(ProgressAnchor):
     the level by that suite's real delta, never by an artefact of comparing two
     different suites. Returns ``None`` when the history carries no test evidence,
     so it abstains on a test-less (e.g. non-coding) agent.
+
+    ``is_satisfied`` is ``True`` once every suite's latest run is green
+    (total ``failed == 0``) with at least one passing test (total ``passed > 0``,
+    so an empty "0 passed / 0 failed" run is not mistaken for success).
     """
 
     name = "coding_tests"
 
     def measure(self, history: Sequence[ToolEvent]) -> float | None:
-        latest: dict[str, float] = {}
-        for event in history:
-            source = _evidence(event, _TEST_KEYS)
-            if source is None:
-                continue
-            passed = _as_int(source.get(_PASSED, 0), default=0)
-            failed = _as_int(source.get(_FAILED, 0), default=0)
-            latest[_test_target(event)] = float(passed - failed)
+        latest = _latest_test_results(history)
         if not latest:
             return None
-        return sum(latest.values())
+        return float(sum(passed - failed for passed, failed in latest.values()))
+
+    def is_satisfied(self, history: Sequence[ToolEvent]) -> bool:
+        latest = _latest_test_results(history)
+        if not latest:
+            return False
+        # Per suite, not on totals: every suite must be individually green
+        # (failed == 0) *and* carry a real result (passed > 0). Checking totals
+        # would let a passing suite mask a sibling at 0/0 ("no signal"), wrongly
+        # suppressing the detector while that empty suite stalls.
+        return all(failed == 0 and passed > 0 for passed, failed in latest.values())
 
 
 class ExitCodeProgressAnchor(ProgressAnchor):

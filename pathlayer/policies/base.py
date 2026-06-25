@@ -23,11 +23,12 @@ from pathlayer.detectors.base import Signal
 from pathlayer.policies.actions import Action
 
 # Signals delivered in "observe" mode: computed and logged, but excluded from
-# the STOP decision. NOP-2 (no_progress) ships here because, on its own, it
-# cannot tell "task done" from "stuck" (a plateau after success looks like a
-# stall). It earns STOP authority once NOP-3 (activity vs progress) and
-# hysteresis (ARB-3) are in place. Minimal precursor to dry-run mode (OBS-3).
-DEFAULT_ADVISORY_SIGNALS: frozenset[str] = frozenset({"no_progress"})
+# the STOP decision. Empty by default since NOP-3: no_progress earns STOP
+# authority because anchor success suppression (``ProgressAnchor.is_satisfied``)
+# resolves the "done vs stuck" ambiguity that previously kept it advisory.
+# Kept as a configurable knob -- a minimal precursor to dry-run mode (OBS-3),
+# and any detector can be made observe-only per deployment.
+DEFAULT_ADVISORY_SIGNALS: frozenset[str] = frozenset()
 
 
 @dataclass(slots=True)

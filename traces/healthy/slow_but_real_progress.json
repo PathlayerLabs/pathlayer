@@ -1,0 +1,26 @@
+{
+  "label": "healthy",
+  "description": "Genuine but slow progress: the agent sets a new ground-truth record (passed-minus-failed climbs 0 -> 2 -> 4 -> 6) only every few edits, with flat stretches in between. Each stretch is shorter than the CUSUM patience, so confidence rises but never reaches the stop threshold and every new record resets it. Guards NOP-3 against stopping an honest-but-slow agent (false positive on legitimate work).",
+  "metadata": { "curated_by": "NOP-3", "boundary": "slow-but-progressing" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "tests/test_engine.py" }, "result": { "passed": 6, "failed": 6 } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "extract helper a" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "extract helper b" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "inline constant c" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "guard none case d" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "reorder branch e" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_engine.py" }, "result": { "passed": 8, "failed": 6 } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "fix off by one f" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "normalize key g" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "cache lookup h" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "handle empty i" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "tighten type j" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_engine.py" }, "result": { "passed": 10, "failed": 6 } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "split function k" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "rename param l" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "add fast path m" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "drop dead code n" } },
+    { "tool": "edit_file", "args": { "path": "src/engine.py", "patch": "clarify error o" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_engine.py" }, "result": { "passed": 12, "failed": 6 } }
+  ]
+}

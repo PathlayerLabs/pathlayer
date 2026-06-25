@@ -11,11 +11,10 @@ drive the **existing** detectors through the **existing** ``Pipeline`` + default
                      -> STOP.
 * (c) NO-PROGRESS -- many *different* calls, flat ground-truth progress signal
                      -> ``NoProgressDetector`` fires (the differentiated "$47k"
-                     case) while ``LoopDetector`` stays silent. In V1 (NOP-2)
-                     this signal is **advisory**: the default ``Policy`` logs it
-                     but never STOPs on it alone (``DEFAULT_ADVISORY_SIGNALS``),
-                     so we prove the detector saturates *and* that only the
-                     policy inhibits the stop (a non-advisory policy does stop).
+                     case) while ``LoopDetector`` stays silent. Since NOP-3 this
+                     signal is **actionable**: the default ``Policy`` STOPs on it.
+                     Success suppression keeps a *green* suite from being stopped,
+                     but here the suite stays red, so the run is halted.
 * (d) BUDGET      -- documents a real limitation: the ADP-0 adapter never
                      populates ``cost_usd``, so ``BudgetDetector`` cannot fire
                      from captured events alone.
@@ -120,8 +119,8 @@ def _all_detectors() -> list:
 def _stops(events: list[ToolEvent], policy: Policy | None = None) -> bool:
     """Replay captured events through Pipeline + a Policy; did it STOP?
 
-    Defaults to the production ``Policy`` (no_progress advisory). Pass a custom
-    policy to probe a different arbitration (e.g. no advisory exclusion).
+    Defaults to the production ``Policy`` (no_progress actionable since NOP-3).
+    Pass a custom policy to probe a different arbitration.
     """
     pipeline = Pipeline(_all_detectors(), policy or Policy())
     pipeline.run(events)
@@ -214,11 +213,11 @@ def test_no_progress_detected_with_flat_ground_truth() -> None:
     # The repetition detectors are not fooled into firing on varied activity.
     assert LoopDetector().evaluate(events).confidence == 0.0
     assert RetryDetector().evaluate(events).confidence == 0.0
-    # (b) no_progress is advisory in V1 (NOP-2): the default Policy logs it but
-    # never STOPs on it alone (it cannot yet tell "task done" from "stuck").
-    assert not _stops(events)
-    # (c) Strip the advisory exclusion and the *same* signal stops the run --
-    # proving only the policy inhibits the stop, not a weak detector.
+    # (b) Since NOP-3 no_progress is actionable: the default Policy STOPs on the
+    # saturated signal. The flat suite stays red, so success suppression does not
+    # apply (it would silence a *green* suite, not this one).
+    assert _stops(events)
+    # (c) Still stops under an explicitly non-advisory policy (regression anchor).
     assert _stops(events, _actionable_policy())
 
 

@@ -252,7 +252,65 @@ def test_window_bounds_stagnation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# arbitration (observe mode) + golden fixtures
+# success suppression (is_satisfied): "done" vs "stuck"
+# --------------------------------------------------------------------------- #
+def test_test_anchor_satisfied_when_all_green() -> None:
+    assert TestProgressAnchor().is_satisfied([_tests(14, 0)]) is True
+
+
+def test_test_anchor_not_satisfied_with_failures() -> None:
+    assert TestProgressAnchor().is_satisfied([_tests(11, 3)]) is False
+
+
+def test_test_anchor_not_satisfied_without_passed() -> None:
+    # An empty "0 passed / 0 failed" run is no signal, not a success.
+    assert TestProgressAnchor().is_satisfied([_tests(0, 0)]) is False
+
+
+def test_test_anchor_not_satisfied_without_evidence() -> None:
+    assert TestProgressAnchor().is_satisfied([_email("a")]) is False
+    assert TestProgressAnchor().is_satisfied([]) is False
+
+
+def test_test_anchor_satisfied_requires_every_suite_green() -> None:
+    # Per-suite aggregation: a green re-run of A must not mask a still-red B.
+    green_a = _tests(5, 0, target="tests/test_a.py")
+    red_b = _tests(2, 8, target="tests/test_b.py")
+    assert TestProgressAnchor().is_satisfied([green_a]) is True
+    assert TestProgressAnchor().is_satisfied([green_a, red_b]) is False
+
+
+def test_test_anchor_not_satisfied_when_a_sibling_suite_is_empty() -> None:
+    # A passing suite must not mask a sibling at 0/0 ("no signal"): checking
+    # per suite, the empty suite is not satisfied, so the whole is not either.
+    green_a = _tests(5, 0, target="tests/test_a.py")
+    empty_b = _tests(0, 0, target="tests/test_b.py")
+    assert TestProgressAnchor().is_satisfied([green_a, empty_b]) is False
+
+
+def test_exit_code_anchor_never_satisfied() -> None:
+    # exit_code 0 means "this command succeeded", not "the task is done".
+    assert ExitCodeProgressAnchor().is_satisfied([_shell(0), _shell(0)]) is False
+
+
+def test_detector_silent_once_suite_goes_green() -> None:
+    # A stall that ends green is "fixed", not stuck: success suppression returns
+    # 0 even though the earlier steps were flat-red.
+    history = [_tests(11, 3) for _ in range(5)] + [_tests(14, 0)]
+    assert _confidence(_detector(), *history) == 0.0
+
+
+def test_detector_stays_active_while_a_suite_is_red() -> None:
+    # Suite A is green but suite B keeps failing flat: total failed > 0, so the
+    # detector is not suppressed and the stall on B still fires.
+    history = [_tests(5, 0, target="tests/test_a.py")] + [
+        _tests(2, 8, target="tests/test_b.py") for _ in range(13)
+    ]
+    assert _confidence(_detector(), *history) == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# arbitration: no_progress is actionable by default (NOP-3) + golden fixtures
 # --------------------------------------------------------------------------- #
 def _run(events: Sequence[ToolEvent], policy: Policy | None = None) -> Pipeline:
     pipeline = Pipeline([_detector()], policy if policy is not None else Policy())
@@ -260,29 +318,36 @@ def _run(events: Sequence[ToolEvent], policy: Policy | None = None) -> Pipeline:
     return pipeline
 
 
-def test_observe_mode_computes_signal_but_does_not_stop() -> None:
-    # Under the default policy no_progress is advisory: the signal is computed
-    # (high confidence) but cannot STOP on its own.
+def test_default_policy_stops_on_coding_stall() -> None:
+    # Since NOP-3 no_progress is actionable: the anchored stall that used to be
+    # observe-only now STOPs under the default policy.
     trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
     assert _detector().evaluate(trace.events).confidence >= 0.9
-    assert not _run(trace.events).stopped
+    assert _run(trace.events).stopped
 
 
-def test_active_policy_stops_on_coding_stall() -> None:
-    # With the advisory exemption lifted, the same stall does STOP.
+def test_active_policy_also_stops_on_coding_stall() -> None:
+    # Pinned explicitly with an empty advisory set (equivalent to the default).
     trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
     assert _run(trace.events, _ACTIVE).stopped
 
 
 @pytest.mark.parametrize(
     "name",
-    ["varied_long_run.json", "noisy_progress.json", "retry_then_succeed.json"],
+    [
+        "varied_long_run.json",
+        "noisy_progress.json",
+        "retry_then_succeed.json",
+        "plateau_after_success.json",
+        "slow_but_real_progress.json",
+        "finished_without_tests.json",
+    ],
 )
-def test_active_policy_silent_on_healthy(name: str) -> None:
+def test_default_policy_silent_on_healthy(name: str) -> None:
     trace = load_trace(_TRACES_DIR / "healthy" / name)
-    assert not _run(trace.events, _ACTIVE).stopped
+    assert not _run(trace.events).stopped
 
 
 def test_pipeline_does_not_stop_email_agent() -> None:
     # The coding anchor abstains end to end -> the run is never stopped.
-    assert not _run([_email(f"u{i}") for i in range(12)], _ACTIVE).stopped
+    assert not _run([_email(f"u{i}") for i in range(12)]).stopped

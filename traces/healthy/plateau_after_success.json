@@ -1,0 +1,19 @@
+{
+  "label": "healthy",
+  "description": "The agent fixes a suite to all-green, then keeps polishing without breaking anything: progress plateaus at success (failed==0). A plateau here is 'nothing left to fix', not a stall, so NoProgressDetector must stay silent via anchor success suppression (is_satisfied). Guards NOP-3 against stopping an agent that has actually succeeded.",
+  "metadata": { "curated_by": "NOP-3", "boundary": "plateau-after-success" },
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "handle empty input" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 9, "failed": 5 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "fix delimiter split" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 12, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "fix trailing comma" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 14, "failed": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "add docstring" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 14, "failed": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "rename local var" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 14, "failed": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/parse.py", "patch": "tidy imports" } },
+    { "tool": "run_tests", "args": { "target": "tests/test_parse.py" }, "result": { "passed": 14, "failed": 0 } }
+  ]
+}

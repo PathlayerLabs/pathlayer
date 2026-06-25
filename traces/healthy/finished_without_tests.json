@@ -1,0 +1,17 @@
+{
+  "label": "healthy",
+  "description": "A research agent completes a summary task, then keeps issuing low-value follow-up searches. It carries no test or exit-code evidence, so the coding anchors abstain and NoProgressDetector stays silent -- we never stop an agent we cannot measure. Documents the F1.1 limit: 'finished' outside the test signal is handled by anchor abstention, not by is_satisfied.",
+  "metadata": { "curated_by": "NOP-3", "boundary": "finished-without-anchor" },
+  "events": [
+    { "tool": "search", "args": { "query": "transformer attention complexity" } },
+    { "tool": "summarize", "args": { "doc": "attention-survey", "section": "intro" } },
+    { "tool": "search", "args": { "query": "flash attention memory savings" } },
+    { "tool": "summarize", "args": { "doc": "flash-attention", "section": "method" } },
+    { "tool": "write_report", "args": { "title": "attention efficiency overview" } },
+    { "tool": "search", "args": { "query": "linear attention benchmarks 2025" } },
+    { "tool": "search", "args": { "query": "rotary embeddings long context" } },
+    { "tool": "search", "args": { "query": "sliding window attention recall" } },
+    { "tool": "search", "args": { "query": "kv cache quantization tradeoffs" } },
+    { "tool": "search", "args": { "query": "speculative decoding throughput" } }
+  ]
+}

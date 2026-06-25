@@ -12,12 +12,12 @@ well the detectors behave:
 This is the rig that makes thresholds tunable against data: build a custom
 ``Policy`` and feed it to :func:`score`.
 
-``LoopDetector`` and ``NoProgressDetector`` (CUSUM) are wired by default. NOP-2
-ships in observe mode -- ``no_progress`` is advisory in the default policy, so it
-is computed and measured but does not STOP. To measure its quality, replay with
-a policy that lifts the advisory exemption (``advisory_signals=frozenset()``).
-Retry / budget detectors are still stubs (confidence 0), so traces that depend
-on them surface as false negatives; the harness reports that honestly.
+``LoopDetector`` and ``NoProgressDetector`` (CUSUM) are wired by default. Since
+NOP-3 the ``no_progress`` signal is actionable in the default policy, so an
+anchored stall STOPs without any custom policy. The ``BudgetDetector`` and
+``RetryDetector`` are implemented but not wired into the default detector set
+here, so traces that depend on them surface as false negatives; the harness
+reports that honestly.
 """
 
 from __future__ import annotations
@@ -41,10 +41,10 @@ HEALTHY_LABEL = "healthy"
 
 
 def _default_detectors() -> list[Detector]:
-    # LoopDetector intervenes; NoProgressDetector (CUSUM) ships in observe mode --
-    # its no_progress signal is advisory in the default policy, so it is computed
-    # and measured but does not STOP unless the policy lifts the exemption. The
-    # remaining retry / budget detectors are still stubs (confidence 0).
+    # LoopDetector and NoProgressDetector (CUSUM) both intervene by default: since
+    # NOP-3 no_progress is actionable, so an anchored stall STOPs without a custom
+    # policy. RetryDetector and BudgetDetector are implemented but intentionally
+    # not wired here, so traces that depend on them surface as false negatives.
     return [LoopDetector(), NoProgressDetector(coding_anchors())]
 
 
