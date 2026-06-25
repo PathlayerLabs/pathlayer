@@ -18,11 +18,14 @@ from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.canonical import canonicalize
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 
 
 class LoopDetector(Detector):
     name = "loop"
+    # Only agent actions can form a loop; ignore LLM-cost events so a run of
+    # consecutive LLM calls is not mistaken for a repeated action.
+    event_kinds = frozenset({EventKind.TOOL_CALL})
 
     def __init__(self, k: int = 2, window: int = 256) -> None:
         if k < 2:
@@ -33,6 +36,7 @@ class LoopDetector(Detector):
         self._window = window
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        history = self._relevant(history)
         # Bound per-step cost: only the recent tail window is canonicalized and
         # scanned. Pipeline.process() runs every detector on every event, so an
         # unbounded scan would be ~O(N^3) over a long run; the window keeps it

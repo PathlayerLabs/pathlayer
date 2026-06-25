@@ -10,6 +10,15 @@ lineage** -- ``parent_run_id`` is stored in ``metadata`` so delegation depth can
 be reconstructed offline later. We do *not* classify ``SUBAGENT_SPAWN`` (a
 name-based heuristic would be noisy); lifecycle events are out of scope here.
 
+LLM cost (issue #77): ``on_llm_start``/``on_llm_end`` are paired by ``run_id``
+(like tools) to emit a dedicated ``EventKind.LLM_CALL`` event carrying the
+token cost in ``cost_usd``, so ``BudgetDetector`` can guard model spend (the
+real cost is in tokens, not tool calls). Tokens come from the model response
+(``usage_metadata`` per generation, falling back to ``llm_output``); the price
+table lives in :mod:`pathlayer.pricing` and is overridable via ``prices``.
+Missing tokens or an unpriceable model yield ``cost_usd=0.0`` (never a crash).
+Action detectors ignore ``LLM_CALL`` events via their ``event_kinds`` filter.
+
 Thread-safety: a single sync handler serves async runs too -- LangChain invokes
 sync callbacks from a thread pool (``run_in_executor``) during ``ainvoke``. A
 :class:`threading.Lock` therefore guards the ``pending`` map, the ``ts`` counter
@@ -28,14 +37,17 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 
 from pathlayer.adapters.base import Adapter, EventSink
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
+from pathlayer.pricing import ModelPrice, cost_of
 
 # Bound on un-paired ``on_tool_start`` calls held in ``_pending``. A start that
 # is never followed by an end/error (cancelled coroutine, interrupted run, a
@@ -73,6 +85,61 @@ class _Pending:
     parent_run_id: str | None
 
 
+@dataclass(slots=True)
+class _PendingLLM:
+    """An LLM call seen at ``on_llm_start``, awaiting its end/error."""
+
+    model: str | None
+    parent_run_id: str | None
+
+
+def _model_from_serialized(serialized: dict[str, Any] | None) -> str | None:
+    """Best-effort model id from an ``on_llm_start`` ``serialized`` payload."""
+    if not serialized:
+        return None
+    kwargs = serialized.get("kwargs") or {}
+    model = kwargs.get("model") or kwargs.get("model_name")
+    return str(model) if model else None
+
+
+def _extract_tokens(response: LLMResult) -> tuple[int, int]:
+    """Return ``(input_tokens, output_tokens)`` from an ``LLMResult``.
+
+    Prefers per-generation ``message.usage_metadata`` (chat models); falls back
+    to ``llm_output["token_usage"]`` (``prompt_tokens``/``completion_tokens``).
+    Returns ``(0, 0)`` when neither is present (some providers report nothing).
+    """
+    input_tokens = 0
+    output_tokens = 0
+    found = False
+    for generations in response.generations:
+        # ``generations`` is the candidate list for one prompt; usage is reported
+        # once per call, so count the first candidate that carries it and stop --
+        # summing every candidate would multiply the (shared) prompt tokens when
+        # n > 1. The outer loop still sums across prompts in a batch.
+        for generation in generations:
+            message = getattr(generation, "message", None)
+            usage = getattr(message, "usage_metadata", None) if message is not None else None
+            if usage:
+                input_tokens += int(usage.get("input_tokens", 0) or 0)
+                output_tokens += int(usage.get("output_tokens", 0) or 0)
+                found = True
+                break
+    if found:
+        return input_tokens, output_tokens
+    token_usage = (response.llm_output or {}).get("token_usage") or {}
+    return (
+        int(token_usage.get("prompt_tokens", 0) or 0),
+        int(token_usage.get("completion_tokens", 0) or 0),
+    )
+
+
+def _model_from_response(response: LLMResult) -> str | None:
+    """Model id reported on the response, if any (``llm_output['model_name']``)."""
+    model = (response.llm_output or {}).get("model_name")
+    return str(model) if model else None
+
+
 class LangGraphAdapter(Adapter):
     """Capture tool calls from a LangGraph/LangChain run.
 
@@ -88,23 +155,27 @@ class LangGraphAdapter(Adapter):
     routes its callbacks to this adapter's handler.
     """
 
-    def __init__(self, sink: EventSink) -> None:
+    def __init__(self, sink: EventSink, prices: Mapping[str, ModelPrice] | None = None) -> None:
         super().__init__(sink)
         self._handler = _LangChainCaptureHandler(self)
         self._lock = threading.Lock()
         self._pending: OrderedDict[str, _Pending] = OrderedDict()
+        self._pending_llm: OrderedDict[str, _PendingLLM] = OrderedDict()
         self._ts = 0
+        self._prices = prices
 
     def attach(self) -> None:
         """Reset capture state (deterministic ``ts`` per attached run)."""
         with self._lock:
             self._pending.clear()
+            self._pending_llm.clear()
             self._ts = 0
 
     def detach(self) -> None:
         """Drop any unpaired pending calls; the handler keeps no other state."""
         with self._lock:
             self._pending.clear()
+            self._pending_llm.clear()
 
     def as_config(self) -> dict[str, Any]:
         """Return a LangChain ``RunnableConfig`` wiring our capture handler."""
@@ -150,6 +221,48 @@ class LangGraphAdapter(Adapter):
                     ts=ts,
                     run_id=run_id,
                     metadata=metadata,
+                )
+            )
+
+    def _record_llm_start(self, run_id: str, parent_run_id: str | None, model: str | None) -> None:
+        with self._lock:
+            self._pending_llm[run_id] = _PendingLLM(model=model, parent_run_id=parent_run_id)
+            # Bound the map: drop the oldest never-paired start if we exceed the cap.
+            if len(self._pending_llm) > _MAX_PENDING:
+                self._pending_llm.popitem(last=False)
+
+    def _record_llm_error(self, run_id: str) -> None:
+        with self._lock:
+            self._pending_llm.pop(run_id, None)
+
+    def _record_llm_end(self, run_id: str, response: LLMResult) -> None:
+        """Pair an ``on_llm_end`` with its start and emit a priced LLM event.
+
+        Like :meth:`_emit_paired`, the pop + ``ts`` allocation + :meth:`emit` are
+        held under the lock so LLM and tool events share one monotonic ``ts``.
+        The model on the response takes precedence over the one seen at start.
+        """
+        input_tokens, output_tokens = _extract_tokens(response)
+        with self._lock:
+            pending = self._pending_llm.pop(run_id, None)
+            if pending is None:
+                return
+            model = _model_from_response(response) or pending.model
+            cost = cost_of(model, input_tokens, output_tokens, self._prices)
+            ts = self._ts
+            self._ts += 1
+            self.emit(
+                ToolEvent(
+                    tool=model or "<llm>",
+                    cost_usd=cost,
+                    ts=ts,
+                    kind=EventKind.LLM_CALL,
+                    run_id=run_id,
+                    metadata={
+                        "parent_run_id": pending.parent_run_id,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    },
                 )
             )
 
@@ -202,3 +315,51 @@ class _LangChainCaptureHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self._adapter._record_error(str(run_id), error)
+
+    def on_llm_start(
+        self,
+        serialized: dict[str, Any] | None,
+        prompts: list[str],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._adapter._record_llm_start(
+            str(run_id), _parent(parent_run_id), _model_from_serialized(serialized)
+        )
+
+    def on_chat_model_start(
+        self,
+        serialized: dict[str, Any] | None,
+        messages: list[list[Any]],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # Chat models fire ``on_chat_model_start`` instead of ``on_llm_start``;
+        # both terminate in ``on_llm_end``, so register the pending call here too.
+        self._adapter._record_llm_start(
+            str(run_id), _parent(parent_run_id), _model_from_serialized(serialized)
+        )
+
+    def on_llm_end(
+        self,
+        response: LLMResult,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._adapter._record_llm_end(str(run_id), response)
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._adapter._record_llm_error(str(run_id))

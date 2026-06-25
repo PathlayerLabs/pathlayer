@@ -15,9 +15,10 @@ drive the **existing** detectors through the **existing** ``Pipeline`` + default
                      signal is **actionable**: the default ``Policy`` STOPs on it.
                      Success suppression keeps a *green* suite from being stopped,
                      but here the suite stays red, so the run is halted.
-* (d) BUDGET      -- documents a real limitation: the ADP-0 adapter never
-                     populates ``cost_usd``, so ``BudgetDetector`` cannot fire
-                     from captured events alone.
+* (d) BUDGET      -- captured ``LLM_CALL`` cost (issue #77) drives
+                     ``BudgetDetector`` to STOP once spend crosses the ceiling,
+                     while loop/no_progress stay silent (varied tools, no test
+                     evidence), proving the STOP is on budget alone.
 
 Each scenario carries a numeric assertion on the detector confidence *and* a
 negative (healthy) counterpart, so a false positive would fail the suite too.
@@ -28,11 +29,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TypedDict
+from uuid import uuid4
 
 import pytest
 
 pytest.importorskip("langchain_core")
 
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.tools import tool
 
 from pathlayer import Pipeline
@@ -42,7 +46,7 @@ from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors
 from pathlayer.detectors.retry import RetryDetector
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.policies import Policy
 from pathlayer.policies.base import PolicyConfig
 
@@ -238,31 +242,62 @@ def test_no_progress_negative_improving_tests_stay_silent() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (d) BUDGET -- documented limitation of the ADP-0 adapter
+# (d) BUDGET -- model spend is now captured (issue #77): the adapter emits
+#     priced LLM_CALL events, so BudgetDetector stops on real model cost.
 # --------------------------------------------------------------------------- #
 
 
-def test_budget_cannot_fire_because_adapter_drops_cost() -> None:
-    # FINDING: the LangGraph adapter only hooks tool callbacks and never sets
-    # ToolEvent.cost_usd (no on_llm_end token-usage capture in ADP-0). So no
-    # matter how many calls a run makes, captured cost stays 0 and BudgetDetector
-    # is structurally unable to fire from adapter events alone. This is a real
-    # gap to close before Pathlayer can guard spend on a LangGraph agent.
+def _drive_llm_cost(adapter: LangGraphAdapter, output_tokens: int, model: str = "gpt-4o") -> None:
+    """Feed the adapter a deterministic LLM call worth a known cost (offline)."""
+    run_id = uuid4()
+    adapter._handler.on_chat_model_start({"kwargs": {"model": model}}, [[]], run_id=run_id)
+    message = AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": 0,
+            "output_tokens": output_tokens,
+            "total_tokens": output_tokens,
+        },
+    )
+    response = LLMResult(
+        generations=[[ChatGeneration(message=message)]], llm_output={"model_name": model}
+    )
+    adapter._handler.on_llm_end(response, run_id=run_id)
+
+
+def test_budget_stops_on_captured_llm_cost() -> None:
+    # Issue #77: model spend is now captured. Each LLM call costs $1
+    # (100k gpt-4o output tokens at $10/1M), interleaved with *varied* edits that
+    # carry no test/exit evidence -> loop and no_progress stay silent, so the only
+    # detector that can STOP is budget. The default ceiling ($5, stop at 90%) is
+    # crossed mid-run.
     def run(adapter: LangGraphAdapter) -> None:
-        for _ in range(20):
-            search.invoke({"query": "anything"}, config=adapter.as_config())
+        for i in range(6):
+            edit_file.invoke({"patch": f"change {i}"}, config=adapter.as_config())
+            _drive_llm_cost(adapter, output_tokens=100_000)
 
     events = _capture(run)
-    assert all(e.cost_usd == 0.0 for e in events)
-    assert BudgetDetector(max_cost_usd=5.0).evaluate(events).confidence == 0.0
+    llm_events = [e for e in events if e.kind is EventKind.LLM_CALL]
+    assert len(llm_events) == 6
+    assert all(e.cost_usd == pytest.approx(1.0) for e in llm_events)
+    # Budget saturates; the action detectors are not fooled by the LLM events.
+    assert BudgetDetector(max_cost_usd=5.0).evaluate(events).confidence == 1.0
+    assert LoopDetector().evaluate(events).confidence == 0.0
+    assert NoProgressDetector(coding_anchors()).evaluate(events).confidence == 0.0
+    # End to end through the default policy: the run stops, on budget alone.
+    assert _stops(events)
 
 
-def test_budget_detector_itself_works_when_cost_is_present() -> None:
-    # Control: the detector is correct; the gap is purely in capture. With cost
-    # injected, the same detector saturates -- proving the missing piece is the
-    # adapter, not the BudgetDetector.
-    priced = [ToolEvent(tool="llm_call", cost_usd=1.0) for _ in range(5)]
-    assert BudgetDetector(max_cost_usd=5.0).evaluate(priced).confidence == 1.0
+def test_budget_silent_under_the_ceiling() -> None:
+    # Same shape, total spend $2 < $5 ceiling -> no STOP (no false positive).
+    def run(adapter: LangGraphAdapter) -> None:
+        for i in range(2):
+            edit_file.invoke({"patch": f"change {i}"}, config=adapter.as_config())
+            _drive_llm_cost(adapter, output_tokens=100_000)
+
+    events = _capture(run)
+    assert BudgetDetector(max_cost_usd=5.0).evaluate(events).confidence == pytest.approx(0.4)
+    assert not _stops(events)
 
 
 # --------------------------------------------------------------------------- #

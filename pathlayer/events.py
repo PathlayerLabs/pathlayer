@@ -13,6 +13,11 @@ from typing import Any
 
 class EventKind(str, Enum):
     TOOL_CALL = "tool_call"
+    # A pure LLM call (no tool). Carries token cost in ``cost_usd`` so
+    # BudgetDetector can account for spend that happens in the model, not in
+    # tools. Action detectors (loop/retry/no_progress) ignore it via their
+    # ``event_kinds`` filter so a reasoning agent is not mistaken for a loop.
+    LLM_CALL = "llm_call"
     # Resource / lifecycle events (class iii incidents). Detect-only in V1.
     SUBAGENT_SPAWN = "subagent_spawn"
     RUN_RESTART = "run_restart"

@@ -24,7 +24,7 @@ from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.canonical import canonicalize
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 
 
 def _error_of(event: ToolEvent) -> str | None:
@@ -45,6 +45,9 @@ def _error_of(event: ToolEvent) -> str | None:
 
 class RetryDetector(Detector):
     name = "retry"
+    # A stuck retry is a repeated *tool* call; LLM-cost events between attempts
+    # must not break the streak, so reason over tool events only.
+    event_kinds = frozenset({EventKind.TOOL_CALL})
 
     def __init__(self, threshold: int = 3) -> None:
         if threshold < 2:
@@ -52,6 +55,7 @@ class RetryDetector(Detector):
         self._threshold = threshold
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        history = self._relevant(history)
         if not history:
             return Signal(self.name, confidence=0.0)
 

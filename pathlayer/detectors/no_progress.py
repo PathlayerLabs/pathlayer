@@ -48,11 +48,15 @@ from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.progress import ProgressAnchor, progress_series
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 
 
 class NoProgressDetector(Detector):
     name = "no_progress"
+    # Reason over agent actions only: LLM-cost events carry no progress evidence
+    # and would each count as a stagnant step, inflating the CUSUM toward a false
+    # stop now that this signal is actionable.
+    event_kinds = frozenset({EventKind.TOOL_CALL})
 
     def __init__(
         self,
@@ -80,6 +84,7 @@ class NoProgressDetector(Detector):
         self._window = window
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        history = self._relevant(history)
         # An anchor is applicable iff it has an opinion on the full history.
         applicable = [anchor for anchor in self._anchors if anchor.measure(history) is not None]
         if not applicable:

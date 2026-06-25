@@ -267,3 +267,160 @@ def test_pending_map_is_bounded_when_starts_are_never_paired() -> None:
     assert "run-0" not in adapter._pending
     assert f"run-{_MAX_PENDING + 49}" in adapter._pending
     assert events == []  # eviction never emits; it only frees memory
+
+
+# --------------------------------------------------------------------------- #
+# LLM cost capture (issue #77): on_llm_start/end -> a dedicated LLM_CALL event
+# carrying token cost in cost_usd, so BudgetDetector can guard model spend.
+# Driven by feeding the handler hand-built LLMResults -- deterministic, offline,
+# no API key -- which exercises both the handler and the adapter token/price path.
+# --------------------------------------------------------------------------- #
+
+from uuid import uuid4  # noqa: E402
+
+from langchain_core.messages import AIMessage  # noqa: E402
+from langchain_core.outputs import ChatGeneration, Generation, LLMResult  # noqa: E402
+
+
+def _chat_result(input_tokens: int, output_tokens: int, model: str | None = "gpt-4o") -> LLMResult:
+    """A chat-model LLMResult carrying usage_metadata on its AIMessage."""
+    message = AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    )
+    llm_output = {"model_name": model} if model is not None else {}
+    return LLMResult(generations=[[ChatGeneration(message=message)]], llm_output=llm_output)
+
+
+def _drive_llm(adapter: LangGraphAdapter, response: LLMResult, *, serialized: dict | None) -> None:
+    run_id = uuid4()
+    adapter._handler.on_llm_start(serialized, ["prompt"], run_id=run_id)
+    adapter._handler.on_llm_end(response, run_id=run_id)
+
+
+def test_llm_call_is_captured_with_cost() -> None:
+    events, adapter = _capture()
+    _drive_llm(
+        adapter, _chat_result(1000, 1000, "gpt-4o"), serialized={"kwargs": {"model": "gpt-4o"}}
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind is EventKind.LLM_CALL
+    assert event.tool == "gpt-4o"
+    # gpt-4o: (1000 * 2.5 + 1000 * 10) / 1e6 = 0.0125
+    assert event.cost_usd == pytest.approx(0.0125)
+    assert event.metadata["input_tokens"] == 1000
+    assert event.metadata["output_tokens"] == 1000
+    assert "parent_run_id" in event.metadata
+
+
+def test_llm_cost_falls_back_to_llm_output_token_usage() -> None:
+    # A non-chat Generation has no usage_metadata; tokens come from llm_output.
+    events, adapter = _capture()
+    response = LLMResult(
+        generations=[[Generation(text="x")]],
+        llm_output={
+            "model_name": "gpt-4o",
+            "token_usage": {"prompt_tokens": 2000, "completion_tokens": 0},
+        },
+    )
+    _drive_llm(adapter, response, serialized=None)
+
+    assert len(events) == 1
+    assert events[0].cost_usd == pytest.approx(0.005)  # 2000 * 2.5 / 1e6
+
+
+def test_llm_call_with_no_tokens_costs_zero_but_still_emits() -> None:
+    events, adapter = _capture()
+    response = LLMResult(generations=[[Generation(text="x")]], llm_output={"model_name": "gpt-4o"})
+    _drive_llm(adapter, response, serialized=None)
+
+    assert len(events) == 1
+    assert events[0].cost_usd == 0.0
+
+
+def test_unknown_model_costs_zero() -> None:
+    events, adapter = _capture()
+    _drive_llm(adapter, _chat_result(1000, 1000, "myorg-secret"), serialized=None)
+
+    assert events[0].cost_usd == 0.0
+    assert events[0].tool == "myorg-secret"
+
+
+def test_missing_model_uses_placeholder_tool_and_zero_cost() -> None:
+    events, adapter = _capture()
+    _drive_llm(adapter, _chat_result(1000, 1000, model=None), serialized=None)
+
+    assert events[0].tool == "<llm>"
+    assert events[0].cost_usd == 0.0
+
+
+def test_model_from_start_used_when_response_omits_it() -> None:
+    # llm_output has no model_name -> fall back to the model seen at on_llm_start.
+    events, adapter = _capture()
+    response = _chat_result(1000, 1000, model=None)  # llm_output = {}
+    _drive_llm(adapter, response, serialized={"kwargs": {"model": "claude-3-5-sonnet"}})
+
+    assert events[0].tool == "claude-3-5-sonnet"
+    # claude-3-5-sonnet: (1000 * 3 + 1000 * 15) / 1e6 = 0.018
+    assert events[0].cost_usd == pytest.approx(0.018)
+
+
+def test_on_chat_model_start_registers_pending() -> None:
+    events, adapter = _capture()
+    run_id = uuid4()
+    adapter._handler.on_chat_model_start({"kwargs": {"model": "gpt-4o"}}, [[]], run_id=run_id)
+    adapter._handler.on_llm_end(_chat_result(0, 1000, "gpt-4o"), run_id=run_id)
+
+    assert len(events) == 1
+    assert events[0].cost_usd == pytest.approx(0.01)  # 1000 * 10 / 1e6
+
+
+def test_on_llm_error_drops_pending_without_emitting() -> None:
+    events, adapter = _capture()
+    run_id = uuid4()
+    adapter._handler.on_llm_start({"kwargs": {"model": "gpt-4o"}}, ["p"], run_id=run_id)
+    adapter._handler.on_llm_error(RuntimeError("boom"), run_id=run_id)
+
+    assert events == []
+    assert adapter._pending_llm == {}
+
+
+def test_llm_end_without_matching_start_is_ignored() -> None:
+    events, adapter = _capture()
+    adapter._record_llm_end("unknown-run", _chat_result(10, 10, "gpt-4o"))
+    assert events == []
+
+
+def test_llm_and_tool_events_share_one_ts_sequence() -> None:
+    events, adapter = _capture()
+    add.invoke({"a": 1, "b": 1}, config=adapter.as_config())
+    _drive_llm(adapter, _chat_result(10, 10, "gpt-4o"), serialized=None)
+    assert [e.ts for e in events] == [0, 1]
+    assert [e.kind for e in events] == [EventKind.TOOL_CALL, EventKind.LLM_CALL]
+
+
+def test_detach_clears_pending_llm() -> None:
+    _, adapter = _capture()
+    adapter._handler.on_llm_start({"kwargs": {"model": "gpt-4o"}}, ["p"], run_id=uuid4())
+    adapter.detach()
+    assert adapter._pending_llm == {}
+
+
+def test_pending_llm_map_is_bounded() -> None:
+    from pathlayer.adapters.langgraph import _MAX_PENDING
+
+    events: list[ToolEvent] = []
+    adapter = LangGraphAdapter(events.append)
+    adapter.attach()
+    for i in range(_MAX_PENDING + 50):
+        adapter._record_llm_start(f"run-{i}", None, "gpt-4o")
+
+    assert len(adapter._pending_llm) == _MAX_PENDING
+    assert "run-0" not in adapter._pending_llm
+    assert events == []
