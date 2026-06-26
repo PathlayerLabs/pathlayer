@@ -7,6 +7,8 @@ Two axes matter and pull against each other:
 
 from __future__ import annotations
 
+import pytest
+
 from pathlayer.detectors.canonical import ToolMask, canonicalize
 from pathlayer.events import ToolEvent
 
@@ -189,3 +191,105 @@ def test_empty_keep_is_default_masking() -> None:
     a = ToolEvent(tool="read_file", args={"file_id": "550e8400-e29b-41d4-a716-446655440000"})
     b = ToolEvent(tool="read_file", args={"file_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"})
     assert canonicalize(a, masks) == canonicalize(b, masks)
+
+
+# --- CAN-2: per-tool mask override --------------------------------------------
+
+
+def test_mask_remasks_unnamed_volatile_id() -> None:
+    # The exact inverse of ``test_unnamed_volatile_id_suffix_is_now_visible_tradeoff``:
+    # ``attempt_id`` is visible by default (no ``_id`` suffix masking since CAN-3),
+    # so two deploys that differ only by it produce distinct tokens. Declaring it
+    # in ``mask`` force-masks it -> the two calls collapse to one token.
+    masks = {"deploy": ToolMask(mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 1})
+    b = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 2})
+    assert canonicalize(a) != canonicalize(b)
+    assert canonicalize(a, masks) == canonicalize(b, masks)
+
+
+def test_mask_applies_to_nested_keys() -> None:
+    masks = {"deploy": ToolMask(mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(tool="deploy", args={"payload": {"service": "api", "attempt_id": 1}})
+    b = ToolEvent(tool="deploy", args={"payload": {"service": "api", "attempt_id": 2}})
+    assert canonicalize(a) != canonicalize(b)  # default: nested attempt_id visible
+    assert canonicalize(a, masks) == canonicalize(b, masks)  # mask -> hidden
+
+
+def test_mask_is_case_insensitive() -> None:
+    masks = {"deploy": ToolMask(mask=frozenset({"Attempt_ID"}))}
+    a = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 1})
+    b = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 2})
+    assert canonicalize(a, masks) == canonicalize(b, masks)
+
+
+def test_mask_for_other_tool_does_not_apply() -> None:
+    masks = {"other_tool": ToolMask(mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 1})
+    b = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 2})
+    # Tool name absent from config -> attempt_id still visible -> distinct tokens.
+    assert canonicalize(a, masks) != canonicalize(b, masks)
+
+
+def test_mask_keeps_other_fields_distinct() -> None:
+    # Masking attempt_id must not merge calls that genuinely differ elsewhere.
+    masks = {"deploy": ToolMask(mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 1})
+    b = ToolEvent(tool="deploy", args={"service": "web", "attempt_id": 2})
+    assert canonicalize(a, masks) != canonicalize(b, masks)
+
+
+def test_keep_and_mask_coexist_on_distinct_keys() -> None:
+    # One tool can both keep a distinguishing id and mask a noisy one.
+    masks = {"deploy": ToolMask(keep=frozenset({"file_id"}), mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(
+        tool="deploy",
+        args={"file_id": "550e8400-e29b-41d4-a716-446655440000", "attempt_id": 1},
+    )
+    b = ToolEvent(
+        tool="deploy",
+        args={"file_id": "550e8400-e29b-41d4-a716-446655440000", "attempt_id": 2},
+    )
+    c = ToolEvent(
+        tool="deploy",
+        args={"file_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479", "attempt_id": 1},
+    )
+    # Same file_id, differing only by the masked attempt_id -> same token.
+    assert canonicalize(a, masks) == canonicalize(b, masks)
+    # Different kept file_id -> distinct token despite the masked attempt_id.
+    assert canonicalize(a, masks) != canonicalize(c, masks)
+
+
+def test_overlapping_keep_and_mask_raises() -> None:
+    with pytest.raises(ValueError, match="both kept and masked"):
+        ToolMask(keep=frozenset({"file_id"}), mask=frozenset({"file_id"}))
+
+
+def test_overlapping_keep_and_mask_is_case_insensitive() -> None:
+    with pytest.raises(ValueError, match="both kept and masked"):
+        ToolMask(keep=frozenset({"File_ID"}), mask=frozenset({"file_id"}))
+
+
+def test_partial_keep_mask_overlap_reports_only_the_clashing_key() -> None:
+    # Non-overlapping keys are fine; only the clashing one is flagged.
+    with pytest.raises(ValueError, match=r"\['attempt_id'\]"):
+        ToolMask(keep=frozenset({"file_id", "attempt_id"}), mask=frozenset({"attempt_id", "nonce"}))
+
+
+def test_keep_on_container_shortcircuits_nested_mask() -> None:
+    # ``keep`` on a container key emits the whole subtree verbatim and stops
+    # recursion, so a ``mask`` on a key *inside* that container does not apply.
+    # Precedence keep > mask holds, and "kept wins" extends to descendants.
+    masks = {"deploy": ToolMask(keep=frozenset({"payload"}), mask=frozenset({"attempt_id"}))}
+    a = ToolEvent(tool="deploy", args={"payload": {"service": "api", "attempt_id": 1}})
+    b = ToolEvent(tool="deploy", args={"payload": {"service": "api", "attempt_id": 2}})
+    # payload is kept verbatim -> the nested attempt_id stays visible -> distinct.
+    assert canonicalize(a, masks) != canonicalize(b, masks)
+
+
+def test_empty_mask_is_default_masking() -> None:
+    masks = {"deploy": ToolMask(mask=frozenset())}
+    a = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 1})
+    b = ToolEvent(tool="deploy", args={"service": "api", "attempt_id": 2})
+    assert canonicalize(a, masks) == canonicalize(a)
+    assert canonicalize(a, masks) != canonicalize(b, masks)

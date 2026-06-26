@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from pathlayer.detectors.canonical import ToolMask
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
@@ -58,6 +59,21 @@ def test_volatile_args_still_count_as_identical() -> None:
     # Different request_id each time, but canonicalization masks it -> a retry.
     events = [_fail("429", request_id=f"req-{i}") for i in range(3)]
     assert RetryDetector(threshold=3).evaluate(events).confidence == 1.0
+
+
+def test_per_tool_mask_restores_retry_detection_for_attempt_id() -> None:
+    # CAN-2 decisive case, tied to the CAN-3 trade-off: an incrementing
+    # ``attempt_id`` is visible by default (no ``_id`` suffix masking since
+    # CAN-3), so each failed deploy looks like a different call and the retry
+    # storm goes unnoticed. Declaring ``attempt_id`` in ``mask`` for that tool
+    # collapses the attempts back to one token -> the retry is detected again.
+    events = [
+        ToolEvent(tool="deploy", args={"service": "api", "attempt_id": i}, result={"error": "boom"})
+        for i in range(3)
+    ]
+    assert RetryDetector(threshold=3).evaluate(events).confidence == 0.0
+    masks = {"deploy": ToolMask(mask=frozenset({"attempt_id"}))}
+    assert RetryDetector(threshold=3, tool_masks=masks).evaluate(events).confidence == 1.0
 
 
 # --------------------------------------------------------------------------- #
