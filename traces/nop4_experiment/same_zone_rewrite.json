@@ -1,0 +1,22 @@
+{
+  "label": "no_progress",
+  "description": "NOP-4 experiment. Churn: the agent rewrites the SAME zone over and over, so the cumulative diff vs baseline is constant in both NET and SIZE (insertions=4, deletions=4 every step). No tests run. Real no-progress -> label no_progress. Baseline has no applicable anchor (no test/exit/git-progress) and stays silent -> false negative; either git scalar sees a flat level and catches it. Shows git adds detection for no-test coding agents.",
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } },
+    { "tool": "edit_file", "args": { "path": "src/d.py" }, "result": { "insertions": 4, "deletions": 4 } }
+  ]
+}

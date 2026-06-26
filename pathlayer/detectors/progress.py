@@ -27,6 +27,13 @@ spurious "drop" -> false positive). ``ExitCodeProgressAnchor`` also abstains
 whenever any test evidence is present, so tests take precedence and a
 never-decreasing success count can never mask a real test stall under the
 detector's optimistic (most-progress-wins) aggregation.
+
+``GitProgressAnchor`` (NOP-4) adds a third coding ground truth: the size of the
+git working diff, for coding agents that edit but never run tests. It defers to
+tests (abstains while test evidence is present) but *not* to exit codes: when no
+tests are present, git and the exit-code anchor are both applicable and the
+detector takes the most-progress-wins view across them. The deferring shape was
+validated on labeled traces (``tests/test_nop4_git_experiment.py``).
 """
 
 from __future__ import annotations
@@ -41,6 +48,10 @@ _PASSED = "passed"
 _FAILED = "failed"
 _EXIT_CODE = "exit_code"
 _TEST_KEYS = (_PASSED, _FAILED)
+_INSERTIONS = "insertions"
+_DELETIONS = "deletions"
+_NET_LINES = "net_lines"
+_GIT_KEYS = (_INSERTIONS, _DELETIONS, _NET_LINES)
 
 
 class ProgressAnchor(ABC):
@@ -182,13 +193,82 @@ class ExitCodeProgressAnchor(ProgressAnchor):
         return float(successes) if saw_exit_code else None
 
 
+class GitProgressAnchor(ProgressAnchor):
+    """No-test fallback coding progress from the git working diff (NOP-4).
+
+    The level is the **size** of the cumulative diff versus the run's starting
+    commit: ``insertions + deletions`` of the latest git evidence in the
+    history. Size (not signed ``insertions - deletions``) is deliberate -- it
+    credits in-place edits and deletions, which a net count flattens to zero, so
+    a legit bug fix is not mistaken for a stall. A churn that rewrites the same
+    zone leaves the diff size constant -> a flat level -> the CUSUM fires; real
+    work that touches new ground grows the diff size -> new records -> silence.
+
+    Like :class:`ExitCodeProgressAnchor`, it **defers to tests**: it abstains
+    (``None``) whenever the history carries any test evidence, so it can never
+    mask a stall the stronger test anchor would catch. This test-deferring shape
+    was chosen from the NOP-4 experiment (see ``tests/test_nop4_git_experiment.py``):
+    the naive always-on variant masked a genuine no-progress run, whereas the
+    deferring variant strictly added detection (no-test churn) with no masking.
+
+    It abstains (``None``) when the history carries no git evidence, so it has no
+    opinion on a non-coding agent or an agent that does not report diff stats.
+    ``net_lines`` is accepted as a degraded shortcut (size = its magnitude) when
+    insertions/deletions are unavailable.
+
+    Capture contract: the diff stat must be computed versus a **baseline frozen
+    at run start**, not a moving ``HEAD`` -- otherwise an agent that commits
+    mid-run would see its diff drop to ~0 (a spurious level collapse). This lives
+    in the capture layer; the anchor only consumes the reported value.
+
+    Known blind spot: git cannot tell *useful* from *useless* new code -- only
+    ground truth (tests) can. When another anchor is applicable, the optimistic
+    aggregation means git can only make the detector quieter, so there it can
+    only add false negatives, not false positives. The exception is when git is
+    the *sole* applicable anchor (an agent with no tests and no exit codes): a
+    flat diff size then fires on its own, which is the intended catch for no-test
+    churn but, on a genuinely-progressing run whose diff size happens to plateau,
+    could be a false stop -- the residual cost of having any signal at all there.
+    """
+
+    name = "coding_git"
+
+    def measure(self, history: Sequence[ToolEvent]) -> float | None:
+        # Single pass: defer to the stronger ground truth (any test evidence ->
+        # abstain immediately so git can never mask a test stall), otherwise keep
+        # the latest git diff size.
+        size: float | None = None
+        for event in history:
+            if _evidence(event, _TEST_KEYS) is not None:
+                return None
+            source = _evidence(event, _GIT_KEYS)
+            if source is not None:
+                size = _diff_size(source)
+        return size
+
+
+def _diff_size(source: Mapping[str, Any]) -> float:
+    """Cumulative diff size from a git evidence mapping.
+
+    ``insertions + deletions`` when present; else the magnitude of the degraded
+    ``net_lines`` shortcut.
+    """
+    if _INSERTIONS in source or _DELETIONS in source:
+        insertions = _as_int(source.get(_INSERTIONS, 0), default=0)
+        deletions = _as_int(source.get(_DELETIONS, 0), default=0)
+        return float(insertions + deletions)
+    return float(abs(_as_int(source.get(_NET_LINES, 0), default=0)))
+
+
 def coding_anchors() -> list[ProgressAnchor]:
     """The built-in coding anchors, ready to wire into ``NoProgressDetector``.
 
-    Tests first (the stronger signal), exit codes as the fallback for agents
-    that report process status but no test results.
+    Tests first (the stronger signal), exit codes as the fallback for agents that
+    report process status but no test results, and the git diff (NOP-4) as the
+    fallback for coding agents that edit but never run tests. The git anchor
+    defers to tests, so it only speaks when no test evidence is present.
     """
-    return [TestProgressAnchor(), ExitCodeProgressAnchor()]
+    return [TestProgressAnchor(), ExitCodeProgressAnchor(), GitProgressAnchor()]
 
 
 def progress_series(

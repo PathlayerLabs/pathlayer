@@ -10,6 +10,7 @@ import pytest
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import (
     ExitCodeProgressAnchor,
+    GitProgressAnchor,
     TestProgressAnchor,
     coding_anchors,
 )
@@ -41,6 +42,11 @@ def _shell(exit_code: int) -> ToolEvent:
 
 def _email(to: str) -> ToolEvent:
     return ToolEvent(tool="send_email", args={"to": to})
+
+
+def _git(insertions: int, deletions: int) -> ToolEvent:
+    # Cumulative diff stat vs the run's frozen baseline (NOP-4 capture contract).
+    return ToolEvent(tool="edit_file", result={"insertions": insertions, "deletions": deletions})
 
 
 def _detector(**kwargs: float) -> NoProgressDetector:
@@ -110,6 +116,69 @@ def test_exit_code_anchor_tolerates_non_int_exit_code() -> None:
     # A malformed exit code is treated as "not a success", not a crash.
     event = ToolEvent(tool="shell", result={"exit_code": "boom"})
     assert ExitCodeProgressAnchor().measure([event]) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# GitProgressAnchor (NOP-4): no-test fallback on the working diff size
+# --------------------------------------------------------------------------- #
+def test_git_anchor_level_is_diff_size() -> None:
+    # size = insertions + deletions, so in-place edits and deletions count.
+    assert GitProgressAnchor().measure([_git(3, 3)]) == 6.0
+
+
+def test_git_anchor_abstains_without_evidence() -> None:
+    assert GitProgressAnchor().measure([_email("a"), _edit()]) is None
+
+
+def test_git_anchor_uses_latest_cumulative_stat() -> None:
+    assert GitProgressAnchor().measure([_git(4, 4), _git(10, 2)]) == 12.0
+
+
+def test_git_anchor_defers_to_tests() -> None:
+    # Tests are the stronger ground truth: git steps aside so a growing diff
+    # cannot mask a real test stall under optimistic aggregation.
+    history = [_git(3, 3), _tests(1, 0)]
+    assert GitProgressAnchor().measure(history) is None
+    assert TestProgressAnchor().measure(history) == 1.0
+
+
+def test_git_anchor_reads_net_lines_shortcut() -> None:
+    # Degraded capture: only a signed net is available -> size is its magnitude.
+    event = ToolEvent(tool="edit_file", result={"net_lines": -7})
+    assert GitProgressAnchor().measure([event]) == 7.0
+
+
+def test_git_anchor_reads_metadata_evidence() -> None:
+    event = ToolEvent(tool="edit_file", metadata={"insertions": 5, "deletions": 1})
+    assert GitProgressAnchor().measure([event]) == 6.0
+
+
+def test_git_anchor_never_satisfied() -> None:
+    # A non-empty diff means "code changed", not "task done".
+    assert GitProgressAnchor().is_satisfied([_git(3, 3)]) is False
+
+
+def test_detector_fires_on_same_zone_churn_without_tests() -> None:
+    # No tests, no exit codes: the agent rewrites the same zone so the diff size
+    # stays flat -> the git anchor is the only one applicable and it fires.
+    history = [_git(4, 4) for _ in range(13)]
+    assert _confidence(_detector(), *history) == 1.0
+
+
+def test_detector_silent_on_growing_git_footprint_without_tests() -> None:
+    # In-place fixing across new lines grows the diff size every step -> records
+    # -> silence. This is the additive-bias fix the size scalar gives over net.
+    history = [_git(3 * i, 3 * i) for i in range(1, 13)]
+    assert _confidence(_detector(), *history) == 0.0
+
+
+def test_git_anchor_does_not_mask_test_stall() -> None:
+    # A growing diff alongside a flat test suite: git defers to tests, so the
+    # test stall still fires (no masking) -- the validated deferring behavior.
+    history: list[ToolEvent] = []
+    for i in range(1, 13):
+        history += [_git(5 * i, 0), _tests(2, 2)]
+    assert _confidence(_detector(), *history) == 1.0
 
 
 # --------------------------------------------------------------------------- #

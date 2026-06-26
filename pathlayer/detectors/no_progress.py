@@ -33,12 +33,26 @@ separate mechanism here: the record-based CUSUM already counts the active steps
 that fail to advance, so a second ratio detector would be redundant under sane
 thresholds. The issue's intent is met by the CUSUM.
 
-Known limitation: the signal is only as good as its anchor. An agent that builds
-genuine code for a long stretch *before its first passing test* shows a flat (or
-falling) test level the whole time, which is indistinguishable from a real stall
-and can fire. This is an anchor blind spot, not a detector bug -- a richer anchor
-(e.g. NOP-4 git diff) or threshold calibration on labeled traces is the fix, not
-a special case here.
+The git anchor (NOP-4, ``GitProgressAnchor``) extends coverage to coding agents
+that never run tests: it credits the size of the working diff and catches churn
+the test/exit-code anchors cannot see. It *defers to tests* (abstains while any
+test evidence is present), so it can never mask a real stall the test anchor
+would catch -- this test-deferring shape was chosen from a labeled-trace
+experiment (``tests/test_nop4_git_experiment.py``) where the naive always-on
+variant masked a genuine no-progress run.
+
+Known limitation: the signal is only as good as its anchor. Two residual blind
+spots: (1) git cannot tell *useful* from *useless* new code -- only ground truth
+(tests) can; whenever a stronger anchor is also applicable the optimistic
+aggregation lets git only quiet the detector (false negatives), not fire it. The
+one place git can fire alone is an agent with no tests and no exit codes, where a
+flat diff size could in principle false-stop a genuinely-progressing run -- the
+cost of having any signal there at all. (2) A long flat-red test suite while the
+agent genuinely writes code can still fire, because a constant ``passed - failed``
+is indistinguishable from a stall. That second one is a test-anchor/patience
+concern (a real progressing run shows the failing count *dropping*, which already
+sets records and stays silent), not something git should paper over -- using git
+to silence the test anchor is exactly the masking the deferring design avoids.
 """
 
 from __future__ import annotations

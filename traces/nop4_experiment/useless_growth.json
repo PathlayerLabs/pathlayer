@@ -1,0 +1,24 @@
+{
+  "label": "no_progress",
+  "description": "NOP-4 experiment. 47k-style slow burn: the agent keeps adding new but useless lines (git net staircases up) while the test level stays flat and not-satisfied (passed=2, failed=2). Real no-progress -> label no_progress. Baseline (test anchor) catches the flat level; a git anchor that credits the rising net MASKS it -> false negative. This is the hidden cost of the git anchor.",
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 5, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 10, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 15, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 20, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 25, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 30, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 35, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 40, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/b.py" }, "result": { "insertions": 45, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 2, "failed": 2 } }
+  ]
+}

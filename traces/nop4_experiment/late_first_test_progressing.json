@@ -1,0 +1,26 @@
+{
+  "label": "healthy",
+  "description": "NOP-4 experiment. The agent edits real code (git net staircases up) for several steps with NO test result yet, then the test suite appears late and stays red/flat while edits keep progressing. Genuinely progressing -> label healthy. A naive git anchor (always applicable) keeps crediting the rising net and prevents the false stop; a test-deferring conditional git anchor abstains once tests appear and cannot prevent the baseline false stop. Distinguishes naive vs conditional integration.",
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 5, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 10, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 15, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 20, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 25, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 30, "deletions": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 35, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 40, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 45, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 50, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 55, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 60, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } },
+    { "tool": "edit_file", "args": { "path": "src/e.py" }, "result": { "insertions": 65, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 2 } }
+  ]
+}

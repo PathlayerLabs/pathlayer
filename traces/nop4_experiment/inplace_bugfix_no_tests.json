@@ -1,0 +1,22 @@
+{
+  "label": "healthy",
+  "description": "NOP-4 experiment. Legit in-place bug fixing, no tests run. Each edit modifies new distinct existing lines, so the cumulative diff vs baseline keeps growing in SIZE (insertions+deletions) but its NET (insertions-deletions) stays ~0. Genuinely progressing -> label healthy. A net-based git anchor sees a flat 0 and false-stops; a size-based git anchor credits the growing churn and stays silent. Discriminates net vs size scalar.",
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 3, "deletions": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 6, "deletions": 6 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 9, "deletions": 9 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 12, "deletions": 12 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 15, "deletions": 15 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 18, "deletions": 18 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 21, "deletions": 21 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 24, "deletions": 24 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 27, "deletions": 27 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 30, "deletions": 30 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 33, "deletions": 33 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 36, "deletions": 36 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 39, "deletions": 39 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 42, "deletions": 42 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 45, "deletions": 45 } },
+    { "tool": "edit_file", "args": { "path": "src/c.py" }, "result": { "insertions": 48, "deletions": 48 } }
+  ]
+}

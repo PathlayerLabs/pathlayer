@@ -1,0 +1,24 @@
+{
+  "label": "healthy",
+  "description": "NOP-4 experiment. TDD red phase: the agent writes real, growing code (git net staircases up) while the test suite stays red and flat (passed=0, failed=3). Genuinely progressing -> label healthy. Baseline (test anchor only) sees a flat red level and false-stops; a git anchor that credits the rising net should prevent that false stop.",
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 4, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 8, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 12, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 16, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 20, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 24, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 28, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 32, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } },
+    { "tool": "edit_file", "args": { "path": "src/a.py" }, "result": { "insertions": 36, "deletions": 0 } },
+    { "tool": "run_tests", "result": { "passed": 0, "failed": 3 } }
+  ]
+}
