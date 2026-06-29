@@ -1,0 +1,64 @@
+# Pathlayer configuration reference (INF-4).
+#
+# Every value below is the built-in default: with NO config file present,
+# Pathlayer behaves exactly as if this file were loaded. Copy it to
+# `.pathlayer/config.yaml` at your project root and override only what you need.
+#
+# Discovered filenames: `.pathlayer/config.yaml`, `.yml`, or `.json` (keep only
+# one). JSON works with no extra dependency; YAML needs the optional extra:
+# pip install "pathlayer[yaml]".
+#
+# Load and build a pipeline:
+#     from pathlayer import load_config, build_pipeline
+#     pipeline = build_pipeline(load_config())   # discovers .pathlayer/config.*
+
+detectors:
+  # LoopDetector: exact repeated action block at the tail of the stream.
+  loop:
+    enabled: true
+    k: 2          # min consecutive repetitions before any confidence (>= 2)
+    window: 256   # tail size scanned per step (>= 2 * k)
+
+  # RetryDetector: same failing call replayed, same error.
+  retry:
+    enabled: true
+    threshold: 3  # consecutive identical failures mapped to confidence 1.0 (>= 2)
+
+  # BudgetDetector: cumulative cost_usd vs a ceiling.
+  # Disabled by default: a $5 ceiling would stop a legitimately expensive run.
+  # Enable it with a ceiling chosen for your workload.
+  budget:
+    enabled: false
+    max_cost_usd: 5.0
+    baseline_usd: 0.0   # cross-run spend already recorded (wired by INF-1 later)
+
+  # NoProgressDetector: CUSUM over progress records (the $47k slow-burn case).
+  # Anchors are code-level (built-in coding anchors: tests, exit codes, git
+  # diff); only these scalar thresholds are configurable.
+  no_progress:
+    enabled: true
+    target_rate: 0.2   # increment per stagnant step (> 0)
+    threshold: 2.0     # cumulative sum at which it fires (> 0)
+    window: 64         # >= ceil(threshold / target_rate) + 1
+
+# Per-tool canonicalization overrides (CAN-2). Empty by default.
+canonicalization:
+  tool_masks: {}
+  # Example:
+  # tool_masks:
+  #   read_file:                 # keep a distinguishing id the heuristic would mask
+  #     keep: ["file_id"]
+  #   api_call:                  # re-mask a volatile id so retries collapse
+  #     mask: ["attempt_id"]
+
+policy:
+  stop_threshold: 0.9     # strongest actionable confidence at/above which we STOP (in [0, 1])
+  advisory_signals: []    # signals computed/logged but never allowed to STOP
+                          # (one of: loop, retry, budget, no_progress)
+
+pipeline:
+  recent_history: 10      # events kept in the post-mortem tail (>= 0)
+
+store:
+  # Cross-run SQLite state path (INF-1). Inert today: not read or created yet.
+  path: ".pathlayer/state.db"

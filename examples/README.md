@@ -18,3 +18,19 @@ and reports why (post-mortem):
 ```bash
 python examples/demo_loop.py
 ```
+
+## `pathlayer.config.yaml`
+
+Reference configuration (INF-4) documenting every tunable threshold with its
+built-in default. Pathlayer is zero-config: with no file present it uses these
+exact values. Copy it to `.pathlayer/config.yaml` (`.yml` and `.json` are also
+discovered) at your project root and override only what you need, then:
+
+```python
+from pathlayer import load_config, build_pipeline
+
+pipeline = build_pipeline(load_config())  # discovers .pathlayer/config.*
+```
+
+YAML support needs the optional extra: `pip install "pathlayer[yaml]"` (JSON
+works with no extra dependency).

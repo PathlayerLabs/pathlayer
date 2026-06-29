@@ -1,10 +1,9 @@
 """Arbitration: combine detector signals into a graded action.
 
-Default policy thresholds (see cursor.md):
-    max_same_error: 4
-    max_tool_retries: 3
-    max_cost_usd: 5
-    stop_threshold: 0.9
+The policy itself only needs ``stop_threshold`` (and which signals are
+observe-only); every per-detector threshold (``max_cost_usd``, retry/loop
+counts, ...) lives on its own detector, configured via
+:mod:`pathlayer.config`. There is a single source of truth per threshold.
 
 Sprint 1 ships a deliberately minimal arbitration (ARB-2): a single threshold
 mapping the strongest detector confidence to ``STOP``. With one detector,
@@ -33,9 +32,6 @@ DEFAULT_ADVISORY_SIGNALS: frozenset[str] = frozenset()
 
 @dataclass(slots=True)
 class PolicyConfig:
-    max_same_error: int = 4
-    max_tool_retries: int = 3
-    max_cost_usd: float = 5.0
     # Strongest detector confidence at/above which the run is stopped.
     stop_threshold: float = 0.9
     # Detector names whose signals are observe-only: logged but never STOP.

@@ -20,6 +20,11 @@ langgraph = [
     "langgraph>=1,<2",
     "langchain-core>=1,<2",
 ]
+# Optional YAML config support (pathlayer.config). The core reads JSON with the
+# stdlib; PyYAML is only needed to load a .yaml config and is imported lazily.
+yaml = [
+    "pyyaml>=6",
+]
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
@@ -28,9 +33,12 @@ dev = [
     # avoids format ping-pong. Bump both together on upgrade.
     "ruff==0.15.17",
     "mypy>=1.11",
+    "types-PyYAML>=6",
     "pre-commit>=3.8",
     # Bring in the LangGraph adapter deps so the smoke test runs in dev/CI.
     "pathlayer[langgraph]",
+    # Bring in PyYAML so the YAML config path is exercised in dev/CI.
+    "pathlayer[yaml]",
 ]
 
 [build-system]

@@ -74,14 +74,13 @@ def test_action_ladder_is_ordered() -> None:
 
 def test_default_policy_config_matches_architecture() -> None:
     config = PolicyConfig()
-    assert config.max_same_error == 4
-    assert config.max_tool_retries == 3
-    assert config.max_cost_usd == 5.0
+    assert config.stop_threshold == 0.9
+    assert config.advisory_signals == frozenset()
 
 
 def test_policy_uses_provided_config() -> None:
-    policy = Policy(config=PolicyConfig(max_cost_usd=1.0))
-    assert policy.config.max_cost_usd == 1.0
+    policy = Policy(config=PolicyConfig(stop_threshold=0.5))
+    assert policy.config.stop_threshold == 0.5
     # A low-confidence signal must not trigger any action.
     assert policy.decide([Signal("loop", confidence=0.1)]) is Action.NONE
 
