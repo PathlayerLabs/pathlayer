@@ -8,7 +8,7 @@ Detection is deterministic/statistical: no LLM in the detection loop.
 """
 
 from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline, load_config
-from pathlayer.pipeline import Pipeline
+from pathlayer.pipeline import Pipeline, WouldBeAction
 from pathlayer.postmortem import PostMortem
 
 __version__ = "0.0.1"
@@ -18,6 +18,7 @@ __all__ = [
     "PathlayerConfig",
     "Pipeline",
     "PostMortem",
+    "WouldBeAction",
     "__version__",
     "build_pipeline",
     "load_config",

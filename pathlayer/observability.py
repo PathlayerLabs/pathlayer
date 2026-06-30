@@ -73,3 +73,13 @@ def log_decision(
 
 def log_action(logger: logging.Logger, action: Action, *, index: int, ts: float) -> None:
     _emit(logger, "action", index, ts, action=action.name)
+
+
+def log_would_be_action(logger: logging.Logger, action: Action, *, index: int, ts: float) -> None:
+    """Log an action that dry-run *would* have emitted but suppressed.
+
+    A distinct ``kind`` (``would_be_action``, vs ``action`` for an emitted one)
+    so an offline reader can tell what Pathlayer would have done from what it
+    actually did.
+    """
+    _emit(logger, "would_be_action", index, ts, action=action.name)

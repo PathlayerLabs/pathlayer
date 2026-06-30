@@ -22,6 +22,7 @@ from pathlayer.observability import (
     log_action,
     log_decision,
     log_signal,
+    log_would_be_action,
 )
 from pathlayer.policies import Action
 
@@ -60,6 +61,20 @@ def test_log_decision_and_action_payloads(caplog: pytest.LogCaptureFixture) -> N
 
     (action,) = _records(caplog, "action")
     assert action.pathlayer["action"] == "STOP"
+
+
+def test_log_would_be_action_uses_distinct_kind(caplog: pytest.LogCaptureFixture) -> None:
+    # A suppressed (dry-run) action must be distinguishable from an emitted one:
+    # kind=would_be_action, never kind=action.
+    logger = get_logger("pathlayer.test.wouldbe")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        log_would_be_action(logger, Action.STOP, index=4, ts=2.0)
+
+    (record,) = _records(caplog, "would_be_action")
+    assert record.pathlayer["action"] == "STOP"
+    assert record.pathlayer["index"] == 4
+    assert record.pathlayer["ts"] == 2.0
+    assert _records(caplog, "action") == []
 
 
 def test_json_formatter_renders_payload() -> None:

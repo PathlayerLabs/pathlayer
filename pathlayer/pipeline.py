@@ -16,22 +16,49 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.events import ToolEvent
-from pathlayer.observability import log_action, log_decision, log_signal
+from pathlayer.observability import (
+    log_action,
+    log_decision,
+    log_signal,
+    log_would_be_action,
+)
 from pathlayer.policies import Action, Policy
 from pathlayer.postmortem import PostMortem
 
 DEFAULT_RECENT_HISTORY = 10
 
 
+@dataclass(slots=True)
+class WouldBeAction:
+    """An arbitrated action dry-run observed but did not emit.
+
+    Recorded only on a *transition to a non-NONE action* (the arbitrated action
+    changed from the previous event and is not NONE), so a sustained STOP yields
+    a single entry, not one per event, and a recovery back to NONE records
+    nothing. ``index`` / ``ts`` of the first entry are the detection latency.
+    """
+
+    index: int
+    ts: float
+    action: Action
+    signals: tuple[Signal, ...]
+    reason: str
+
+
 class Pipeline:
     """Drives events through detectors and the arbitration policy.
 
-    Once arbitration decides ``STOP`` the pipeline halts: it records a
-    :class:`~pathlayer.postmortem.PostMortem` and ignores any further events
-    (a clean flag-based stop, not a process kill).
+    In enforcement mode (the default), once arbitration decides ``STOP`` the
+    pipeline halts: it records a :class:`~pathlayer.postmortem.PostMortem` and
+    ignores any further events (a clean flag-based stop, not a process kill).
+
+    In dry-run (``dry_run=True``) the pipeline only observes: it never halts and
+    emits no action (``process`` always returns ``NONE``); the actions it would
+    have taken are exposed via :attr:`would_be_actions`. See :meth:`process`.
     """
 
     def __init__(
@@ -41,6 +68,7 @@ class Pipeline:
         *,
         recent_history: int = DEFAULT_RECENT_HISTORY,
         logger: logging.Logger | None = None,
+        dry_run: bool = False,
     ) -> None:
         if recent_history < 0:
             raise ValueError("recent_history must be >= 0")
@@ -50,8 +78,12 @@ class Pipeline:
         self._actions: list[Action] = []
         self._recent_history = recent_history
         self._logger = logger
+        self._dry_run = dry_run
         self._stopped = False
         self._post_mortem: PostMortem | None = None
+        self._would_be_actions: list[WouldBeAction] = []
+        # Last arbitrated action, to record would-be actions only on transition.
+        self._last_would_be: Action = Action.NONE
 
     @property
     def history(self) -> tuple[ToolEvent, ...]:
@@ -60,8 +92,26 @@ class Pipeline:
 
     @property
     def actions(self) -> tuple[Action, ...]:
-        """Action decided for each processed event, in order."""
+        """Action *emitted* for each processed event, in order.
+
+        In dry-run this is all ``NONE`` (nothing is emitted); the actions
+        arbitration *would* have taken live in :attr:`would_be_actions`.
+        """
         return tuple(self._actions)
+
+    @property
+    def dry_run(self) -> bool:
+        """True if the pipeline only observes (emits no action, never halts)."""
+        return self._dry_run
+
+    @property
+    def would_be_actions(self) -> tuple[WouldBeAction, ...]:
+        """Actions arbitration would have emitted in dry-run.
+
+        One entry per transition to a non-NONE action (see :class:`WouldBeAction`).
+        Always empty outside dry-run.
+        """
+        return tuple(self._would_be_actions)
 
     @property
     def stopped(self) -> bool:
@@ -81,6 +131,11 @@ class Pipeline:
         raises, the event is rolled back so ``history`` and ``actions`` stay in
         sync. After a STOP the pipeline is halted: further events are ignored
         and STOP is returned without touching the history.
+
+        In dry-run the pipeline only observes: detectors and arbitration run and
+        are logged, but no action is emitted (always returns ``NONE``) and the
+        run never halts, so the full would-be trajectory can be inspected via
+        :attr:`would_be_actions`.
         """
         if self._stopped:
             return Action.STOP
@@ -92,6 +147,8 @@ class Pipeline:
         except Exception:
             self._history.pop()
             raise
+        if self._dry_run:
+            return self._observe(event, signals, action)
         self._actions.append(action)
         self._log(event, signals, action)
         if action is Action.STOP:
@@ -99,8 +156,39 @@ class Pipeline:
             self._post_mortem = self._build_post_mortem(signals)
         return action
 
+    def _observe(self, event: ToolEvent, signals: list[Signal], action: Action) -> Action:
+        """Dry-run path: record/log the arbitrated action without emitting it.
+
+        Nothing reaches the agent (returns ``NONE``, never halts). Signals and
+        the decision are logged on every event; a :class:`WouldBeAction` is
+        recorded (and logged) only on a transition -- when the arbitrated action
+        changed since the last event -- so a sustained STOP records once.
+        """
+        index = len(self._history) - 1
+        self._actions.append(Action.NONE)
+        self._log_signals_and_decision(event, signals, action)
+        if action is not self._last_would_be:
+            self._last_would_be = action
+            if action is not Action.NONE:
+                self._would_be_actions.append(
+                    WouldBeAction(
+                        index=index,
+                        ts=event.ts,
+                        action=action,
+                        signals=tuple(signals),
+                        reason=self._action_reason(action, signals),
+                    )
+                )
+                if self._logger is not None:
+                    log_would_be_action(self._logger, action, index=index, ts=event.ts)
+        return Action.NONE
+
     def run(self, events: Iterable[ToolEvent]) -> list[Action]:
-        """Process events until the first STOP (inclusive) or exhaustion."""
+        """Process events until the first STOP (inclusive) or exhaustion.
+
+        In dry-run the pipeline never halts, so ``run`` always processes every
+        event; the would-be STOP is recorded in :attr:`would_be_actions`.
+        """
         actions: list[Action] = []
         for event in events:
             actions.append(self.process(event))
@@ -115,26 +203,42 @@ class Pipeline:
     def _log(self, event: ToolEvent, signals: list[Signal], action: Action) -> None:
         if self._logger is None:
             return
+        self._log_signals_and_decision(event, signals, action)
+        if action is not Action.NONE:
+            log_action(self._logger, action, index=len(self._history) - 1, ts=event.ts)
+
+    def _log_signals_and_decision(
+        self, event: ToolEvent, signals: list[Signal], action: Action
+    ) -> None:
+        """Log every signal and the arbitration decision (common to both modes)."""
+        if self._logger is None:
+            return
         index = len(self._history) - 1
         for signal in signals:
             log_signal(self._logger, signal, index=index, ts=event.ts)
         log_decision(self._logger, action, signals, index=index, ts=event.ts)
-        if action is not Action.NONE:
-            log_action(self._logger, action, index=index, ts=event.ts)
 
-    def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:
+    @staticmethod
+    def _action_reason(action: Action, signals: Sequence[Signal]) -> str:
+        """Human-readable reason for an action, from the peak-confidence signal.
+
+        Falls back to the action's own name when there are no signals (a custom
+        policy can act without detectors), so the reason matches the arbitrated
+        action -- e.g. "warn" for a would-be WARN -- rather than a hard-coded
+        "stop".
+        """
         if signals:
             peak = max(signals, key=lambda signal: signal.confidence)
-            reason = f"{peak.name}: {peak.reason}" if peak.reason else peak.name
-        else:
-            # A custom policy could in principle STOP with no signals.
-            reason = "stop"
+            return f"{peak.name}: {peak.reason}" if peak.reason else peak.name
+        return action.name.lower()
+
+    def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:
         # recent_history == 0 must mean "no tail"; a plain [-0:] slice would
         # return the whole history because -0 == 0.
         recent = self._history[-self._recent_history :] if self._recent_history else []
         return PostMortem(
             action=Action.STOP,
-            reason=reason,
+            reason=self._action_reason(Action.STOP, signals),
             stopped_at_index=len(self._history) - 1,
             events_processed=len(self._history),
             signals=tuple(signals),

@@ -203,6 +203,10 @@ class PolicySection:
 @dataclass(slots=True)
 class PipelineSection:
     recent_history: int = 10
+    # Dry-run (OBS-3): detectors and arbitration run and are logged, but no
+    # action is emitted and the run never halts -- the observe-only mode for
+    # tuning before trusting enforcement.
+    dry_run: bool = False
 
 
 @dataclass(slots=True)
@@ -322,8 +326,9 @@ def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSection:
     section = _Section(data, "pipeline")
     recent_history = section.int_("recent_history", 10)
+    dry_run = section.bool_("dry_run", False)
     section.finish()
-    return PipelineSection(recent_history=recent_history)
+    return PipelineSection(recent_history=recent_history, dry_run=dry_run)
 
 
 def _parse_store(data: Mapping[str, Any]) -> StoreSection:
@@ -478,4 +483,5 @@ def build_pipeline(
         policy,
         recent_history=config.pipeline.recent_history,
         logger=logger,
+        dry_run=config.pipeline.dry_run,
     )

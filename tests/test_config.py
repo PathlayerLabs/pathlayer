@@ -61,6 +61,7 @@ def test_defaults_match_current_hardcoded_values() -> None:
     assert config.policy.stop_threshold == 0.9
     assert config.policy.advisory_signals == frozenset()
     assert config.pipeline.recent_history == 10
+    assert config.pipeline.dry_run is False
     assert config.store.path == ".pathlayer/state.db"
     assert config.canonicalization.tool_masks == {}
 
@@ -242,6 +243,17 @@ def test_known_advisory_signal_accepted() -> None:
     assert config.policy.advisory_signals == frozenset({"no_progress"})
 
 
+def test_dry_run_parsed_and_defaults_false() -> None:
+    assert PathlayerConfig.from_mapping({}).pipeline.dry_run is False
+    config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})
+    assert config.pipeline.dry_run is True
+
+
+def test_dry_run_type_error() -> None:
+    with pytest.raises(ConfigError, match=r"pipeline.dry_run.*expected bool"):
+        PathlayerConfig.from_mapping({"pipeline": {"dry_run": "yes"}})
+
+
 # --------------------------------------------------------------------------- #
 # build_pipeline
 # --------------------------------------------------------------------------- #
@@ -297,6 +309,12 @@ def test_build_pipeline_passes_thresholds() -> None:
     assert loop._k == 3
     assert loop._window == 10
     assert pipeline._recent_history == 2
+
+
+def test_build_pipeline_threads_dry_run() -> None:
+    assert build_pipeline().dry_run is False
+    config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})
+    assert build_pipeline(config).dry_run is True
 
 
 def test_build_pipeline_rejects_out_of_range_threshold() -> None:
