@@ -128,6 +128,33 @@ def test_load_traces_single_file_and_dir() -> None:
     assert len(many) >= 4
 
 
+def test_load_traces_skips_non_pipeline_subdirs_when_scanning_root() -> None:
+    # Scanning traces/ must exclude the anchor-only experiment and synthetic
+    # generated corpora so an aggregate pipeline score is not polluted (#97 M-1).
+    def keys(traces: list[Trace]) -> set[tuple[str, str]]:
+        return {(t.label, t.description) for t in traces}
+
+    scanned = keys(load_traces(_TRACES_DIR))
+    experiment = keys(load_traces(_TRACES_DIR / "nop4_experiment"))
+    assert experiment, "expected nop4_experiment fixtures to exist"
+    # None of the experiment traces leak into a full-tree scan.
+    assert experiment.isdisjoint(scanned)
+
+
+def test_load_traces_loads_excluded_dir_when_targeted_directly() -> None:
+    # The exclusion is nested-discovery only: pointing straight at the subdir
+    # still loads it (the NOP-4 experiment rig depends on this).
+    direct = load_traces(_TRACES_DIR / "nop4_experiment")
+    assert len(direct) >= 1
+
+
+def test_full_corpus_scan_has_no_false_positives() -> None:
+    # The whole curated tree scores clean: excluding non-pipeline subdirs, no
+    # healthy trace is wrongly stopped (the FP=3 from nop4_experiment is gone).
+    report = score(load_traces(_TRACES_DIR))
+    assert report.false_positives == 0
+
+
 def test_golden_loops_are_all_caught() -> None:
     report = score(load_traces(_TRACES_DIR / "loop"))
     assert report.false_negatives == 0

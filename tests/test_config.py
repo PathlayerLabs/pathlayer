@@ -300,15 +300,27 @@ def test_build_pipeline_passes_thresholds() -> None:
 
 
 def test_build_pipeline_rejects_out_of_range_threshold() -> None:
-    # Range checks are delegated to the detector's own __init__ (one source).
+    # Range checks are delegated to the detector's own __init__ (one source), but
+    # build_pipeline re-wraps the ValueError as ConfigError (M-1) so a caller
+    # catching ConfigError sees malformed config consistently.
     config = PathlayerConfig.from_mapping({"detectors": {"loop": {"k": 1}}})
-    with pytest.raises(ValueError, match=r"k must be >= 2"):
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*k must be >= 2"):
         build_pipeline(config)
 
 
 def test_build_pipeline_rejects_bad_stop_threshold() -> None:
     config = PathlayerConfig.from_mapping({"policy": {"stop_threshold": 2.0}})
-    with pytest.raises(ValueError, match=r"stop_threshold"):
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*stop_threshold"):
+        build_pipeline(config)
+
+
+def test_build_pipeline_wraps_no_progress_range_error_as_config_error() -> None:
+    # A no_progress window too small for the threshold/target_rate is a range
+    # error from the detector; build_pipeline must surface it as ConfigError too.
+    config = PathlayerConfig.from_mapping(
+        {"detectors": {"no_progress": {"window": 2, "threshold": 2.0, "target_rate": 0.2}}}
+    )
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*window must be"):
         build_pipeline(config)
 
 

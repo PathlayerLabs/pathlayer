@@ -430,27 +430,41 @@ def build_pipeline(
 
     detectors: list[Detector] = []
     spec = config.detectors
-    if spec.loop.enabled:
-        detectors.append(
-            LoopDetector(k=spec.loop.k, window=spec.loop.window, tool_masks=tool_masks)
-        )
-    if spec.retry.enabled:
-        detectors.append(RetryDetector(threshold=spec.retry.threshold, tool_masks=tool_masks))
-    if spec.budget.enabled:
-        detectors.append(
-            BudgetDetector(
-                max_cost_usd=spec.budget.max_cost_usd, baseline_usd=spec.budget.baseline_usd
+    # load_config validates structure (keys/types) but delegates value-range
+    # checks to the detectors' and PolicyConfig's own __init__ (one source of
+    # truth). Surface those as ConfigError so a caller catching ConfigError around
+    # build_pipeline sees a malformed config consistently, instead of a raw
+    # ValueError leaking through.
+    try:
+        if spec.loop.enabled:
+            detectors.append(
+                LoopDetector(k=spec.loop.k, window=spec.loop.window, tool_masks=tool_masks)
+            )
+        if spec.retry.enabled:
+            detectors.append(RetryDetector(threshold=spec.retry.threshold, tool_masks=tool_masks))
+        if spec.budget.enabled:
+            detectors.append(
+                BudgetDetector(
+                    max_cost_usd=spec.budget.max_cost_usd, baseline_usd=spec.budget.baseline_usd
+                )
+            )
+        if spec.no_progress.enabled:
+            detectors.append(
+                NoProgressDetector(
+                    coding_anchors(),
+                    target_rate=spec.no_progress.target_rate,
+                    threshold=spec.no_progress.threshold,
+                    window=spec.no_progress.window,
+                )
+            )
+        policy = Policy(
+            PolicyConfig(
+                stop_threshold=config.policy.stop_threshold,
+                advisory_signals=config.policy.advisory_signals,
             )
         )
-    if spec.no_progress.enabled:
-        detectors.append(
-            NoProgressDetector(
-                coding_anchors(),
-                target_rate=spec.no_progress.target_rate,
-                threshold=spec.no_progress.threshold,
-                window=spec.no_progress.window,
-            )
-        )
+    except ValueError as exc:
+        raise ConfigError(f"invalid configuration value: {exc}") from exc
 
     if not detectors:
         # A pipeline with no detectors can never act -- almost always a config
@@ -459,13 +473,6 @@ def build_pipeline(
         (logger or logging.getLogger(__name__)).warning(
             "build_pipeline: no detectors enabled; the pipeline will never act"
         )
-
-    policy = Policy(
-        PolicyConfig(
-            stop_threshold=config.policy.stop_threshold,
-            advisory_signals=config.policy.advisory_signals,
-        )
-    )
     return Pipeline(
         detectors,
         policy,

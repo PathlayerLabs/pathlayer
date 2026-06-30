@@ -213,10 +213,33 @@ def score(
     return Report(results)
 
 
+# Subdirectories that are NOT part of the curated pipeline corpus and must not
+# pollute an aggregate score of ``traces/``:
+# - ``nop4_experiment``: anchor-only fixtures (see test_nop4_git_experiment.py);
+#   some are 16x-identical edits that legitimately trip the LoopDetector in the
+#   full pipeline, inflating the FP rate with traces never meant for it.
+# - ``generated``: synthetic VAL-5 output, not hand-labeled golden traces.
+# They are skipped only when discovered *beneath* the scan root, so pointing
+# load_traces directly at one of them still loads it (the experiment test does).
+_NON_PIPELINE_SUBDIRS = frozenset({"nop4_experiment", "generated"})
+
+
 def load_traces(path: str | Path) -> list[Trace]:
-    """Load a single trace file or every ``*.json`` trace under a directory."""
+    """Load a single trace file or every ``*.json`` trace under a directory.
+
+    When scanning a directory, non-pipeline subdirectories
+    (:data:`_NON_PIPELINE_SUBDIRS`) are skipped so an aggregate score reflects
+    only the curated pipeline corpus. Targeting such a subdirectory directly
+    still loads it -- the exclusion only applies to nested discovery.
+    """
     root = Path(path)
-    paths = [root] if root.is_file() else sorted(root.rglob("*.json"))
+    if root.is_file():
+        return [load_trace(root)]
+    paths = [
+        p
+        for p in sorted(root.rglob("*.json"))
+        if not _NON_PIPELINE_SUBDIRS.intersection(p.relative_to(root).parts[:-1])
+    ]
     return [load_trace(p) for p in paths]
 
 

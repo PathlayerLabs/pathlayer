@@ -6,13 +6,24 @@ Turns token counts into a USD cost so an adapter can populate
 
 Prices are a static, versioned table expressed in **USD per 1M tokens**, with
 separate input (prompt) and output (completion) rates. The table is deliberately
-small and overridable: pass a custom ``prices`` mapping (e.g. from a future
-config system) to ``cost_of``. Note this mapping **replaces** ``DEFAULT_PRICES``
-entirely -- it is not merged. To extend rather than replace the defaults, compose
-the mappings yourself, e.g. ``cost_of(model, ..., prices={**DEFAULT_PRICES,
-"house-model": ModelPrice(1.0, 2.0)})``. There is no network lookup -- a stale
-price is preferable to a runtime dependency on a pricing API in the detection
-path.
+small, **non-exhaustive**, and overridable two ways via ``cost_of``:
+
+- ``prices=`` **replaces** ``DEFAULT_PRICES`` entirely (full custom table).
+- ``extra_prices=`` **extends** the base, adding/overriding individual models
+  while keeping the known defaults -- the ergonomic path for "I just need one
+  more model" (e.g. a 2026 model not yet listed, or a house model).
+
+There is no network lookup -- a stale price is preferable to a runtime dependency
+on a pricing API in the detection path. The table is updated by hand; newer
+models (2026+) are expected to be supplied by the caller via ``extra_prices``
+rather than being guessed here.
+
+Watch out for *family price drops*: prefix matching resolves a dated/sub-version
+id to its base key (``claude-opus-4-5-...`` -> ``claude-opus-4``). If a newer
+sub-version is cheaper than its base, that inherits the **older, higher** price
+and over-charges -- which could trip a wrongful budget STOP. Pin the correct
+price explicitly via ``extra_prices`` (e.g. ``{"claude-opus-4-5": ModelPrice(
+5.0, 25.0)}``) rather than relying on the inherited base rate.
 
 Unknown model or missing token usage resolves to ``0.0`` (documented, never a
 crash): we would rather under-count spend than guess. The trade-off is that a
@@ -47,6 +58,7 @@ DEFAULT_PRICES: dict[str, ModelPrice] = {
     "o3": ModelPrice(2.0, 8.0),
     "o3-mini": ModelPrice(1.1, 4.4),
     "o4-mini": ModelPrice(1.1, 4.4),
+    "claude-3-7-sonnet": ModelPrice(3.0, 15.0),
     "claude-3-5-sonnet": ModelPrice(3.0, 15.0),
     "claude-3-5-haiku": ModelPrice(0.8, 4.0),
     "claude-3-opus": ModelPrice(15.0, 75.0),
@@ -96,13 +108,23 @@ def cost_of(
     input_tokens: int,
     output_tokens: int,
     prices: Mapping[str, ModelPrice] | None = None,
+    extra_prices: Mapping[str, ModelPrice] | None = None,
 ) -> float:
     """USD cost of a single LLM call, or ``0.0`` if it cannot be priced.
 
     Returns ``0.0`` for an unknown/absent model or non-positive token counts,
     rather than raising: a missing price must never crash the capture path.
+
+    Price resolution:
+
+    - ``prices`` given: that mapping **replaces** ``DEFAULT_PRICES`` (full table).
+    - ``extra_prices`` given: those entries are layered **on top of** the base
+      (``prices`` if also given, else ``DEFAULT_PRICES``), adding or overriding
+      individual models without dropping the rest. Use it to price a model the
+      default table does not list yet.
     """
-    table = prices if prices is not None else DEFAULT_PRICES
+    base = prices if prices is not None else DEFAULT_PRICES
+    table = {**base, **extra_prices} if extra_prices else base
     price = _lookup(model, table)
     if price is None:
         return 0.0

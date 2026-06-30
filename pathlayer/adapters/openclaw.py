@@ -1,8 +1,10 @@
-"""OpenClaw adapter (first concrete adapter).
+"""OpenClaw adapter (first concrete adapter) -- not yet implemented.
 
-TODO: wire into OpenClaw's per-action hooks and translate each tool call into
-a normalized `ToolEvent`. See https://docs.openclaw.ai/tools/loop-detection/
-for the framework's own hook surface.
+This is a placeholder stub: ``attach`` / ``detach`` raise ``NotImplementedError``
+until the real capture is wired. The work (translate each OpenClaw per-action
+hook into a normalized ``ToolEvent``) is tracked in ADP-1 (issue #40). The
+framework's actual hook surface is to be confirmed there rather than linked to an
+unverified external URL.
 """
 
 from __future__ import annotations

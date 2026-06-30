@@ -91,6 +91,40 @@ def test_post_mortem_to_dict_shape(trace: Callable[[str], list[ToolEvent]]) -> N
     assert isinstance(data["recent_history"], list) and data["recent_history"]
 
 
+def test_post_mortem_recent_history_carries_forensic_fields() -> None:
+    # recent_history must surface cost/kind/ts/error so a budget or retry stop is
+    # diagnosable from the JSON alone, not just tool+args (audit F-3 / #97 M-3).
+    events = [
+        ToolEvent(
+            tool="call_llm",
+            args={"prompt": "go"},
+            cost_usd=1.25,
+            ts=42.0,
+            metadata={"error": "boom"},
+        )
+        for _ in range(6)
+    ]
+    pipeline = Pipeline([LoopDetector()])
+    pipeline.run(events)
+    assert pipeline.post_mortem is not None
+    entry = pipeline.post_mortem.to_dict()["recent_history"][-1]
+    assert entry["tool"] == "call_llm"
+    assert entry["cost_usd"] == pytest.approx(1.25)
+    assert entry["kind"] == "tool_call"
+    assert entry["ts"] == pytest.approx(42.0)
+    assert entry["error"] == "boom"
+
+
+def test_post_mortem_recent_history_error_defaults_to_none() -> None:
+    # No error metadata -> the field is present and null, never a KeyError.
+    events = [ToolEvent(tool="read", args={"path": "a.py"}) for _ in range(6)]
+    pipeline = Pipeline([LoopDetector()])
+    pipeline.run(events)
+    assert pipeline.post_mortem is not None
+    entry = pipeline.post_mortem.to_dict()["recent_history"][-1]
+    assert entry["error"] is None
+
+
 def test_post_mortem_write_roundtrip(
     trace: Callable[[str], list[ToolEvent]], tmp_path: Path
 ) -> None:

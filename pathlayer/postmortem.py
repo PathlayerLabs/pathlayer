@@ -37,7 +37,20 @@ class PostMortem:
                 {"name": s.name, "confidence": s.confidence, "reason": s.reason}
                 for s in self.signals
             ],
-            "recent_history": [{"tool": e.tool, "args": e.args} for e in self.recent_history],
+            "recent_history": [
+                {
+                    "tool": e.tool,
+                    "args": e.args,
+                    "kind": e.kind.value,
+                    "cost_usd": e.cost_usd,
+                    "ts": e.ts,
+                    # The single most useful metadata field for a forensic read of
+                    # a budget/retry stop; surfaced explicitly rather than dumping
+                    # the whole (potentially large/sensitive) metadata blob.
+                    "error": e.metadata.get("error"),
+                }
+                for e in self.recent_history
+            ],
         }
 
     def write(self, path: str | Path) -> None:
