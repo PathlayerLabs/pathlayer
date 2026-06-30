@@ -52,9 +52,18 @@ canonicalization:
   #     mask: ["attempt_id"]
 
 policy:
-  stop_threshold: 0.9     # strongest actionable confidence at/above which we STOP (in [0, 1])
+  stop_threshold: 0.9     # fused confidence at/above which we STOP (in [0, 1])
   advisory_signals: []    # signals computed/logged but never allowed to STOP
                           # (one of: loop, retry, budget, no_progress)
+  # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
+  # Signals are fused with a weighted noisy-OR (1 - prod(1 - weight * confidence)),
+  # so two converging signals reinforce each other. A weight of 0 makes a signal
+  # inert (same effect as listing it in advisory_signals). Empty = all 1.0.
+  weights: {}
+  # Example: trust the loop detector fully but soften no_progress.
+  # weights:
+  #   loop: 1.0
+  #   no_progress: 0.5
 
 pipeline:
   recent_history: 10      # events kept in the post-mortem tail (>= 0)

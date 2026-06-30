@@ -58,15 +58,23 @@ def log_decision(
     action: Action,
     signals: Sequence[Signal],
     *,
+    fused: float,
     index: int,
     ts: float,
 ) -> None:
+    """Log an arbitration decision: the action, the fused confidence, the signals.
+
+    ``fused`` is the policy's weighted noisy-OR over the actionable signals
+    (ARB-1) -- the value actually compared to ``stop_threshold`` -- so an offline
+    reader sees *why* the decision was taken, not just the loudest raw signal.
+    """
     _emit(
         logger,
         "decision",
         index,
         ts,
         action=action.name,
+        fused=fused,
         signals=[{"name": s.name, "confidence": s.confidence} for s in signals],
     )
 

@@ -60,6 +60,7 @@ def test_defaults_match_current_hardcoded_values() -> None:
     assert config.detectors.no_progress.window == 64
     assert config.policy.stop_threshold == 0.9
     assert config.policy.advisory_signals == frozenset()
+    assert config.policy.weights == {}
     assert config.pipeline.recent_history == 10
     assert config.pipeline.dry_run is False
     assert config.store.path == ".pathlayer/state.db"
@@ -243,6 +244,53 @@ def test_known_advisory_signal_accepted() -> None:
     assert config.policy.advisory_signals == frozenset({"no_progress"})
 
 
+# --------------------------------------------------------------------------- #
+# policy.weights (ARB-1)
+# --------------------------------------------------------------------------- #
+
+
+def test_weights_parsed_and_coerced() -> None:
+    config = PathlayerConfig.from_mapping({"policy": {"weights": {"loop": 0.5, "retry": 1}}})
+    assert config.policy.weights == {"loop": 0.5, "retry": 1.0}
+    assert isinstance(config.policy.weights["retry"], float)
+
+
+def test_weights_default_empty() -> None:
+    assert PathlayerConfig.from_mapping({"policy": {}}).policy.weights == {}
+
+
+def test_weights_unknown_signal_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"unknown signal.*'no_progres'.*policy.weights|weights"):
+        PathlayerConfig.from_mapping({"policy": {"weights": {"no_progres": 0.5}}})
+
+
+def test_weights_for_disabled_budget_tolerated() -> None:
+    # budget is a known signal even though it is disabled by default: a weight
+    # for it is dead-but-valid config, not an error.
+    config = PathlayerConfig.from_mapping({"policy": {"weights": {"budget": 0.5}}})
+    assert config.policy.weights == {"budget": 0.5}
+
+
+def test_weight_out_of_range_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.weights.loop.*\[0, 1\]"):
+        PathlayerConfig.from_mapping({"policy": {"weights": {"loop": 1.5}}})
+
+
+def test_weight_bool_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.weights.loop.*expected number"):
+        PathlayerConfig.from_mapping({"policy": {"weights": {"loop": True}}})
+
+
+def test_weight_string_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.weights.loop.*expected number"):
+        PathlayerConfig.from_mapping({"policy": {"weights": {"loop": "0.5"}}})
+
+
+def test_weights_not_a_mapping_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.weights.*must be a mapping"):
+        PathlayerConfig.from_mapping({"policy": {"weights": "loop"}})
+
+
 def test_dry_run_parsed_and_defaults_false() -> None:
     assert PathlayerConfig.from_mapping({}).pipeline.dry_run is False
     config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})
@@ -315,6 +363,14 @@ def test_build_pipeline_threads_dry_run() -> None:
     assert build_pipeline().dry_run is False
     config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})
     assert build_pipeline(config).dry_run is True
+
+
+def test_build_pipeline_threads_weights() -> None:
+    config = PathlayerConfig.from_mapping({"policy": {"weights": {"no_progress": 0.0}}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.weight_for("no_progress") == 0.0
+    # Unconfigured detectors keep full authority.
+    assert pipeline._policy.config.weight_for("loop") == 1.0
 
 
 def test_build_pipeline_rejects_out_of_range_threshold() -> None:

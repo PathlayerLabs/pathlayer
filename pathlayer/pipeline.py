@@ -216,20 +216,22 @@ class Pipeline:
         index = len(self._history) - 1
         for signal in signals:
             log_signal(self._logger, signal, index=index, ts=event.ts)
-        log_decision(self._logger, action, signals, index=index, ts=event.ts)
+        fused = self._policy.fuse(signals)
+        log_decision(self._logger, action, signals, fused=fused, index=index, ts=event.ts)
 
-    @staticmethod
-    def _action_reason(action: Action, signals: Sequence[Signal]) -> str:
-        """Human-readable reason for an action, from the peak-confidence signal.
+    def _action_reason(self, action: Action, signals: Sequence[Signal]) -> str:
+        """Human-readable reason for an action, from the fusion-dominant signal.
 
-        Falls back to the action's own name when there are no signals (a custom
-        policy can act without detectors), so the reason matches the arbitrated
-        action -- e.g. "warn" for a would-be WARN -- rather than a hard-coded
-        "stop".
+        Uses the policy's :meth:`~pathlayer.policies.Policy.dominant_signal` (the
+        actionable signal with the largest weighted contribution), so a STOP
+        driven by convergence names the signal that drove it and never an
+        advisory one. Falls back to the action's own name when no actionable
+        signal exists (a custom policy can act without detectors), so the reason
+        matches the arbitrated action -- e.g. "warn" for a would-be WARN.
         """
-        if signals:
-            peak = max(signals, key=lambda signal: signal.confidence)
-            return f"{peak.name}: {peak.reason}" if peak.reason else peak.name
+        dominant = self._policy.dominant_signal(signals)
+        if dominant is not None:
+            return f"{dominant.name}: {dominant.reason}" if dominant.reason else dominant.name
         return action.name.lower()
 
     def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:

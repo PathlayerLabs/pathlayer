@@ -76,6 +76,7 @@ def test_default_policy_config_matches_architecture() -> None:
     config = PolicyConfig()
     assert config.stop_threshold == 0.9
     assert config.advisory_signals == frozenset()
+    assert config.weights == {}
 
 
 def test_policy_uses_provided_config() -> None:

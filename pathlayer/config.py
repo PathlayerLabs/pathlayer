@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -138,6 +138,29 @@ class _Section:
             raise self._err(key, "list of strings", value)
         return list(value)
 
+    def float_map(self, key: str) -> dict[str, float]:
+        """Parse a mapping of names to floats in [0, 1]. Absent/``null`` -> ``{}``.
+
+        Mirrors :meth:`float_`: rejects ``bool``, accepts ``int`` (coerced), and
+        validates each value's range with a path-qualified error.
+        """
+        where = f"{self._name}.{key}"
+        raw = _as_mapping(self._pop(key, {}), where)
+        out: dict[str, float] = {}
+        for subkey, value in raw.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(
+                    f"invalid value for '{where}.{subkey}': expected number, "
+                    f"got {type(value).__name__}"
+                )
+            number = float(value)
+            if not 0.0 <= number <= 1.0:
+                raise ConfigError(
+                    f"invalid value for '{where}.{subkey}': weight must be in [0, 1], got {number}"
+                )
+            out[str(subkey)] = number
+        return out
+
     def finish(self) -> None:
         if self._data:
             unknown = ", ".join(repr(key) for key in sorted(self._data))
@@ -198,6 +221,8 @@ class CanonicalizationConfig:
 class PolicySection:
     stop_threshold: float = 0.9
     advisory_signals: frozenset[str] = frozenset()
+    # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
+    weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -308,19 +333,37 @@ def _parse_canonicalization(data: Mapping[str, Any]) -> CanonicalizationConfig:
     return CanonicalizationConfig(tool_masks=tool_masks)
 
 
+def _reject_unknown_signals(names: Iterable[str], where: str) -> None:
+    """Reject any signal name not emitted by a known detector (anti-typo).
+
+    A misspelled name would otherwise silently no-op (an advisory exclusion that
+    excludes nothing, a weight applied to no detector).
+    """
+    unknown = sorted(set(names) - _KNOWN_SIGNALS)
+    if unknown:
+        known = ", ".join(sorted(_KNOWN_SIGNALS))
+        raise ConfigError(
+            f"unknown signal(s) in '{where}': "
+            f"{', '.join(repr(name) for name in unknown)}; known signals: {known}"
+        )
+
+
 def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
     section = _Section(data, "policy")
     stop_threshold = section.float_("stop_threshold", 0.9)
     advisory = section.str_list("advisory_signals", [])
+    weights = section.float_map("weights")
     section.finish()
-    unknown = sorted(set(advisory) - _KNOWN_SIGNALS)
-    if unknown:
-        known = ", ".join(sorted(_KNOWN_SIGNALS))
-        raise ConfigError(
-            f"unknown signal(s) in 'policy.advisory_signals': "
-            f"{', '.join(repr(name) for name in unknown)}; known signals: {known}"
-        )
-    return PolicySection(stop_threshold=stop_threshold, advisory_signals=frozenset(advisory))
+    _reject_unknown_signals(advisory, "policy.advisory_signals")
+    # A weight for a disabled detector (e.g. budget) is tolerated: this layer
+    # does not see ``detectors.*.enabled``, and it is the same dead-but-valid
+    # config as an advisory entry for an unwired detector.
+    _reject_unknown_signals(weights, "policy.weights")
+    return PolicySection(
+        stop_threshold=stop_threshold,
+        advisory_signals=frozenset(advisory),
+        weights=weights,
+    )
 
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSection:
@@ -466,6 +509,7 @@ def build_pipeline(
             PolicyConfig(
                 stop_threshold=config.policy.stop_threshold,
                 advisory_signals=config.policy.advisory_signals,
+                weights=config.policy.weights,
             )
         )
     except ValueError as exc:

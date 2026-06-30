@@ -52,11 +52,12 @@ def test_log_decision_and_action_payloads(caplog: pytest.LogCaptureFixture) -> N
     logger = get_logger("pathlayer.test.decision")
     with caplog.at_level(logging.INFO, logger=logger.name):
         signals = [Signal("loop", 0.95)]
-        log_decision(logger, Action.STOP, signals, index=4, ts=2.0)
+        log_decision(logger, Action.STOP, signals, fused=0.95, index=4, ts=2.0)
         log_action(logger, Action.STOP, index=4, ts=2.0)
 
     (decision,) = _records(caplog, "decision")
     assert decision.pathlayer["action"] == "STOP"
+    assert decision.pathlayer["fused"] == 0.95
     assert decision.pathlayer["signals"] == [{"name": "loop", "confidence": 0.95}]
 
     (action,) = _records(caplog, "action")
