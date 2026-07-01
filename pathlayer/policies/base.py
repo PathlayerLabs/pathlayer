@@ -65,6 +65,7 @@ guarantees keep it safe:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -278,10 +279,26 @@ class Policy:
 
         Advisory signals are excluded first. With no actionable signal the
         product is empty (1.0) so the fused confidence is 0.0.
+
+        Each ``signal.confidence`` is normalized into ``[0, 1]`` before entering
+        the product. Built-in detectors already stay in range, so this is a guard
+        for custom detectors: a stray ``confidence`` outside ``[0, 1]`` would push
+        the noisy-OR product out of ``[0, 1]`` (e.g. ``2.0`` -> ``fused == 2.0``, a
+        spurious STOP; a negative value could even invert the product). ``NaN`` is
+        treated as ``0.0`` (inert): it neither clamps nor compares, and would
+        otherwise propagate through the product so ``fused`` becomes ``NaN`` and
+        ``fused >= stop_threshold`` silently reads False. We normalize rather than
+        ``raise`` on purpose: the fusion runs inside the detection loop, and
+        Pathlayer must never crash the agent it observes. Detector range
+        violations are surfaced by unit tests, not by a runtime exception.
         """
         product = 1.0
         for signal in self._actionable(signals):
-            product *= 1.0 - self.config.weight_for(signal.name) * signal.confidence
+            confidence = signal.confidence
+            # NaN fails every comparison, so min/max would let it through; map it
+            # to the inert 0.0 first, then clamp finite values into [0, 1].
+            confidence = 0.0 if math.isnan(confidence) else max(0.0, min(1.0, confidence))
+            product *= 1.0 - self.config.weight_for(signal.name) * confidence
         return 1.0 - product
 
     def dominant_signal(self, signals: Sequence[Signal]) -> Signal | None:

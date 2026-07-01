@@ -93,6 +93,38 @@ def test_fuse_is_bounded_by_one() -> None:
     assert fused == pytest.approx(1.0)
 
 
+def test_fuse_clamps_confidence_above_one() -> None:
+    # A custom detector emitting confidence > 1 must not push fused past 1.0
+    # (audit #104 M-1): clamp to 1.0, do not raise.
+    assert Policy().fuse([Signal("custom", confidence=2.0)]) == pytest.approx(1.0)
+
+
+def test_fuse_clamps_confidence_below_zero() -> None:
+    # A negative confidence would make (1 - w*c) > 1 and invert the product,
+    # yielding a negative fused score. Clamp to 0.0 so the signal is inert.
+    assert Policy().fuse([Signal("custom", confidence=-1.0)]) == pytest.approx(0.0)
+
+
+def test_fuse_mixed_out_of_range_stays_bounded() -> None:
+    # One out-of-range signal alongside a normal one stays in [0, 1] and the
+    # clamped-high signal behaves like a maxed (1.0) detector.
+    fused = Policy().fuse([Signal("custom", confidence=1.5), Signal("loop", confidence=0.5)])
+    assert 0.0 <= fused <= 1.0
+    # 1.5 clamps to 1.0 -> noisy-OR with 0.5 saturates to 1.0.
+    assert fused == pytest.approx(1.0)
+
+
+def test_fuse_treats_nan_confidence_as_inert() -> None:
+    # NaN fails every comparison, so a plain clamp would let it propagate and
+    # make fused NaN (then `fused >= stop_threshold` silently reads False).
+    # Map NaN to 0.0 so the signal is inert and the invariant holds.
+    nan = float("nan")
+    assert Policy().fuse([Signal("custom", confidence=nan)]) == pytest.approx(0.0)
+    # A NaN signal must not swallow a real one riding alongside it.
+    fused = Policy().fuse([Signal("custom", confidence=nan), Signal("loop", confidence=0.5)])
+    assert fused == pytest.approx(0.5)
+
+
 def test_convergence_stops_below_each_individual_threshold() -> None:
     # DoD: single-detector fire scores lower than multi-detector convergence.
     # Two signals at 0.7 -> 1 - 0.3*0.3 = 0.91 >= 0.9 -> STOP, yet each alone
