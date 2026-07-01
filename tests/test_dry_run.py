@@ -19,7 +19,7 @@ from pathlayer.detectors.base import Signal
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import ToolEvent
 from pathlayer.observability import get_logger
-from pathlayer.policies import Action, Policy
+from pathlayer.policies import Action, HysteresisState, Policy
 
 
 def _loop_events(n: int) -> list[ToolEvent]:
@@ -103,22 +103,30 @@ def test_enforcement_mode_is_unchanged() -> None:
 
 
 class _AlwaysStopPolicy(Policy):
-    def decide(self, signals: Sequence[Signal]) -> Action:
-        return Action.STOP
+    def step(
+        self, state: HysteresisState, signals: Sequence[Signal]
+    ) -> tuple[HysteresisState, Action]:
+        return HysteresisState(Action.STOP), Action.STOP
 
 
 class _ScriptedPolicy(Policy):
-    """Returns a pre-set action per call, to drive arbitrary transitions."""
+    """Returns a pre-set action per call, to drive arbitrary transitions.
+
+    The pipeline drives the policy through :meth:`Policy.step` (ARB-3), so the
+    test double overrides ``step`` directly to script the committed action.
+    """
 
     def __init__(self, script: list[Action]) -> None:
         super().__init__()
         self._script = script
         self._i = 0
 
-    def decide(self, signals: Sequence[Signal]) -> Action:
+    def step(
+        self, state: HysteresisState, signals: Sequence[Signal]
+    ) -> tuple[HysteresisState, Action]:
         action = self._script[self._i]
         self._i += 1
-        return action
+        return HysteresisState(action), action
 
 
 def test_dry_run_records_each_transition_and_recovery() -> None:

@@ -399,6 +399,79 @@ def test_build_pipeline_wraps_no_progress_range_error_as_config_error() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# policy ladder + hysteresis (ARB-3)
+# --------------------------------------------------------------------------- #
+
+
+def test_tier_thresholds_parsed_and_built() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"tier_thresholds": {"warn": 0.5, "escalate": 0.75}}}
+    )
+    assert config.policy.tier_thresholds == {"warn": 0.5, "escalate": 0.75}
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.tier_thresholds == {
+        Action.WARN: 0.5,
+        Action.ESCALATE: 0.75,
+    }
+
+
+def test_tier_thresholds_default_empty_and_ticks_default_one() -> None:
+    config = PathlayerConfig.from_mapping({"policy": {}})
+    assert config.policy.tier_thresholds == {}
+    assert config.policy.escalate_ticks == 1
+    assert config.policy.deescalate_ticks == 1
+
+
+def test_unknown_tier_name_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"unknown tier.*policy.tier_thresholds.*'wrn'"):
+        PathlayerConfig.from_mapping({"policy": {"tier_thresholds": {"wrn": 0.5}}})
+
+
+def test_stop_tier_rejected_uses_stop_threshold() -> None:
+    with pytest.raises(ConfigError, match=r"unknown tier.*'stop'.*stop_threshold"):
+        PathlayerConfig.from_mapping({"policy": {"tier_thresholds": {"stop": 0.5}}})
+
+
+def test_tier_threshold_out_of_range_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.tier_thresholds.warn.*\[0, 1\]"):
+        PathlayerConfig.from_mapping({"policy": {"tier_thresholds": {"warn": 1.5}}})
+
+
+def test_ticks_parsed() -> None:
+    config = PathlayerConfig.from_mapping({"policy": {"escalate_ticks": 3, "deescalate_ticks": 2}})
+    assert config.policy.escalate_ticks == 3
+    assert config.policy.deescalate_ticks == 2
+
+
+def test_escalate_ticks_non_int_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.escalate_ticks.*expected int"):
+        PathlayerConfig.from_mapping({"policy": {"escalate_ticks": 1.5}})
+
+
+def test_build_pipeline_rejects_tier_at_or_above_stop_threshold() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"stop_threshold": 0.9, "tier_thresholds": {"escalate": 0.95}}}
+    )
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*< stop_threshold"):
+        build_pipeline(config)
+
+
+def test_build_pipeline_rejects_non_monotone_tiers() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"tier_thresholds": {"warn": 0.8, "summarize": 0.5}}}
+    )
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*non-decreasing"):
+        build_pipeline(config)
+
+
+def test_build_pipeline_threads_ticks() -> None:
+    config = PathlayerConfig.from_mapping({"policy": {"escalate_ticks": 3, "deescalate_ticks": 2}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.escalate_ticks == 3
+    assert pipeline._policy.config.deescalate_ticks == 2
+
+
+# --------------------------------------------------------------------------- #
 # tool_masks (CAN-2) exposed through config
 # --------------------------------------------------------------------------- #
 

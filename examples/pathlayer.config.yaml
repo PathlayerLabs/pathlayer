@@ -65,6 +65,41 @@ policy:
   #   loop: 1.0
   #   no_progress: 0.5
 
+  # Graded action ladder (ARB-3). By default only STOP is active (at
+  # stop_threshold), so arbitration is NONE/STOP -- the recommended setup today.
+  #
+  # STATUS: only STOP currently *acts* (halts the run). The intermediate tiers
+  # are decided and logged but NOT enforced yet -- their real behaviour lands in
+  # ACT-1..4 (Sprint 4). Until then, the one meaningful intermediate tier is a
+  # single "alert before stop": a WARN band below stop_threshold that surfaces a
+  # problem in the logs before anything is cut.
+  #
+  # Opt in by giving a tier a fused-confidence threshold (< stop_threshold).
+  # Recommended for now -- warn, then stop:
+  # tier_thresholds:
+  #   warn: 0.7
+  #
+  # The other tiers (summarize, fallback, escalate) already exist in the ladder
+  # so config is forward-compatible, but they are inert until ACT-1..4. If you
+  # do set several, they must be < stop_threshold and non-decreasing with
+  # severity (warn <= summarize <= fallback <= escalate).
+  tier_thresholds: {}
+  # Hysteresis: consecutive confirming ticks before a tier change commits, so a
+  # one-tick spike does not flip the action. 1 = no hysteresis (follow the
+  # target immediately, the previous behaviour).
+  #
+  # Semantics: the counter tracks consecutive ticks of *pressure away from the
+  # committed tier* (target above it for escalation, below for de-escalation),
+  # then jumps straight to the current target tier once the count is reached --
+  # not one tier per N ticks. Consequence: if the fused confidence climbs
+  # through tiers, the destination is wherever it is when the counter trips, so
+  # STOP can commit after fewer than escalate_ticks ticks *at STOP level* (e.g.
+  # with escalate_ticks=2, a WARN-level tick then a STOP-level tick commits
+  # STOP). A single non-confirming tick resets the counter, so a spike from
+  # baseline never escalates.
+  escalate_ticks: 1
+  deescalate_ticks: 1
+
 pipeline:
   recent_history: 10      # events kept in the post-mortem tail (>= 0)
 

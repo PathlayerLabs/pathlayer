@@ -43,7 +43,7 @@ from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Policy
+from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import PolicyConfig
 
 __all__ = [
@@ -65,6 +65,16 @@ _DISCOVERY_NAMES = ("config.yaml", "config.yml", "config.json")
 _KNOWN_SIGNALS: frozenset[str] = frozenset(
     {LoopDetector.name, RetryDetector.name, BudgetDetector.name, NoProgressDetector.name}
 )
+
+# Config-facing names for the intermediate ladder tiers (ARB-3) -> Action.
+# STOP is intentionally excluded: its threshold is ``policy.stop_threshold``
+# (single source of truth); NONE is the absence of action, not a tier.
+_LADDER_TIER_NAMES: dict[str, Action] = {
+    Action.WARN.name.lower(): Action.WARN,
+    Action.SUMMARIZE.name.lower(): Action.SUMMARIZE,
+    Action.FALLBACK.name.lower(): Action.FALLBACK,
+    Action.ESCALATE.name.lower(): Action.ESCALATE,
+}
 
 
 class ConfigError(ValueError):
@@ -156,7 +166,7 @@ class _Section:
             number = float(value)
             if not 0.0 <= number <= 1.0:
                 raise ConfigError(
-                    f"invalid value for '{where}.{subkey}': weight must be in [0, 1], got {number}"
+                    f"invalid value for '{where}.{subkey}': must be in [0, 1], got {number}"
                 )
             out[str(subkey)] = number
         return out
@@ -223,6 +233,12 @@ class PolicySection:
     advisory_signals: frozenset[str] = frozenset()
     # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
     weights: dict[str, float] = field(default_factory=dict)
+    # Intermediate ladder tiers (ARB-3): tier name (warn/summarize/fallback/
+    # escalate) -> fused-confidence threshold. Empty by default = only STOP.
+    tier_thresholds: dict[str, float] = field(default_factory=dict)
+    # Consecutive confirming ticks before committing a tier change (1 = none).
+    escalate_ticks: int = 1
+    deescalate_ticks: int = 1
 
 
 @dataclass(slots=True)
@@ -348,21 +364,44 @@ def _reject_unknown_signals(names: Iterable[str], where: str) -> None:
         )
 
 
+def _reject_unknown_tiers(names: Iterable[str], where: str) -> None:
+    """Reject any ladder-tier name that is not a configurable intermediate tier.
+
+    ``stop`` is rejected on purpose (its threshold is ``policy.stop_threshold``);
+    ``none`` and typos are rejected so a misspelled tier never silently no-ops.
+    """
+    unknown = sorted(set(names) - set(_LADDER_TIER_NAMES))
+    if unknown:
+        known = ", ".join(sorted(_LADDER_TIER_NAMES))
+        raise ConfigError(
+            f"unknown tier(s) in '{where}': "
+            f"{', '.join(repr(name) for name in unknown)}; "
+            f"configurable tiers: {known} (STOP uses policy.stop_threshold)"
+        )
+
+
 def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
     section = _Section(data, "policy")
     stop_threshold = section.float_("stop_threshold", 0.9)
     advisory = section.str_list("advisory_signals", [])
     weights = section.float_map("weights")
+    tier_thresholds = section.float_map("tier_thresholds")
+    escalate_ticks = section.int_("escalate_ticks", 1)
+    deescalate_ticks = section.int_("deescalate_ticks", 1)
     section.finish()
     _reject_unknown_signals(advisory, "policy.advisory_signals")
     # A weight for a disabled detector (e.g. budget) is tolerated: this layer
     # does not see ``detectors.*.enabled``, and it is the same dead-but-valid
     # config as an advisory entry for an unwired detector.
     _reject_unknown_signals(weights, "policy.weights")
+    _reject_unknown_tiers(tier_thresholds, "policy.tier_thresholds")
     return PolicySection(
         stop_threshold=stop_threshold,
         advisory_signals=frozenset(advisory),
         weights=weights,
+        tier_thresholds=tier_thresholds,
+        escalate_ticks=escalate_ticks,
+        deescalate_ticks=deescalate_ticks,
     )
 
 
@@ -505,11 +544,18 @@ def build_pipeline(
                     window=spec.no_progress.window,
                 )
             )
+        tier_thresholds = {
+            _LADDER_TIER_NAMES[name]: threshold
+            for name, threshold in config.policy.tier_thresholds.items()
+        }
         policy = Policy(
             PolicyConfig(
                 stop_threshold=config.policy.stop_threshold,
                 advisory_signals=config.policy.advisory_signals,
                 weights=config.policy.weights,
+                tier_thresholds=tier_thresholds,
+                escalate_ticks=config.policy.escalate_ticks,
+                deescalate_ticks=config.policy.deescalate_ticks,
             )
         )
     except ValueError as exc:

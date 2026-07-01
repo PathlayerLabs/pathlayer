@@ -18,7 +18,7 @@ from pathlayer.adapters import InMemoryAdapter
 from pathlayer.detectors.base import Signal
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import ToolEvent
-from pathlayer.policies import Action, Policy
+from pathlayer.policies import Action, HysteresisState, Policy
 
 
 def _healthy() -> list[ToolEvent]:
@@ -170,8 +170,10 @@ def test_zero_recent_history_means_no_tail() -> None:
 
 
 class _AlwaysStopPolicy(Policy):
-    def decide(self, signals: Sequence[Signal]) -> Action:
-        return Action.STOP
+    def step(
+        self, state: HysteresisState, signals: Sequence[Signal]
+    ) -> tuple[HysteresisState, Action]:
+        return HysteresisState(Action.STOP), Action.STOP
 
 
 def test_post_mortem_handles_empty_signals() -> None:

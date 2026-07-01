@@ -7,9 +7,10 @@ resulting :class:`~pathlayer.detectors.base.Signal`s through a
 :class:`~pathlayer.policies.Policy`, and returns the graded :class:`Action`.
 
 It performs no I/O and no LLM calls; given the same event sequence it produces
-the same action sequence. Canonicalization, real detectors, real arbitration
-and stop/post-mortem land in later issues -- with stub detectors and the
-default policy the pipeline simply yields ``Action.NONE``.
+the same action sequence. Arbitration is graded (ARB-3): the policy maps fused
+confidence to a tier and the pipeline threads the :class:`HysteresisState` so a
+brief spike does not flip the action. Only ``STOP`` halts the run; intermediate
+tiers (WARN..ESCALATE) are decided and logged but, in V1, not yet enforced.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from pathlayer.observability import (
     log_would_be_action,
 )
 from pathlayer.policies import Action, Policy
+from pathlayer.policies.base import HysteresisState
 from pathlayer.postmortem import PostMortem
 
 DEFAULT_RECENT_HISTORY = 10
@@ -84,6 +86,8 @@ class Pipeline:
         self._would_be_actions: list[WouldBeAction] = []
         # Last arbitrated action, to record would-be actions only on transition.
         self._last_would_be: Action = Action.NONE
+        # Hysteresis machine state (ARB-3), threaded across events by the policy.
+        self._hysteresis = HysteresisState()
 
     @property
     def history(self) -> tuple[ToolEvent, ...]:
@@ -143,10 +147,13 @@ class Pipeline:
         try:
             history = tuple(self._history)
             signals = [detector.evaluate(history) for detector in self._detectors]
-            action = self._policy.decide(signals)
+            next_state, action = self._policy.step(self._hysteresis, signals)
         except Exception:
             self._history.pop()
             raise
+        # Commit hysteresis state only after the tick succeeds, so a raising
+        # detector/policy leaves both history and hysteresis untouched.
+        self._hysteresis = next_state
         if self._dry_run:
             return self._observe(event, signals, action)
         self._actions.append(action)

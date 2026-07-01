@@ -10,10 +10,14 @@ configurable.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
-from pathlayer.detectors.base import Signal
-from pathlayer.policies import Action, Policy
+from pathlayer.detectors.base import Detector, Signal
+from pathlayer.events import ToolEvent
+from pathlayer.pipeline import Pipeline
+from pathlayer.policies import Action, HysteresisState, Policy
 from pathlayer.policies.base import PolicyConfig
 
 
@@ -204,3 +208,277 @@ def test_dominant_signal_none_without_actionable() -> None:
     policy = Policy(PolicyConfig(advisory_signals=frozenset({"loop"})))
     assert policy.dominant_signal([Signal("loop", confidence=1.0)]) is None
     assert policy.dominant_signal([]) is None
+
+
+# --------------------------------------------------------------------------- #
+# ARB-3: graded ladder (target_tier) + hysteresis (step)
+# --------------------------------------------------------------------------- #
+
+# A full intermediate ladder, each tier strictly below stop_threshold (0.9).
+_LADDER: dict[Action, float] = {
+    Action.WARN: 0.3,
+    Action.SUMMARIZE: 0.5,
+    Action.FALLBACK: 0.7,
+    Action.ESCALATE: 0.8,
+}
+
+
+def _sig(confidence: float) -> list[Signal]:
+    # One detector at full weight: fused confidence == this confidence.
+    return [Signal("loop", confidence=confidence)]
+
+
+def _run(policy: Policy, confidences: Sequence[float]) -> list[Action]:
+    """Thread the hysteresis state across a sequence of single-signal ticks."""
+    state = HysteresisState()
+    actions: list[Action] = []
+    for confidence in confidences:
+        state, action = policy.step(state, _sig(confidence))
+        actions.append(action)
+    return actions
+
+
+def test_target_tier_default_is_none_or_stop() -> None:
+    # Zero-config: only STOP is active, so the ladder degenerates to ARB-1.
+    policy = Policy()
+    assert policy.target_tier(_sig(0.5)) is Action.NONE
+    assert policy.target_tier(_sig(0.9)) is Action.STOP
+    assert policy.target_tier(_sig(1.0)) is Action.STOP
+
+
+def test_target_tier_maps_each_ladder_band() -> None:
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER))
+    assert policy.target_tier(_sig(0.1)) is Action.NONE
+    assert policy.target_tier(_sig(0.3)) is Action.WARN
+    assert policy.target_tier(_sig(0.5)) is Action.SUMMARIZE
+    assert policy.target_tier(_sig(0.7)) is Action.FALLBACK
+    assert policy.target_tier(_sig(0.85)) is Action.ESCALATE
+    assert policy.target_tier(_sig(0.95)) is Action.STOP
+
+
+def test_target_tier_none_without_actionable_signal() -> None:
+    # Advisory exclusion can empty the actionable set: you cannot act on nothing.
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, advisory_signals=frozenset({"loop"})))
+    assert policy.target_tier(_sig(1.0)) is Action.NONE
+    assert policy.target_tier([]) is Action.NONE
+
+
+def test_active_tiers_derives_stop_from_stop_threshold() -> None:
+    policy = Policy(PolicyConfig(stop_threshold=0.95, tier_thresholds={Action.WARN: 0.3}))
+    assert policy.config.active_tiers() == {Action.WARN: 0.3, Action.STOP: 0.95}
+
+
+def test_default_ticks_follow_target_immediately() -> None:
+    # escalate_ticks == deescalate_ticks == 1: no hysteresis, follow the target.
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER))
+    assert _run(policy, [0.0, 0.35, 0.0]) == [Action.NONE, Action.WARN, Action.NONE]
+
+
+def test_default_policy_step_matches_arb1() -> None:
+    # Regression: with the default policy, step is exactly decide (NONE/STOP).
+    policy = Policy()
+    assert _run(policy, [0.5, 0.9, 0.99]) == [Action.NONE, Action.STOP, Action.STOP]
+
+
+def test_brief_spike_does_not_escalate() -> None:
+    # A single tick above threshold then a drop must not flip the action up.
+    policy = Policy(PolicyConfig(escalate_ticks=2))
+    assert _run(policy, [0.0, 0.95, 0.0]) == [Action.NONE, Action.NONE, Action.NONE]
+
+
+def test_sustained_breach_escalates() -> None:
+    policy = Policy(PolicyConfig(escalate_ticks=2))
+    assert _run(policy, [0.95, 0.95]) == [Action.NONE, Action.STOP]
+
+
+def test_escalation_jumps_straight_to_target_tier() -> None:
+    # H-1: a confidence that lands at the STOP band commits STOP after exactly
+    # escalate_ticks ticks -- it does NOT crawl WARN->...->STOP one tier per N.
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, escalate_ticks=2))
+    assert _run(policy, [0.95, 0.95]) == [Action.NONE, Action.STOP]
+
+
+def test_rising_signal_commits_target_on_trip_tick() -> None:
+    # Pins the documented semantics: the counter tracks pressure away from the
+    # committed tier, not time at the destination. With escalate_ticks=2, a
+    # WARN-level tick followed by a STOP-level tick commits STOP on the second
+    # tick -- even though only one tick was at STOP level. A refactor toward
+    # per-destination-tier counting would break this on purpose.
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, escalate_ticks=2))
+    assert _run(policy, [0.35, 0.95]) == [Action.NONE, Action.STOP]
+
+
+def test_oscillation_never_escalates() -> None:
+    # Alternating above/below threshold keeps resetting the counter (anti-flap).
+    policy = Policy(PolicyConfig(escalate_ticks=2))
+    assert _run(policy, [0.95, 0.0, 0.95, 0.0]) == [Action.NONE] * 4
+
+
+def test_smooth_deescalation_after_m_ticks() -> None:
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, deescalate_ticks=2))
+    # Up to ESCALATE immediately (escalate_ticks=1), then two low ticks to drop.
+    assert _run(policy, [0.85, 0.0, 0.0]) == [Action.ESCALATE, Action.ESCALATE, Action.NONE]
+
+
+def test_deescalation_counter_resets_on_non_confirming_tick() -> None:
+    # A tick back at the committed tier mid-descent resets the down counter, so
+    # de-escalation needs deescalate_ticks *consecutive* low ticks.
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, deescalate_ticks=2))
+    actions = _run(policy, [0.85, 0.0, 0.85, 0.0, 0.0])
+    assert actions == [
+        Action.ESCALATE,
+        Action.ESCALATE,  # down_count 1
+        Action.ESCALATE,  # back at ESCALATE -> reset
+        Action.ESCALATE,  # down_count 1 again
+        Action.NONE,  # down_count 2 -> drop
+    ]
+
+
+def test_asymmetric_escalate_and_deescalate() -> None:
+    # Slow to escalate (3), fast to de-escalate (1).
+    policy = Policy(PolicyConfig(tier_thresholds=_LADDER, escalate_ticks=3, deescalate_ticks=1))
+    assert _run(policy, [0.35, 0.35, 0.35, 0.0]) == [
+        Action.NONE,
+        Action.NONE,
+        Action.WARN,
+        Action.NONE,
+    ]
+
+
+# --- PolicyConfig validation (ARB-3) --------------------------------------- #
+
+
+def test_default_tier_thresholds_empty_and_ticks_one() -> None:
+    config = PolicyConfig()
+    assert config.tier_thresholds == {}
+    assert config.escalate_ticks == 1
+    assert config.deescalate_ticks == 1
+
+
+def test_tier_thresholds_reject_stop_and_none_keys() -> None:
+    with pytest.raises(ValueError, match="intermediate tiers"):
+        PolicyConfig(tier_thresholds={Action.STOP: 0.5})
+    with pytest.raises(ValueError, match="intermediate tiers"):
+        PolicyConfig(tier_thresholds={Action.NONE: 0.5})
+
+
+def test_tier_threshold_must_be_below_stop_threshold() -> None:
+    with pytest.raises(ValueError, match="must be < stop_threshold"):
+        PolicyConfig(stop_threshold=0.9, tier_thresholds={Action.ESCALATE: 0.95})
+
+
+def test_tier_thresholds_must_be_non_decreasing() -> None:
+    with pytest.raises(ValueError, match="non-decreasing"):
+        PolicyConfig(tier_thresholds={Action.WARN: 0.8, Action.SUMMARIZE: 0.5})
+
+
+def test_tier_thresholds_with_gaps_are_allowed() -> None:
+    # A sparse ladder (only WARN and ESCALATE) is valid and ordered.
+    config = PolicyConfig(tier_thresholds={Action.WARN: 0.3, Action.ESCALATE: 0.8})
+    assert config.tier_thresholds == {Action.WARN: 0.3, Action.ESCALATE: 0.8}
+
+
+def test_tier_threshold_out_of_range_rejected() -> None:
+    with pytest.raises(ValueError, match="must be in \\[0, 1\\]"):
+        PolicyConfig(tier_thresholds={Action.WARN: 1.5})
+
+
+def test_tier_threshold_bool_rejected() -> None:
+    with pytest.raises(ValueError, match="must be a number"):
+        PolicyConfig(tier_thresholds={Action.WARN: True})  # type: ignore[dict-item]
+
+
+def test_tier_threshold_non_number_rejected() -> None:
+    with pytest.raises(ValueError, match="must be a number"):
+        PolicyConfig(tier_thresholds={Action.WARN: "0.3"})  # type: ignore[dict-item]
+
+
+def test_tier_thresholds_defensively_copied() -> None:
+    source = {Action.WARN: 0.3}
+    config = PolicyConfig(tier_thresholds=source)
+    source[Action.WARN] = 0.0
+    assert config.tier_thresholds == {Action.WARN: 0.3}
+
+
+def test_tier_threshold_int_coerced_to_float() -> None:
+    config = PolicyConfig(stop_threshold=1.0, tier_thresholds={Action.WARN: 0})
+    assert config.tier_thresholds[Action.WARN] == 0.0
+    assert isinstance(config.tier_thresholds[Action.WARN], float)
+
+
+def test_escalate_ticks_must_be_at_least_one() -> None:
+    with pytest.raises(ValueError, match="escalate_ticks must be an int >= 1"):
+        PolicyConfig(escalate_ticks=0)
+
+
+def test_deescalate_ticks_must_be_at_least_one() -> None:
+    with pytest.raises(ValueError, match="deescalate_ticks must be an int >= 1"):
+        PolicyConfig(deescalate_ticks=0)
+
+
+def test_ticks_bool_rejected() -> None:
+    # bool is an int subclass: True must not silently become 1 tick.
+    with pytest.raises(ValueError, match="escalate_ticks must be an int >= 1"):
+        PolicyConfig(escalate_ticks=True)  # type: ignore[arg-type]
+
+
+def test_ticks_non_int_rejected() -> None:
+    with pytest.raises(ValueError, match="deescalate_ticks must be an int >= 1"):
+        PolicyConfig(deescalate_ticks=1.5)  # type: ignore[arg-type]
+
+
+# --- Pipeline integration: hysteresis delays a real STOP ------------------- #
+
+
+class _ScriptedDetector(Detector):
+    """Emits a pre-set confidence per event, to drive arbitration deterministically."""
+
+    name = "loop"
+
+    def __init__(self, confidences: Sequence[float]) -> None:
+        self._confidences = list(confidences)
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        return Signal(self.name, confidence=self._confidences[len(history) - 1])
+
+
+def test_pipeline_hysteresis_delays_stop_and_resets_on_dip() -> None:
+    # escalate_ticks=2: a lone spike (idx 0) then a dip (idx 1) must not STOP;
+    # only the sustained breach at idx 2-3 does. Without hysteresis the run would
+    # have stopped at idx 0.
+    detector = _ScriptedDetector([0.95, 0.2, 0.95, 0.95])
+    pipeline = Pipeline([detector], Policy(PolicyConfig(escalate_ticks=2)))
+    events = [ToolEvent(tool="t", args={}, ts=float(i)) for i in range(4)]
+    actions = pipeline.run(events)
+
+    assert actions == [Action.NONE, Action.NONE, Action.NONE, Action.STOP]
+    assert pipeline.stopped is True
+    assert pipeline.post_mortem is not None
+    assert pipeline.post_mortem.stopped_at_index == 3
+
+
+class _RaisingDetector(Detector):
+    """Builds confidence, then raises -- to test rollback of the hysteresis state."""
+
+    name = "loop"
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        if len(history) >= 2:
+            raise RuntimeError("boom")
+        return Signal(self.name, confidence=0.95)
+
+
+def test_pipeline_rolls_back_hysteresis_state_on_detector_error() -> None:
+    # A tick that raises must leave history AND the hysteresis counters untouched,
+    # so the run stays deterministic and a partial tick cannot be half-committed.
+    pipeline = Pipeline([_RaisingDetector()], Policy(PolicyConfig(escalate_ticks=3)))
+    assert pipeline.process(ToolEvent(tool="t", ts=0.0)) is Action.NONE
+    before = pipeline._hysteresis
+    assert before.up_count == 1
+
+    with pytest.raises(RuntimeError, match="boom"):
+        pipeline.process(ToolEvent(tool="t", ts=1.0))
+
+    # History rolled back to the one good event, hysteresis unchanged.
+    assert len(pipeline.history) == 1
+    assert pipeline._hysteresis == before
