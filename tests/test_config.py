@@ -28,7 +28,7 @@ from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
-from pathlayer.policies import Action
+from pathlayer.policies import Action, OverrideRule
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "examples" / "pathlayer.config.yaml"
 
@@ -469,6 +469,91 @@ def test_build_pipeline_threads_ticks() -> None:
     pipeline = build_pipeline(config)
     assert pipeline._policy.config.escalate_ticks == 3
     assert pipeline._policy.config.deescalate_ticks == 2
+
+
+# --------------------------------------------------------------------------- #
+# ARB-4: priority overrides through config
+# --------------------------------------------------------------------------- #
+
+
+def test_overrides_default_empty() -> None:
+    assert PathlayerConfig.from_mapping({"policy": {}}).policy.overrides == {}
+
+
+def test_overrides_parsed_and_built() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"overrides": {"loop": {"threshold": 0.8, "action": "stop"}}}}
+    )
+    assert config.policy.overrides == {"loop": OverrideRule(0.8, Action.STOP)}
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides["loop"] == OverrideRule(0.8, Action.STOP)
+
+
+def test_override_defaults_threshold_one_action_stop() -> None:
+    # An empty rule body means "stop at ceiling" -- the budget case.
+    config = PathlayerConfig.from_mapping({"policy": {"overrides": {"loop": {}}}})
+    assert config.policy.overrides["loop"] == OverrideRule(1.0, Action.STOP)
+
+
+def test_override_unknown_signal_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"unknown signal.*policy.overrides.*'budgt'"):
+        PathlayerConfig.from_mapping({"policy": {"overrides": {"budgt": {"threshold": 1.0}}}})
+
+
+def test_override_unknown_action_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"unknown override action 'halt'"):
+        PathlayerConfig.from_mapping({"policy": {"overrides": {"budget": {"action": "halt"}}}})
+
+
+def test_override_threshold_out_of_range_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"policy.overrides.budget.threshold.*\[0, 1\]"):
+        PathlayerConfig.from_mapping({"policy": {"overrides": {"budget": {"threshold": 1.5}}}})
+
+
+def test_override_unknown_key_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"unknown key.*policy.overrides.budget"):
+        PathlayerConfig.from_mapping({"policy": {"overrides": {"budget": {"thresh": 1.0}}}})
+
+
+def test_override_and_advisory_conflict_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"cannot be both advisory and overridden.*budget"):
+        PathlayerConfig.from_mapping(
+            {"policy": {"advisory_signals": ["budget"], "overrides": {"budget": {}}}}
+        )
+
+
+def test_budget_override_auto_wired_when_enabled() -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"budget": {"enabled": True}}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides == {"budget": OverrideRule(1.0, Action.STOP)}
+
+
+def test_no_budget_override_when_budget_disabled() -> None:
+    # Default config: budget disabled -> zero-config stays ARB-1/2 (no overrides).
+    assert build_pipeline()._policy.config.overrides == {}
+
+
+def test_user_budget_override_wins_over_auto() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {"budget": {"enabled": True}},
+            "policy": {"overrides": {"budget": {"threshold": 0.95, "action": "escalate"}}},
+        }
+    )
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides == {"budget": OverrideRule(0.95, Action.ESCALATE)}
+
+
+def test_no_budget_override_when_budget_advisory() -> None:
+    # finding A/F: budget observe-only -> no auto override (advisory wins).
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {"budget": {"enabled": True}},
+            "policy": {"advisory_signals": ["budget"]},
+        }
+    )
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides == {}
 
 
 # --------------------------------------------------------------------------- #

@@ -100,6 +100,33 @@ policy:
   escalate_ticks: 1
   deescalate_ticks: 1
 
+  # Priority overrides (ARB-4). Some signals don't deserve the graduated path:
+  # a rule maps a detector to a confidence threshold + action that is committed
+  # IMMEDIATELY, bypassing both fusion and hysteresis. The headline case is
+  # "budget at ceiling = stop now".
+  #
+  # AUTO-WIRING: when the budget detector is enabled (detectors.budget.enabled),
+  # a `budget -> {threshold: 1.0, action: stop}` rule is added automatically, so
+  # hitting the ceiling stops at once regardless of escalate_ticks. You do NOT
+  # need to declare it. Declaring `budget` here overrides that default; listing
+  # `budget` in advisory_signals disables it (advisory wins, and the two cannot
+  # be combined -- that is rejected).
+  #
+  # Fields per rule: `threshold` (confidence in [0, 1], default 1.0) and
+  # `action` (warn/summarize/fallback/escalate/stop, default stop). As with the
+  # ladder tiers, only STOP is actually enforced in V1; an override to an
+  # intermediate tier is decided and logged but inert until ACT-1..4.
+  overrides: {}
+  # Example: soften the budget brake to fire at 95% of the ceiling, and add a
+  # custom immediate stop when the loop detector is fully saturated.
+  # overrides:
+  #   budget:
+  #     threshold: 0.95
+  #     action: stop
+  #   loop:
+  #     threshold: 1.0
+  #     action: stop
+
 pipeline:
   recent_history: 10      # events kept in the post-mortem tail (>= 0)
 

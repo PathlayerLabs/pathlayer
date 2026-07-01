@@ -43,7 +43,7 @@ from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action, Policy
+from pathlayer.policies import Action, OverrideRule, Policy
 from pathlayer.policies.base import PolicyConfig
 
 __all__ = [
@@ -74,6 +74,13 @@ _LADDER_TIER_NAMES: dict[str, Action] = {
     Action.SUMMARIZE.name.lower(): Action.SUMMARIZE,
     Action.FALLBACK.name.lower(): Action.FALLBACK,
     Action.ESCALATE.name.lower(): Action.ESCALATE,
+}
+
+# Config-facing action names an override rule (ARB-4) may target. Unlike the
+# ladder tiers, STOP is included: the headline override is budget -> stop.
+_OVERRIDE_ACTION_NAMES: dict[str, Action] = {
+    **_LADDER_TIER_NAMES,
+    Action.STOP.name.lower(): Action.STOP,
 }
 
 
@@ -239,6 +246,10 @@ class PolicySection:
     # Consecutive confirming ticks before committing a tier change (1 = none).
     escalate_ticks: int = 1
     deescalate_ticks: int = 1
+    # Priority overrides (ARB-4): detector name -> rule (threshold + action).
+    # Empty by default; the budget->stop rule is auto-wired by build_pipeline
+    # only when the budget detector is enabled (and not advisory).
+    overrides: dict[str, OverrideRule] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -380,6 +391,34 @@ def _reject_unknown_tiers(names: Iterable[str], where: str) -> None:
         )
 
 
+def _parse_override_rules(raw: Mapping[str, Any]) -> dict[str, OverrideRule]:
+    """Parse ``policy.overrides``: name -> {threshold, action} (ARB-4).
+
+    ``threshold`` defaults to 1.0 (fire only at a maxed-out signal, the budget
+    ceiling case) and ``action`` to ``stop``. Range/type of ``threshold`` is
+    validated here for a path-qualified error; the action name is mapped through
+    :data:`_OVERRIDE_ACTION_NAMES` (STOP allowed, unlike ladder tiers).
+    """
+    rules: dict[str, OverrideRule] = {}
+    for name, spec in raw.items():
+        where = f"policy.overrides.{name}"
+        spec_s = _Section(_as_mapping(spec, where), where)
+        threshold = spec_s.float_("threshold", 1.0)
+        action_name = spec_s.str_("action", Action.STOP.name.lower())
+        spec_s.finish()
+        if not 0.0 <= threshold <= 1.0:
+            raise ConfigError(f"invalid value for '{where}.threshold': must be in [0, 1]")
+        action = _OVERRIDE_ACTION_NAMES.get(action_name)
+        if action is None:
+            known = ", ".join(sorted(_OVERRIDE_ACTION_NAMES))
+            raise ConfigError(
+                f"unknown override action '{action_name}' in '{where}.action'; "
+                f"valid actions: {known}"
+            )
+        rules[str(name)] = OverrideRule(threshold=threshold, action=action)
+    return rules
+
+
 def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
     section = _Section(data, "policy")
     stop_threshold = section.float_("stop_threshold", 0.9)
@@ -388,6 +427,7 @@ def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
     tier_thresholds = section.float_map("tier_thresholds")
     escalate_ticks = section.int_("escalate_ticks", 1)
     deescalate_ticks = section.int_("deescalate_ticks", 1)
+    overrides_raw = _as_mapping(section._pop("overrides", {}), "policy.overrides")
     section.finish()
     _reject_unknown_signals(advisory, "policy.advisory_signals")
     # A weight for a disabled detector (e.g. budget) is tolerated: this layer
@@ -395,6 +435,18 @@ def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
     # config as an advisory entry for an unwired detector.
     _reject_unknown_signals(weights, "policy.weights")
     _reject_unknown_tiers(tier_thresholds, "policy.tier_thresholds")
+    overrides = _parse_override_rules(overrides_raw)
+    _reject_unknown_signals(overrides, "policy.overrides")
+    # An override on an observe-only detector is contradictory: advisory means
+    # "never act", an override means "act immediately". Fail fast rather than
+    # silently letting advisory win (which it does in the policy layer anyway).
+    conflicting = sorted(set(overrides) & set(advisory))
+    if conflicting:
+        raise ConfigError(
+            "signal(s) cannot be both advisory and overridden: "
+            f"{', '.join(repr(name) for name in conflicting)}; "
+            "an advisory signal is observe-only, an override forces an action"
+        )
     return PolicySection(
         stop_threshold=stop_threshold,
         advisory_signals=frozenset(advisory),
@@ -402,6 +454,7 @@ def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
         tier_thresholds=tier_thresholds,
         escalate_ticks=escalate_ticks,
         deescalate_ticks=deescalate_ticks,
+        overrides=overrides,
     )
 
 
@@ -548,6 +601,16 @@ def build_pipeline(
             _LADDER_TIER_NAMES[name]: threshold
             for name, threshold in config.policy.tier_thresholds.items()
         }
+        overrides = dict(config.policy.overrides)
+        # ARB-4: budget at ceiling = stop now. Auto-wire the budget->stop
+        # override when the detector is enabled, unless the user already set a
+        # budget rule (theirs wins) or made budget observe-only (advisory wins).
+        if (
+            spec.budget.enabled
+            and BudgetDetector.name not in overrides
+            and BudgetDetector.name not in config.policy.advisory_signals
+        ):
+            overrides[BudgetDetector.name] = OverrideRule(threshold=1.0, action=Action.STOP)
         policy = Policy(
             PolicyConfig(
                 stop_threshold=config.policy.stop_threshold,
@@ -556,6 +619,7 @@ def build_pipeline(
                 tier_thresholds=tier_thresholds,
                 escalate_ticks=config.policy.escalate_ticks,
                 deescalate_ticks=config.policy.deescalate_ticks,
+                overrides=overrides,
             )
         )
     except ValueError as exc:

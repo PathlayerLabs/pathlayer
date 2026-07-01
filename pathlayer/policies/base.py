@@ -45,6 +45,22 @@ hysteresis:
 Both ``target_tier`` and ``step`` are pure: no clock, no randomness; a "tick" is
 one call. The pipeline owns the :class:`HysteresisState` and feeds it back each
 event, so the same event sequence yields the same action sequence.
+
+ARB-4 adds **priority overrides**: some signals do not deserve a graduated
+response. A configured :class:`OverrideRule` (``detector -> {threshold, action}``)
+short-circuits both fusion *and* hysteresis -- when an actionable signal reaches
+its override threshold, :meth:`Policy.step` commits the rule's action
+immediately, regardless of the other detectors' fused score or the hysteresis
+counters. The headline case is *budget at ceiling = stop now* (wired
+automatically by the config layer when the budget detector is enabled). Two
+guarantees keep it safe:
+
+- **Advisory still wins.** An override only fires on *actionable* signals; a
+  detector listed in ``advisory_signals`` stays observe-only even with a rule.
+  The config layer rejects a name that is both advisory and overridden.
+- **Only STOP is enforced in V1.** An override to an intermediate tier
+  (WARN..ESCALATE) is committed and logged but, like the ARB-3 ladder tiers, not
+  yet acted on until ACT-1..4.
 """
 
 from __future__ import annotations
@@ -77,6 +93,24 @@ DEFAULT_ADVISORY_SIGNALS: frozenset[str] = frozenset()
 # 1.0 = full authority, so the zero-config policy behaves as if every detector
 # contributes at full strength.
 DEFAULT_WEIGHT: float = 1.0
+
+# Tiers an override rule may target: any actionable tier (WARN..STOP), never
+# NONE (an override is by definition an action).
+_OVERRIDE_ACTIONS: frozenset[Action] = frozenset(_LADDER_TIERS) | {Action.STOP}
+
+
+@dataclass(slots=True, frozen=True)
+class OverrideRule:
+    """A priority-override rule (ARB-4): confidence threshold -> immediate action.
+
+    When an actionable signal from the matched detector reaches ``threshold``,
+    the policy commits ``action`` at once, bypassing fusion and hysteresis.
+    ``threshold`` is a confidence in [0, 1]; ``action`` is an actionable tier
+    (WARN..STOP, never NONE). Validated by :meth:`PolicyConfig.__post_init__`.
+    """
+
+    threshold: float
+    action: Action
 
 
 @dataclass(slots=True, frozen=True)
@@ -113,6 +147,12 @@ class PolicyConfig:
     # 1 = no hysteresis (follow the target immediately, like ARB-1).
     escalate_ticks: int = 1
     deescalate_ticks: int = 1
+    # Priority overrides (ARB-4): detector name -> rule. An actionable signal at
+    # or above its rule threshold commits the rule action immediately, bypassing
+    # fusion and hysteresis. Empty by default: zero-config stays exactly ARB-1/2
+    # (NONE/STOP via stop_threshold). The budget->stop override is wired by the
+    # config layer only when the budget detector is enabled.
+    overrides: Mapping[str, OverrideRule] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # stop_threshold is a confidence in [0, 1]; reject misconfigurations
@@ -141,6 +181,8 @@ class PolicyConfig:
             # bool is an int subclass: reject it so True does not become 1 tick.
             if isinstance(ticks, bool) or not isinstance(ticks, int) or ticks < 1:
                 raise ValueError(f"{attr} must be an int >= 1")
+
+        self.overrides = self._validate_overrides()
 
     def _validate_tier_thresholds(self) -> dict[Action, float]:
         """Validate and defensively copy the intermediate ladder thresholds.
@@ -175,6 +217,32 @@ class PolicyConfig:
             if previous is not None and threshold < previous:
                 raise ValueError("tier_thresholds must be non-decreasing with tier severity")
             previous = threshold
+        return validated
+
+    def _validate_overrides(self) -> dict[str, OverrideRule]:
+        """Validate and defensively copy the priority-override rules (ARB-4).
+
+        Each value must be an :class:`OverrideRule` whose ``threshold`` is a
+        number in [0, 1] and whose ``action`` is an actionable tier (WARN..STOP,
+        never NONE). Keys are detector names; typos are the config layer's job to
+        reject (mirroring ``weight_for``'s permissiveness).
+        """
+        validated: dict[str, OverrideRule] = {}
+        for name, rule in dict(self.overrides).items():
+            if not isinstance(rule, OverrideRule):
+                raise ValueError(f"override for {name!r} must be an OverrideRule")
+            threshold = rule.threshold
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                raise ValueError(f"override threshold for {name!r} must be a number in [0, 1]")
+            threshold = float(threshold)
+            if not 0.0 <= threshold <= 1.0:
+                raise ValueError(f"override threshold for {name!r} must be in [0, 1]")
+            if rule.action not in _OVERRIDE_ACTIONS:
+                raise ValueError(
+                    f"override action for {name!r} must be an actionable tier "
+                    "(WARN, SUMMARIZE, FALLBACK, ESCALATE, STOP)"
+                )
+            validated[name] = OverrideRule(threshold=threshold, action=rule.action)
         return validated
 
     def weight_for(self, name: str) -> float:
@@ -229,6 +297,51 @@ class Policy:
             return None
         return max(actionable, key=lambda s: self.config.weight_for(s.name) * s.confidence)
 
+    def _triggered_overrides(self, signals: Sequence[Signal]) -> list[tuple[Signal, OverrideRule]]:
+        """Actionable ``(signal, rule)`` pairs whose confidence meets the rule.
+
+        Advisory signals are excluded first (an override never resurrects an
+        observe-only detector). Empty when no rule fires -- the common case, so
+        the normal fusion/hysteresis path runs unchanged.
+        """
+        overrides = self.config.overrides
+        if not overrides:
+            return []
+        triggered: list[tuple[Signal, OverrideRule]] = []
+        for signal in self._actionable(signals):
+            rule = overrides.get(signal.name)
+            if rule is not None and signal.confidence >= rule.threshold:
+                triggered.append((signal, rule))
+        return triggered
+
+    def override_action(self, signals: Sequence[Signal]) -> Action | None:
+        """The most severe overriding action for these signals, else ``None`` (ARB-4).
+
+        Scans the configured :class:`OverrideRule`\\ s: an *actionable* signal at
+        or above its rule threshold yields that rule's action; the most severe
+        wins. ``None`` means no override fired, so :meth:`step` / :meth:`decide`
+        fall back to the normal fused-confidence path.
+        """
+        triggered = self._triggered_overrides(signals)
+        if not triggered:
+            return None
+        return max(rule.action for _, rule in triggered)
+
+    def override_signal(self, signals: Sequence[Signal]) -> Signal | None:
+        """The signal that drove the winning override, for reporting (ARB-4).
+
+        The actionable signal behind the most severe fired rule (tie-broken by
+        weighted contribution ``weight * confidence``), so a post-mortem names
+        the real trigger -- e.g. ``budget`` -- even when that detector carries a
+        fusion weight of 0. ``None`` when no override fired.
+        """
+        triggered = self._triggered_overrides(signals)
+        if not triggered:
+            return None
+        top = max(rule.action for _, rule in triggered)
+        candidates = [signal for signal, rule in triggered if rule.action == top]
+        return max(candidates, key=lambda s: self.config.weight_for(s.name) * s.confidence)
+
     def target_tier(self, signals: Sequence[Signal]) -> Action:
         """Highest active tier whose threshold the fused confidence reaches.
 
@@ -271,7 +384,19 @@ class Policy:
         a WARN-level tick followed by a STOP-level tick commits STOP). This is
         intentional: a sustained, rising signal escalates promptly, while a lone
         spike from baseline still resets and never escalates.
+
+        Priority overrides (ARB-4) come first: if a rule fires, we commit at once
+        -- bypassing the hysteresis counters -- to ``max(override_action,
+        target_tier)``. Taking the max means an override never *downgrades* a more
+        severe action the fusion would reach on its own (non-override signals
+        still follow the normal graduated path); a budget ceiling therefore stops
+        now regardless of ``escalate_ticks``, and a lower-tier override can only
+        escalate, never mask a fused STOP.
         """
+        override = self.override_action(signals)
+        if override is not None:
+            committed = max(override, self.target_tier(signals))
+            return HysteresisState(committed, 0, 0), committed
         target = self.target_tier(signals)
         committed = state.committed
         if target > committed:
@@ -296,10 +421,16 @@ class Policy:
         anti-flapping and the graded ladder only apply through ``step``. Advisory
         signals are still computed and logged upstream; with no actionable signal
         the run is never stopped (you cannot stop on nothing).
+
+        Priority overrides (ARB-4) are honoured here too, for parity with
+        :meth:`step`: the result is ``max(override_action, base)`` where ``base``
+        is the usual NONE/STOP, so an override can escalate but never downgrade.
         """
         actionable = self._actionable(signals)
-        if not actionable:
-            return Action.NONE
-        if self.fuse(actionable) >= self.config.stop_threshold:
-            return Action.STOP
-        return Action.NONE
+        base = Action.NONE
+        if actionable and self.fuse(actionable) >= self.config.stop_threshold:
+            base = Action.STOP
+        override = self.override_action(signals)
+        if override is not None:
+            return max(override, base)
+        return base

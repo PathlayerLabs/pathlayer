@@ -17,7 +17,7 @@ import pytest
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action, HysteresisState, Policy
+from pathlayer.policies import Action, HysteresisState, OverrideRule, Policy
 from pathlayer.policies.base import PolicyConfig
 
 
@@ -482,3 +482,203 @@ def test_pipeline_rolls_back_hysteresis_state_on_detector_error() -> None:
     # History rolled back to the one good event, hysteresis unchanged.
     assert len(pipeline.history) == 1
     assert pipeline._hysteresis == before
+
+
+# --------------------------------------------------------------------------- #
+# ARB-4: priority overrides (bypass fusion + hysteresis)
+# --------------------------------------------------------------------------- #
+
+_BUDGET_STOP: dict[str, OverrideRule] = {"budget": OverrideRule(threshold=1.0, action=Action.STOP)}
+
+
+def test_default_overrides_empty() -> None:
+    assert PolicyConfig().overrides == {}
+
+
+def test_override_action_none_without_rules() -> None:
+    # Zero-config: no override machinery engaged.
+    assert Policy().override_action([Signal("budget", confidence=1.0)]) is None
+
+
+def test_override_fires_at_threshold() -> None:
+    policy = Policy(PolicyConfig(overrides=_BUDGET_STOP))
+    assert policy.override_action([Signal("budget", confidence=1.0)]) is Action.STOP
+
+
+def test_override_inert_below_threshold() -> None:
+    policy = Policy(PolicyConfig(overrides=_BUDGET_STOP))
+    assert policy.override_action([Signal("budget", confidence=0.99)]) is None
+
+
+def test_override_bypasses_stop_threshold() -> None:
+    # A budget rule at 0.5 stops well below the 0.9 stop_threshold, and even
+    # though the fused confidence alone (0.5) would not.
+    policy = Policy(PolicyConfig(overrides={"budget": OverrideRule(0.5, Action.STOP)}))
+    signals = [Signal("budget", confidence=0.5)]
+    assert policy.fuse(signals) == pytest.approx(0.5)
+    assert policy.decide(signals) is Action.STOP
+
+
+def test_override_decide_matches_step() -> None:
+    policy = Policy(PolicyConfig(overrides=_BUDGET_STOP))
+    signals = [Signal("budget", confidence=1.0)]
+    _, action = policy.step(HysteresisState(), signals)
+    assert action is Action.STOP
+    assert policy.decide(signals) is Action.STOP
+
+
+def test_override_bypasses_hysteresis() -> None:
+    # escalate_ticks=5 would delay a normal STOP, but the override commits on the
+    # first tick. A non-override signal at the same confidence would wait.
+    policy = Policy(PolicyConfig(escalate_ticks=5, overrides=_BUDGET_STOP))
+    state, action = policy.step(HysteresisState(), [Signal("budget", confidence=1.0)])
+    assert action is Action.STOP
+    assert state.committed is Action.STOP
+    # Contrast: a maxed loop (no override) stays inert under escalate_ticks=5.
+    _, loop_action = policy.step(HysteresisState(), [Signal("loop", confidence=1.0)])
+    assert loop_action is Action.NONE
+
+
+def test_override_advisory_signal_stays_inert() -> None:
+    # finding A: advisory wins -- an observe-only signal never fires its override.
+    policy = Policy(PolicyConfig(advisory_signals=frozenset({"budget"}), overrides=_BUDGET_STOP))
+    signals = [Signal("budget", confidence=1.0)]
+    assert policy.override_action(signals) is None
+    assert policy.step(HysteresisState(), signals)[1] is Action.NONE
+
+
+def test_override_most_severe_wins() -> None:
+    policy = Policy(
+        PolicyConfig(
+            tier_thresholds=_LADDER,
+            overrides={
+                "loop": OverrideRule(0.5, Action.WARN),
+                "budget": OverrideRule(0.5, Action.STOP),
+            },
+        )
+    )
+    signals = [Signal("loop", confidence=0.6), Signal("budget", confidence=0.6)]
+    assert policy.override_action(signals) is Action.STOP
+
+
+def test_override_intermediate_tier_then_deescalates() -> None:
+    # An override to a non-STOP tier commits at once (the fused path alone would
+    # not act here), then normal de-escalation resumes once the rule stops firing.
+    policy = Policy(PolicyConfig(overrides={"budget": OverrideRule(0.3, Action.ESCALATE)}))
+    state = HysteresisState()
+    state, a0 = policy.step(state, [Signal("budget", confidence=0.35)])
+    assert a0 is Action.ESCALATE and state.committed is Action.ESCALATE
+    # Rule no longer fires (low budget) and no other signal: de-escalate to NONE.
+    state, a1 = policy.step(state, [Signal("budget", confidence=0.0)])
+    assert a1 is Action.NONE
+
+
+def test_override_never_downgrades_fused_stop() -> None:
+    # An intermediate-tier override must not mask a more severe fused STOP:
+    # step/decide commit max(override, fused path). loop@0.6 + budget@1.0 fuse to
+    # 1.0 (STOP) while the loop rule only asks for WARN.
+    policy = Policy(PolicyConfig(overrides={"loop": OverrideRule(0.5, Action.WARN)}))
+    signals = [Signal("loop", confidence=0.6), Signal("budget", confidence=1.0)]
+    assert policy.override_action(signals) is Action.WARN
+    assert policy.fuse(signals) == pytest.approx(1.0)
+    assert policy.step(HysteresisState(), signals)[1] is Action.STOP
+    assert policy.decide(signals) is Action.STOP
+
+
+def test_override_escalates_above_fused_path() -> None:
+    # When the fused path would be inert, a fired override raises the action
+    # immediately (bypassing hysteresis), which is the whole point.
+    policy = Policy(
+        PolicyConfig(escalate_ticks=9, overrides={"budget": OverrideRule(0.3, Action.ESCALATE)})
+    )
+    state, action = policy.step(HysteresisState(), [Signal("budget", confidence=0.4)])
+    assert action is Action.ESCALATE
+    assert state.committed is Action.ESCALATE
+
+
+def test_override_signal_names_trigger_despite_zero_weight() -> None:
+    # finding B: budget carries weight 0 (inert in fusion) but drives the STOP;
+    # override_signal must still name budget, not the fusion-dominant loop.
+    policy = Policy(
+        PolicyConfig(weights={"budget": 0.0}, overrides={"budget": OverrideRule(0.5, Action.STOP)})
+    )
+    loop = Signal("loop", confidence=0.3)  # fusion-dominant (weight 1.0)
+    budget = Signal("budget", confidence=1.0)  # override trigger, weight 0
+    assert policy.dominant_signal([loop, budget]) is loop
+    assert policy.override_signal([loop, budget]) is budget
+
+
+def test_override_signal_none_without_trigger() -> None:
+    policy = Policy(PolicyConfig(overrides=_BUDGET_STOP))
+    assert policy.override_signal([Signal("budget", confidence=0.1)]) is None
+
+
+# --- PolicyConfig override validation --------------------------------------- #
+
+
+def test_override_rule_type_enforced() -> None:
+    with pytest.raises(ValueError, match="must be an OverrideRule"):
+        PolicyConfig(overrides={"budget": 1.0})  # type: ignore[dict-item]
+
+
+def test_override_threshold_out_of_range_rejected() -> None:
+    with pytest.raises(ValueError, match="override threshold for 'budget' must be in"):
+        PolicyConfig(overrides={"budget": OverrideRule(1.5, Action.STOP)})
+    with pytest.raises(ValueError, match="override threshold for 'budget' must be in"):
+        PolicyConfig(overrides={"budget": OverrideRule(-0.1, Action.STOP)})
+
+
+def test_override_threshold_bool_rejected() -> None:
+    with pytest.raises(ValueError, match="must be a number"):
+        PolicyConfig(overrides={"budget": OverrideRule(True, Action.STOP)})  # type: ignore[arg-type]
+
+
+def test_override_action_none_rejected() -> None:
+    with pytest.raises(ValueError, match="must be an actionable tier"):
+        PolicyConfig(overrides={"budget": OverrideRule(1.0, Action.NONE)})
+
+
+def test_override_threshold_int_coerced_to_float() -> None:
+    config = PolicyConfig(overrides={"budget": OverrideRule(1, Action.STOP)})
+    rule = config.overrides["budget"]
+    assert rule.threshold == 1.0
+    assert isinstance(rule.threshold, float)
+
+
+def test_overrides_defensively_copied() -> None:
+    source = {"budget": OverrideRule(1.0, Action.STOP)}
+    config = PolicyConfig(overrides=source)
+    source["budget"] = OverrideRule(0.1, Action.WARN)
+    assert config.overrides["budget"].action is Action.STOP
+
+
+# --- Pipeline integration: override stops immediately under hysteresis ------ #
+
+
+class _ScriptedBudget(Detector):
+    """Emits a scripted budget confidence per event."""
+
+    name = "budget"
+
+    def __init__(self, confidences: Sequence[float]) -> None:
+        self._confidences = list(confidences)
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        c = self._confidences[len(history) - 1]
+        return Signal(self.name, confidence=c, reason=f"${c:.2f} of budget")
+
+
+def test_pipeline_override_stops_immediately_despite_hysteresis() -> None:
+    # escalate_ticks=3 would delay a normal STOP, but the budget ceiling override
+    # halts on the tick it is reached, and the post-mortem names budget.
+    detector = _ScriptedBudget([0.4, 1.0, 1.0])
+    policy = Policy(PolicyConfig(escalate_ticks=3, overrides=_BUDGET_STOP))
+    pipeline = Pipeline([detector], policy)
+    events = [ToolEvent(tool="spend", args={}, ts=float(i)) for i in range(3)]
+    actions = pipeline.run(events)
+
+    assert actions == [Action.NONE, Action.STOP]  # stops at idx 1, run halts
+    assert pipeline.stopped is True
+    assert pipeline.post_mortem is not None
+    assert pipeline.post_mortem.stopped_at_index == 1
+    assert pipeline.post_mortem.reason.startswith("budget")

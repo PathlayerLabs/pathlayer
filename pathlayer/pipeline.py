@@ -227,18 +227,28 @@ class Pipeline:
         log_decision(self._logger, action, signals, fused=fused, index=index, ts=event.ts)
 
     def _action_reason(self, action: Action, signals: Sequence[Signal]) -> str:
-        """Human-readable reason for an action, from the fusion-dominant signal.
+        """Human-readable reason for an action, from the driving signal.
 
-        Uses the policy's :meth:`~pathlayer.policies.Policy.dominant_signal` (the
-        actionable signal with the largest weighted contribution), so a STOP
-        driven by convergence names the signal that drove it and never an
-        advisory one. Falls back to the action's own name when no actionable
-        signal exists (a custom policy can act without detectors), so the reason
-        matches the arbitrated action -- e.g. "warn" for a would-be WARN.
+        When a priority override (ARB-4) *determined* the committed action (its
+        tier equals ``action``), name the signal that triggered it
+        (:meth:`~pathlayer.policies.Policy.override_signal`) so the post-mortem
+        matches the override -- e.g. "budget" -- even if that detector carries a
+        fusion weight of 0. When the fused path escalated beyond the override (or
+        no override fired), use
+        :meth:`~pathlayer.policies.Policy.dominant_signal` (the actionable signal
+        with the largest weighted contribution), so a STOP driven by convergence
+        names the signal that drove it and never an advisory one. Falls back to
+        the action's own name when no actionable signal exists (a custom policy
+        can act without detectors), so the reason matches the arbitrated action
+        -- e.g. "warn" for a would-be WARN.
         """
-        dominant = self._policy.dominant_signal(signals)
-        if dominant is not None:
-            return f"{dominant.name}: {dominant.reason}" if dominant.reason else dominant.name
+        driver: Signal | None = None
+        if self._policy.override_action(signals) == action:
+            driver = self._policy.override_signal(signals)
+        if driver is None:
+            driver = self._policy.dominant_signal(signals)
+        if driver is not None:
+            return f"{driver.name}: {driver.reason}" if driver.reason else driver.name
         return action.name.lower()
 
     def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:
