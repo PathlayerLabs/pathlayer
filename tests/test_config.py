@@ -359,6 +359,39 @@ def test_build_pipeline_passes_thresholds() -> None:
     assert pipeline._recent_history == 2
 
 
+def test_build_pipeline_threads_retry_dominance_params() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "retry": {
+                    "window": 20,
+                    "dominance_min_calls": 6,
+                    "dominance_ratio": 0.8,
+                    "dominance_max_confidence": 0.7,
+                    "min_failures": 3,
+                }
+            }
+        }
+    )
+    pipeline = build_pipeline(config)
+    retry = next(d for d in pipeline._detectors if isinstance(d, RetryDetector))
+    assert retry._window == 20
+    assert retry._dominance_min_calls == 6
+    assert retry._dominance_ratio == 0.8
+    assert retry._dominance_max_confidence == 0.7
+    assert retry._min_failures == 3
+
+
+def test_build_pipeline_wraps_retry_range_error_as_config_error() -> None:
+    # A window smaller than dominance_min_calls is a range error from the
+    # detector; build_pipeline must surface it as ConfigError like the others.
+    config = PathlayerConfig.from_mapping(
+        {"detectors": {"retry": {"window": 3, "dominance_min_calls": 5}}}
+    )
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*window must be"):
+        build_pipeline(config)
+
+
 def test_build_pipeline_threads_dry_run() -> None:
     assert build_pipeline().dry_run is False
     config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})

@@ -1,0 +1,15 @@
+{
+  "label": "loop",
+  "description": "RET-2 niche: the agent is stuck hammering one tool (search) with genuinely different queries every time and mixed success/failure results. Exact-match RET-1 and the LoopDetector both stay silent (each canonical token differs), yet one tool dominates the recent window. Lives outside traces/ on purpose: RET-2's confidence is capped below stop_threshold, so this storm never STOPs on its own -- it only reinforces a stop via fusion -- and therefore cannot serve as a must-be-caught golden loop trace.",
+  "metadata": { "curated_by": "RET-2", "fault": "same_tool_regardless_of_error" },
+  "events": [
+    { "tool": "search", "args": { "query": "how to fix ETIMEDOUT on deploy" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "node registry timeout retry" }, "result": { "hits": 0 } },
+    { "tool": "search", "args": { "query": "kubernetes image pull timeout" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "helm deploy timeout flag" }, "result": { "hits": 0 } },
+    { "tool": "search", "args": { "query": "increase docker registry timeout" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "containerd pull deadline exceeded" }, "result": { "hits": 0 } },
+    { "tool": "search", "args": { "query": "fix prod deploy stuck timeout" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "registry mirror timeout workaround" }, "result": { "hits": 0 } }
+  ]
+}

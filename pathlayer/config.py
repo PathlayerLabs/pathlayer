@@ -199,7 +199,14 @@ class LoopConfig:
 @dataclass(slots=True)
 class RetryConfig:
     enabled: bool = True
+    # RET-1: consecutive identical failing retries.
     threshold: int = 3
+    # RET-2: one tool dominating the recent window regardless of args/error.
+    window: int = 16
+    dominance_min_calls: int = 5
+    dominance_ratio: float = 0.75
+    dominance_max_confidence: float = 0.85
+    min_failures: int = 2
 
 
 @dataclass(slots=True)
@@ -317,6 +324,11 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     retry = RetryConfig(
         enabled=retry_s.bool_("enabled", True),
         threshold=retry_s.int_("threshold", 3),
+        window=retry_s.int_("window", 16),
+        dominance_min_calls=retry_s.int_("dominance_min_calls", 5),
+        dominance_ratio=retry_s.float_("dominance_ratio", 0.75),
+        dominance_max_confidence=retry_s.float_("dominance_max_confidence", 0.85),
+        min_failures=retry_s.int_("min_failures", 2),
     )
     retry_s.finish()
 
@@ -581,7 +593,17 @@ def build_pipeline(
                 LoopDetector(k=spec.loop.k, window=spec.loop.window, tool_masks=tool_masks)
             )
         if spec.retry.enabled:
-            detectors.append(RetryDetector(threshold=spec.retry.threshold, tool_masks=tool_masks))
+            detectors.append(
+                RetryDetector(
+                    threshold=spec.retry.threshold,
+                    tool_masks=tool_masks,
+                    window=spec.retry.window,
+                    dominance_min_calls=spec.retry.dominance_min_calls,
+                    dominance_ratio=spec.retry.dominance_ratio,
+                    dominance_max_confidence=spec.retry.dominance_max_confidence,
+                    min_failures=spec.retry.min_failures,
+                )
+            )
         if spec.budget.enabled:
             detectors.append(
                 BudgetDetector(

@@ -19,10 +19,18 @@ detectors:
     k: 2          # min consecutive repetitions before any confidence (>= 2)
     window: 256   # tail size scanned per step (>= 2 * k)
 
-  # RetryDetector: same failing call replayed, same error.
+  # RetryDetector: RET-1 (same failing call replayed, same error) folded with
+  # RET-2 (one tool dominating the recent window regardless of args/error).
   retry:
     enabled: true
-    threshold: 3  # consecutive identical failures mapped to confidence 1.0 (>= 2)
+    threshold: 3  # RET-1: consecutive identical failures mapped to confidence 1.0 (>= 2)
+    # RET-2 sliding-window tool dominance. Capped below stop_threshold, so a
+    # tool storm reinforces a stop via fusion but never stops a run on its own.
+    window: 16                    # recent tool calls scanned (>= dominance_min_calls)
+    dominance_min_calls: 5        # min calls of one tool in the window to fire (>= 2)
+    dominance_ratio: 0.75         # min share of the window that one tool must hold, (0, 1]
+    dominance_max_confidence: 0.85  # cap for the dominance component, in [0, 1]
+    min_failures: 2               # min failures in the window before it can fire (>= 1)
 
   # BudgetDetector: cumulative cost_usd vs a ceiling.
   # Disabled by default: a $5 ceiling would stop a legitimately expensive run.

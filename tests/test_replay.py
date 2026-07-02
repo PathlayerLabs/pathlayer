@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pathlayer.config import build_pipeline
 from pathlayer.detectors.canonical import ToolMask
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import ToolEvent
@@ -152,6 +153,23 @@ def test_full_corpus_scan_has_no_false_positives() -> None:
     # The whole curated tree scores clean: excluding non-pipeline subdirs, no
     # healthy trace is wrongly stopped (the FP=3 from nop4_experiment is gone).
     report = score(load_traces(_TRACES_DIR))
+    assert report.false_positives == 0
+
+
+def test_production_pipeline_has_no_false_positives_on_corpus() -> None:
+    # RET-2 garde-fou: the default replay detectors deliberately omit the
+    # RetryDetector, so this scores the curated corpus through the *production*
+    # detector set (build_pipeline: loop + retry + no_progress) and pins FP=0.
+    # This is what proves adding tool-dominance did not start stopping healthy
+    # runs; the dominance component is capped below stop_threshold and gated on
+    # failures, so legitimate monotool bursts (exploration, bounded retries)
+    # stay quiet.
+    pipeline = build_pipeline()
+    report = score(
+        load_traces(_TRACES_DIR),
+        detectors=pipeline._detectors,
+        policy=pipeline._policy,
+    )
     assert report.false_positives == 0
 
 
