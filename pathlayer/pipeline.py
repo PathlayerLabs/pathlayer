@@ -16,10 +16,11 @@ tiers (WARN..ESCALATE) are decided and logged but, in V1, not yet enforced.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from pathlayer.detectors.base import Detector, Signal
+from pathlayer.detectors.progress import ProgressAnchor, is_advancing
 from pathlayer.events import ToolEvent
 from pathlayer.observability import (
     log_action,
@@ -30,6 +31,11 @@ from pathlayer.observability import (
 from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import HysteresisState
 from pathlayer.postmortem import PostMortem
+
+# Evidence key carrying the LOOP-2 precision positive-progress signal (see
+# pathlayer.detectors.progress.is_advancing): 1.0 on a tick where the last
+# event set a fresh record on an applicable progress anchor, else 0.0.
+PROGRESS_EVIDENCE_KEY = "progress"
 
 DEFAULT_RECENT_HISTORY = 10
 
@@ -71,6 +77,7 @@ class Pipeline:
         recent_history: int = DEFAULT_RECENT_HISTORY,
         logger: logging.Logger | None = None,
         dry_run: bool = False,
+        progress_anchors: Sequence[ProgressAnchor] | None = None,
     ) -> None:
         if recent_history < 0:
             raise ValueError("recent_history must be >= 0")
@@ -88,6 +95,11 @@ class Pipeline:
         self._last_would_be: Action = Action.NONE
         # Hysteresis machine state (ARB-3), threaded across events by the policy.
         self._hysteresis = HysteresisState()
+        # LOOP-2 precision: anchors used to compute the positive-progress
+        # evidence fed to the policy (never a Detector, never in `signals`).
+        # Empty by default, so a caller that does not opt in sees no evidence
+        # and therefore no suppression -- identical to pre-LOOP-2 behaviour.
+        self._progress_anchors: list[ProgressAnchor] = list(progress_anchors or [])
 
     @property
     def history(self) -> tuple[ToolEvent, ...]:
@@ -147,7 +159,8 @@ class Pipeline:
         try:
             history = tuple(self._history)
             signals = [detector.evaluate(history) for detector in self._detectors]
-            next_state, action = self._policy.step(self._hysteresis, signals)
+            evidence = self._evidence(history)
+            next_state, action = self._policy.step(self._hysteresis, signals, evidence)
         except Exception:
             self._history.pop()
             raise
@@ -155,15 +168,33 @@ class Pipeline:
         # detector/policy leaves both history and hysteresis untouched.
         self._hysteresis = next_state
         if self._dry_run:
-            return self._observe(event, signals, action)
+            return self._observe(event, signals, action, evidence)
         self._actions.append(action)
-        self._log(event, signals, action)
+        self._log(event, signals, action, evidence)
         if action is Action.STOP:
             self._stopped = True
-            self._post_mortem = self._build_post_mortem(signals)
+            self._post_mortem = self._build_post_mortem(signals, evidence)
         return action
 
-    def _observe(self, event: ToolEvent, signals: list[Signal], action: Action) -> Action:
+    def _evidence(self, history: Sequence[ToolEvent]) -> Mapping[str, float]:
+        """Auxiliary evidence passed to the policy alongside ``signals`` (LOOP-2 precision).
+
+        Never a :class:`Signal`, never fed into fusion: see the module-level
+        note in :mod:`pathlayer.policies.base`. Empty when no ``progress_anchors``
+        were configured, so the policy sees exactly nothing to suppress with.
+        """
+        if not self._progress_anchors:
+            return {}
+        confidence = 1.0 if is_advancing(self._progress_anchors, history) else 0.0
+        return {PROGRESS_EVIDENCE_KEY: confidence}
+
+    def _observe(
+        self,
+        event: ToolEvent,
+        signals: list[Signal],
+        action: Action,
+        evidence: Mapping[str, float],
+    ) -> Action:
         """Dry-run path: record/log the arbitrated action without emitting it.
 
         Nothing reaches the agent (returns ``NONE``, never halts). Signals and
@@ -173,7 +204,7 @@ class Pipeline:
         """
         index = len(self._history) - 1
         self._actions.append(Action.NONE)
-        self._log_signals_and_decision(event, signals, action)
+        self._log_signals_and_decision(event, signals, action, evidence)
         if action is not self._last_would_be:
             self._last_would_be = action
             if action is not Action.NONE:
@@ -183,7 +214,7 @@ class Pipeline:
                         ts=event.ts,
                         action=action,
                         signals=tuple(signals),
-                        reason=self._action_reason(action, signals),
+                        reason=self._action_reason(action, signals, evidence),
                     )
                 )
                 if self._logger is not None:
@@ -207,26 +238,41 @@ class Pipeline:
         """Adapter-compatible sink (see :data:`pathlayer.adapters.base.EventSink`)."""
         self.process(event)
 
-    def _log(self, event: ToolEvent, signals: list[Signal], action: Action) -> None:
+    def _log(
+        self, event: ToolEvent, signals: list[Signal], action: Action, evidence: Mapping[str, float]
+    ) -> None:
         if self._logger is None:
             return
-        self._log_signals_and_decision(event, signals, action)
+        self._log_signals_and_decision(event, signals, action, evidence)
         if action is not Action.NONE:
             log_action(self._logger, action, index=len(self._history) - 1, ts=event.ts)
 
     def _log_signals_and_decision(
-        self, event: ToolEvent, signals: list[Signal], action: Action
+        self,
+        event: ToolEvent,
+        signals: list[Signal],
+        action: Action,
+        evidence: Mapping[str, float],
     ) -> None:
-        """Log every signal and the arbitration decision (common to both modes)."""
+        """Log every signal and the arbitration decision (common to both modes).
+
+        Every signal is logged at its **raw** confidence regardless of
+        suppression (LOOP-2 precision): ``evidence`` only affects what
+        ``fused``/``action`` mean, never what is written to the log, so an
+        operator can always see a suppression happened instead of a silent
+        ``loop=0.0`` (OBS-1: every signal, decision and action, honestly).
+        """
         if self._logger is None:
             return
         index = len(self._history) - 1
         for signal in signals:
             log_signal(self._logger, signal, index=index, ts=event.ts)
-        fused = self._policy.fuse(signals)
+        fused = self._policy.fuse(signals, evidence)
         log_decision(self._logger, action, signals, fused=fused, index=index, ts=event.ts)
 
-    def _action_reason(self, action: Action, signals: Sequence[Signal]) -> str:
+    def _action_reason(
+        self, action: Action, signals: Sequence[Signal], evidence: Mapping[str, float]
+    ) -> str:
         """Human-readable reason for an action, from the driving signal.
 
         When a priority override (ARB-4) *determined* the committed action (its
@@ -237,27 +283,30 @@ class Pipeline:
         no override fired), use
         :meth:`~pathlayer.policies.Policy.dominant_signal` (the actionable signal
         with the largest weighted contribution), so a STOP driven by convergence
-        names the signal that drove it and never an advisory one. Falls back to
-        the action's own name when no actionable signal exists (a custom policy
-        can act without detectors), so the reason matches the arbitrated action
-        -- e.g. "warn" for a would-be WARN.
+        names the signal that drove it and never an advisory or currently
+        suppressed one (LOOP-2 precision). Falls back to the action's own name
+        when no actionable signal exists (a custom policy can act without
+        detectors), so the reason matches the arbitrated action -- e.g. "warn"
+        for a would-be WARN.
         """
         driver: Signal | None = None
-        if self._policy.override_action(signals) == action:
-            driver = self._policy.override_signal(signals)
+        if self._policy.override_action(signals, evidence) == action:
+            driver = self._policy.override_signal(signals, evidence)
         if driver is None:
-            driver = self._policy.dominant_signal(signals)
+            driver = self._policy.dominant_signal(signals, evidence)
         if driver is not None:
             return f"{driver.name}: {driver.reason}" if driver.reason else driver.name
         return action.name.lower()
 
-    def _build_post_mortem(self, signals: list[Signal]) -> PostMortem:
+    def _build_post_mortem(
+        self, signals: list[Signal], evidence: Mapping[str, float]
+    ) -> PostMortem:
         # recent_history == 0 must mean "no tail"; a plain [-0:] slice would
         # return the whole history because -0 == 0.
         recent = self._history[-self._recent_history :] if self._recent_history else []
         return PostMortem(
             action=Action.STOP,
-            reason=self._action_reason(Action.STOP, signals),
+            reason=self._action_reason(Action.STOP, signals, evidence),
             stopped_at_index=len(self._history) - 1,
             events_processed=len(self._history),
             signals=tuple(signals),

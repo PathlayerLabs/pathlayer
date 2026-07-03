@@ -40,10 +40,10 @@ from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.progress import coding_anchors
+from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
 from pathlayer.detectors.retry import RetryDetector
-from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action, OverrideRule, Policy
+from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
+from pathlayer.policies import Action, OverrideRule, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
 
 __all__ = [
@@ -633,6 +633,19 @@ def build_pipeline(
             and BudgetDetector.name not in config.policy.advisory_signals
         ):
             overrides[BudgetDetector.name] = OverrideRule(threshold=1.0, action=Action.STOP)
+        suppressions: dict[str, SuppressionRule] = {}
+        # LOOP-2 precision: loop<-progress suppression, auto-wired the same way
+        # as the budget override above -- only when both loop and no_progress
+        # (the source of the anchors) are enabled, and only if the caller has
+        # not already made loop observe-only (advisory wins, nothing to guard).
+        if (
+            spec.loop.enabled
+            and spec.no_progress.enabled
+            and LoopDetector.name not in config.policy.advisory_signals
+        ):
+            suppressions[LoopDetector.name] = SuppressionRule(
+                evidence=PROGRESS_EVIDENCE_KEY, min_confidence=1.0
+            )
         policy = Policy(
             PolicyConfig(
                 stop_threshold=config.policy.stop_threshold,
@@ -642,6 +655,7 @@ def build_pipeline(
                 escalate_ticks=config.policy.escalate_ticks,
                 deescalate_ticks=config.policy.deescalate_ticks,
                 overrides=overrides,
+                suppressions=suppressions,
             )
         )
     except ValueError as exc:
@@ -654,10 +668,14 @@ def build_pipeline(
         (logger or logging.getLogger(__name__)).warning(
             "build_pipeline: no detectors enabled; the pipeline will never act"
         )
+    # Same gating as the suppression rule above: the anchors only matter paired
+    # with a rule that consumes them, so skip building them otherwise.
+    progress_anchors = loop_suppression_anchors() if suppressions else None
     return Pipeline(
         detectors,
         policy,
         recent_history=config.pipeline.recent_history,
         logger=logger,
         dry_run=config.pipeline.dry_run,
+        progress_anchors=progress_anchors,
     )

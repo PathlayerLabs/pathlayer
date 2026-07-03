@@ -42,7 +42,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 
 _PASSED = "passed"
 _FAILED = "failed"
@@ -269,6 +269,67 @@ def coding_anchors() -> list[ProgressAnchor]:
     defers to tests, so it only speaks when no test evidence is present.
     """
     return [TestProgressAnchor(), ExitCodeProgressAnchor(), GitProgressAnchor()]
+
+
+def loop_suppression_anchors() -> list[ProgressAnchor]:
+    """Anchors used to suppress ``loop`` on genuine progress (LOOP-2 precision).
+
+    Deliberately **narrower** than :func:`coding_anchors`: only
+    ``TestProgressAnchor`` and ``ExitCodeProgressAnchor``, never
+    ``GitProgressAnchor``. Git diff size is a known-gameable signal (see
+    :class:`GitProgressAnchor`'s docstring: "git cannot tell useful from useless
+    new code") -- fine as a last-resort *catch* for ``NoProgressDetector``
+    (optimistic aggregation means it can only add false negatives there, not
+    false positives), but wrong as evidence to *suppress* a different detector.
+    An agent that ping-pongs between two files while padding them with useless
+    content would grow the git diff every turn, permanently suppressing
+    ``loop`` on exactly the churn it exists to catch. Restricting to ground
+    truth (tests, exit codes) keeps the suppression tied to the proven F1a bug
+    without extending the blast radius to an anchor already flagged as weak.
+    """
+    return [TestProgressAnchor(), ExitCodeProgressAnchor()]
+
+
+def is_advancing(anchors: Sequence[ProgressAnchor], history: Sequence[ToolEvent]) -> bool:
+    """True iff the *last* event strictly improved at least one applicable anchor.
+
+    Positive progress evidence, distinct from ``NoProgressDetector``'s silence:
+    ``no_progress`` can stay at 0 confidence either because the agent is
+    advancing (a new record) or simply because no anchor is applicable yet (no
+    test/exit_code evidence in the history at all) -- the two are indistinguishable
+    from that signal alone. ``is_advancing`` collapses only the first case to
+    ``True``, so a caller that wants to know "is there *fresh* evidence of real
+    progress right now" never mistakes silence-from-no-evidence for progress.
+
+    Compares ``measure(history)`` to ``measure(history[:-1])`` directly --
+    simpler and safer than reusing the CUSUM's cumulative-reset branch, which
+    also resets on an anchor *losing* its baseline (a gap in evidence), not just
+    on a genuine new record. A gap must never read as "advancing".
+
+    Deliberately a strict boolean on the last step, not a continuous score: the
+    caller only wants to act on evidence that is fresh *right now*. A loop that
+    progressed once and now stagnates becomes suppressible again as soon as the
+    next step stops setting records. Pure and deterministic: no clock, no
+    randomness, no network, like every :class:`ProgressAnchor`.
+
+    Filters to ``EventKind.TOOL_CALL`` first, matching the ``event_kinds``
+    convention every action-only detector uses (see
+    :class:`~pathlayer.detectors.base.Detector`): a non-action event (e.g. an
+    ``LLM_CALL`` cost event) injected between two tool calls must never read
+    as -- or hide -- a fresh record.
+    """
+    history = [event for event in history if event.kind is EventKind.TOOL_CALL]
+    if not history:
+        return False
+    prefix = history[:-1]
+    for anchor in anchors:
+        current = anchor.measure(history)
+        if current is None:
+            continue
+        previous = anchor.measure(prefix)
+        if previous is not None and current > previous:
+            return True
+    return False
 
 
 def progress_series(

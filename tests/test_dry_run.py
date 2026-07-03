@@ -10,7 +10,8 @@ sustained STOP does not flood the record.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 
 import pytest
 
@@ -104,7 +105,10 @@ def test_enforcement_mode_is_unchanged() -> None:
 
 class _AlwaysStopPolicy(Policy):
     def step(
-        self, state: HysteresisState, signals: Sequence[Signal]
+        self,
+        state: HysteresisState,
+        signals: Sequence[Signal],
+        evidence: Mapping[str, float] = MappingProxyType({}),
     ) -> tuple[HysteresisState, Action]:
         return HysteresisState(Action.STOP), Action.STOP
 
@@ -122,7 +126,10 @@ class _ScriptedPolicy(Policy):
         self._i = 0
 
     def step(
-        self, state: HysteresisState, signals: Sequence[Signal]
+        self,
+        state: HysteresisState,
+        signals: Sequence[Signal],
+        evidence: Mapping[str, float] = MappingProxyType({}),
     ) -> tuple[HysteresisState, Action]:
         action = self._script[self._i]
         self._i += 1

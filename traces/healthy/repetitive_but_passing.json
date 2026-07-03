@@ -1,0 +1,15 @@
+{
+  "label": "healthy",
+  "description": "F1a precision false positive: the agent re-runs the same test suite with identical args (no `target`, so canonicalization sees an unchanging action) after every fix, and the test count climbs 1 -> 8 passed each time. LoopDetector sees only the repeated (tool, args) pair -- it has no visibility into `result` by design -- and reaches STOP by the 5th repeat even though the agent is making real, verifiable progress. Guards the loop<-progress suppression (LOOP-2 precision issue #113): a repetition that is actually advancing must not be stopped by loop alone.",
+  "metadata": { "curated_by": "LOOP-2-precision", "boundary": "repetitive-but-advancing", "issue": 113 },
+  "events": [
+    { "tool": "run_tests", "args": {}, "result": { "passed": 1, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 2, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 3, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 4, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 5, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 6, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 7, "failed": 0 } },
+    { "tool": "run_tests", "args": {}, "result": { "passed": 8, "failed": 0 } }
+  ]
+}

@@ -8,8 +8,9 @@ captured. A healthy trace runs to completion with no post-mortem.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -171,7 +172,10 @@ def test_zero_recent_history_means_no_tail() -> None:
 
 class _AlwaysStopPolicy(Policy):
     def step(
-        self, state: HysteresisState, signals: Sequence[Signal]
+        self,
+        state: HysteresisState,
+        signals: Sequence[Signal],
+        evidence: Mapping[str, float] = MappingProxyType({}),
     ) -> tuple[HysteresisState, Action]:
         return HysteresisState(Action.STOP), Action.STOP
 

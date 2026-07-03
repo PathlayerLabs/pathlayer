@@ -28,6 +28,7 @@ from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
+from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
 from pathlayer.policies import Action, OverrideRule
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "examples" / "pathlayer.config.yaml"
@@ -587,6 +588,73 @@ def test_no_budget_override_when_budget_advisory() -> None:
     )
     pipeline = build_pipeline(config)
     assert pipeline._policy.config.overrides == {}
+
+
+# --------------------------------------------------------------------------- #
+# LOOP-2 precision: loop<-progress suppression auto-wired by build_pipeline
+# --------------------------------------------------------------------------- #
+
+
+def test_loop_suppression_auto_wired_by_default() -> None:
+    # Both loop and no_progress are on by default, so the zero-config pipeline
+    # already carries the F1a fix.
+    pipeline = build_pipeline()
+    rule = pipeline._policy.config.suppressions["loop"]
+    assert rule.evidence == PROGRESS_EVIDENCE_KEY
+    assert rule.min_confidence == 1.0
+    assert pipeline._progress_anchors
+
+
+def test_no_loop_suppression_when_no_progress_disabled() -> None:
+    # The anchors backing the suppression come from the no_progress feature
+    # set; disabling it removes the suppression along with them.
+    config = PathlayerConfig.from_mapping({"detectors": {"no_progress": {"enabled": False}}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.suppressions == {}
+    assert pipeline._progress_anchors == []
+
+
+def test_no_loop_suppression_when_loop_disabled() -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"loop": {"enabled": False}}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.suppressions == {}
+    assert pipeline._progress_anchors == []
+
+
+def test_no_loop_suppression_when_loop_advisory() -> None:
+    # Advisory already makes loop observe-only; nothing to guard, so no
+    # suppression rule is wired (mirrors the budget-override/advisory guard).
+    config = PathlayerConfig.from_mapping({"policy": {"advisory_signals": ["loop"]}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.suppressions == {}
+    assert pipeline._progress_anchors == []
+
+
+def test_f1a_repetitive_but_passing_no_longer_stops() -> None:
+    # End-to-end regression pin for the bug this fix resolves (issue #113): a
+    # test suite re-run with identical args, passed count climbing, must not be
+    # stopped by loop alone through the real production pipeline.
+    events = [
+        ToolEvent(tool="run_tests", args={}, result={"passed": p, "failed": 0}) for p in range(1, 9)
+    ]
+    assert Action.STOP not in build_pipeline().run(events)
+
+
+def test_git_only_progress_never_suppresses_loop_through_build_pipeline() -> None:
+    # Trou C adversarial case: a ping-pong between two files with a growing
+    # git diff and zero test/exit_code evidence must still STOP -- the git
+    # anchor is deliberately excluded from the suppression's anchor set
+    # (loop_suppression_anchors), unlike the full set NoProgressDetector uses.
+    events = []
+    for i in range(1, 13):
+        events.append(
+            ToolEvent(
+                tool="edit_file",
+                args={"path": "a.py" if i % 2 else "b.py", "patch": "pad"},
+                result={"insertions": i * 5, "deletions": 0},
+            )
+        )
+    assert Action.STOP in build_pipeline().run(events)
 
 
 # --------------------------------------------------------------------------- #

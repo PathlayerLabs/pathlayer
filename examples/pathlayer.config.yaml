@@ -18,6 +18,15 @@ detectors:
     enabled: true
     k: 2          # min consecutive repetitions before any confidence (>= 2)
     window: 256   # tail size scanned per step (>= 2 * k)
+  # LOOP-2 precision (issue #113): loop cannot see `result` by design, so a
+  # repeated call that is actually improving (e.g. re-running the same test
+  # suite while `passed` climbs) would otherwise be stopped as a false
+  # positive. AUTO-WIRING: when both `loop` and `no_progress` are enabled (and
+  # `loop` is not advisory), a loop <- progress suppression is wired
+  # automatically -- loop cannot drive STOP on any tick where the last event
+  # set a fresh record on the ground-truth test/exit_code anchors (the git
+  # diff anchor is deliberately excluded: it is gameable and would let useless
+  # padding suppress a real loop). Not a user-facing config key in V1.
 
   # RetryDetector: RET-1 (same failing call replayed, same error) folded with
   # RET-2 (one tool dominating the recent window regardless of args/error).
@@ -105,6 +114,16 @@ policy:
   # with escalate_ticks=2, a WARN-level tick then a STOP-level tick commits
   # STOP). A single non-confirming tick resets the counter, so a spike from
   # baseline never escalates.
+  #
+  # LOOP-2 precision note: the loop <- progress suppression above (see
+  # detectors.loop) only reads the *last* event, so if your agent's progress
+  # action (e.g. `run_tests`) is not replayed on every tick -- interleaved
+  # instead with other repeated actions in a longer cycle -- the suppression
+  # can lift for a tick right after genuine progress. Raising escalate_ticks
+  # above the longest gap between progress ticks in your agent's legitimate
+  # cycle absorbs this: the up-counter resets on every fresh-evidence tick
+  # before it reaches the commit threshold, so loop still never STOPs a
+  # genuinely advancing cycle. No code change needed, just this knob.
   escalate_ticks: 1
   deescalate_ticks: 1
 

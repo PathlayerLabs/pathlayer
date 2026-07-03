@@ -6,6 +6,6 @@ stop) rather than a binary verdict.
 """
 
 from pathlayer.policies.actions import Action
-from pathlayer.policies.base import HysteresisState, OverrideRule, Policy
+from pathlayer.policies.base import HysteresisState, OverrideRule, Policy, SuppressionRule
 
-__all__ = ["Action", "HysteresisState", "OverrideRule", "Policy"]
+__all__ = ["Action", "HysteresisState", "OverrideRule", "Policy", "SuppressionRule"]

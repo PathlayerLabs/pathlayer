@@ -31,9 +31,9 @@ from typing import Any
 from pathlayer.detectors.base import Detector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.progress import coding_anchors
-from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action, Policy
+from pathlayer.detectors.progress import ProgressAnchor, coding_anchors, loop_suppression_anchors
+from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
+from pathlayer.policies import Action, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation.traces import Trace, load_trace
 
@@ -46,6 +46,31 @@ def _default_detectors() -> list[Detector]:
     # policy. RetryDetector and BudgetDetector are implemented but intentionally
     # not wired here, so traces that depend on them surface as false negatives.
     return [LoopDetector(), NoProgressDetector(coding_anchors())]
+
+
+def _default_policy() -> Policy:
+    """Mirrors ``build_pipeline``'s auto-wired ``loop<-progress`` suppression.
+
+    Both the golden-trace regression tests and ad-hoc replay calls should
+    reflect the same LOOP-2 precision fix as production, not an unfixed
+    baseline -- otherwise the F1a fixture (``traces/healthy/
+    repetitive_but_passing.json``) would stay a false positive here even after
+    the bug is fixed in ``build_pipeline``.
+    """
+    return Policy(
+        PolicyConfig(
+            suppressions={
+                LoopDetector.name: SuppressionRule(
+                    evidence=PROGRESS_EVIDENCE_KEY, min_confidence=1.0
+                )
+            }
+        )
+    )
+
+
+def _default_progress_anchors() -> list[ProgressAnchor]:
+    """Anchors backing the default policy's suppression rule (see :func:`_default_policy`)."""
+    return loop_suppression_anchors()
 
 
 @dataclass(slots=True)
@@ -69,10 +94,19 @@ def replay_trace(
     *,
     detectors: Sequence[Detector] | None = None,
     policy: Policy | None = None,
+    progress_anchors: Sequence[ProgressAnchor] | None = None,
 ) -> ReplayResult:
-    """Replay one trace through a fresh pipeline and summarize the outcome."""
+    """Replay one trace through a fresh pipeline and summarize the outcome.
+
+    ``policy``/``progress_anchors`` default to the same loop<-progress
+    suppression :func:`build_pipeline <pathlayer.config.build_pipeline>` wires
+    in production (see :func:`_default_policy`), so an explicit caller has to
+    opt *out* of the fix (pass a bare ``Policy()``), not opt into it.
+    """
     chosen = list(detectors) if detectors is not None else _default_detectors()
-    pipeline = Pipeline(chosen, policy)
+    chosen_policy = policy if policy is not None else _default_policy()
+    anchors = progress_anchors if progress_anchors is not None else _default_progress_anchors()
+    pipeline = Pipeline(chosen, chosen_policy, progress_anchors=anchors)
     pipeline.run(trace.events)
 
     actions = pipeline.actions

@@ -61,6 +61,24 @@ guarantees keep it safe:
 - **Only STOP is enforced in V1.** An override to an intermediate tier
   (WARN..ESCALATE) is committed and logged but, like the ARB-3 ladder tiers, not
   yet acted on until ACT-1..4.
+
+LOOP-2 precision adds **conditional suppression**: a configured
+:class:`SuppressionRule` (``guarded signal -> {evidence, min_confidence}``)
+excludes a signal from ``_actionable`` -- and therefore from fusion, the
+ladder, overrides and post-mortem attribution -- for any tick where the named
+``evidence`` (an auxiliary ``Mapping[str, float]`` passed alongside
+``signals``, never itself a :class:`Signal`) is fresh. The motivating bug: an
+agent that re-runs the same test suite and improves every time (``passed``
+climbing) is real progress, but ``LoopDetector`` cannot see ``result`` by
+design and stops it as a repetition. ``evidence`` is structurally kept out of
+the ``Sequence[Signal]`` that feeds :meth:`fuse` -- unlike ``advisory_signals``,
+which excludes a signal from acting but still computes and logs it, evidence
+is a completely different kind of input, so a caller can never accidentally
+list it as advisory and have a *strong* progress reading count *toward* STOP,
+the inverse of its purpose. The suppression check happens inside
+``_actionable`` itself (not just at the top of ``fuse``) so every method built
+on it -- ``dominant_signal``, the override machinery, ``target_tier`` -- agrees
+a suppressed signal did not drive the tick, keeping post-mortems honest.
 """
 
 from __future__ import annotations
@@ -68,9 +86,16 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from pathlayer.detectors.base import Signal
 from pathlayer.policies.actions import Action
+
+# Shared empty evidence mapping: the default for every ``evidence`` parameter
+# below. A ``MappingProxyType`` (not a literal ``{}``) so it is immutable and
+# safely shareable as a default argument -- no per-call allocation, no risk of
+# a caller mutating a "default" that every other caller also sees.
+_NO_EVIDENCE: Mapping[str, float] = MappingProxyType({})
 
 # Tiers that can be configured via ``tier_thresholds`` -- the graded ladder
 # between NONE and STOP. STOP is excluded on purpose: it is the single source of
@@ -115,6 +140,23 @@ class OverrideRule:
 
 
 @dataclass(slots=True, frozen=True)
+class SuppressionRule:
+    """A guarded signal cannot drive an action while its evidence fires (LOOP-2 precision).
+
+    ``evidence`` is a key into the ``evidence`` mapping threaded through
+    :class:`Policy`'s methods (e.g. ``"progress"``) -- **not** a detector or
+    :class:`Signal` name. It never appears in ``signals``, so it structurally
+    cannot double as its own suppression trigger. ``min_confidence`` is the
+    evidence value (in ``[0, 1]``) at or above which the guarded signal is
+    excluded from ``_actionable`` for that tick. Validated by
+    :meth:`PolicyConfig.__post_init__`.
+    """
+
+    evidence: str
+    min_confidence: float = 1.0
+
+
+@dataclass(slots=True, frozen=True)
 class HysteresisState:
     """Explicit, threaded state of the hysteresis machine (ARB-3).
 
@@ -154,6 +196,11 @@ class PolicyConfig:
     # (NONE/STOP via stop_threshold). The budget->stop override is wired by the
     # config layer only when the budget detector is enabled.
     overrides: Mapping[str, OverrideRule] = field(default_factory=dict)
+    # Conditional suppression (LOOP-2 precision): guarded signal name -> rule.
+    # Empty by default: zero-config stays exactly as before this feature. Wired
+    # automatically by the config layer (loop <- progress) when no_progress
+    # (and therefore its anchors) is enabled -- never a user-facing config key.
+    suppressions: Mapping[str, SuppressionRule] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # stop_threshold is a confidence in [0, 1]; reject misconfigurations
@@ -184,6 +231,31 @@ class PolicyConfig:
                 raise ValueError(f"{attr} must be an int >= 1")
 
         self.overrides = self._validate_overrides()
+        self.suppressions = self._validate_suppressions()
+
+    def _validate_suppressions(self) -> dict[str, SuppressionRule]:
+        """Validate and defensively copy the conditional-suppression rules.
+
+        Each value must be a :class:`SuppressionRule` with a non-empty string
+        ``evidence`` key and a ``min_confidence`` in ``[0, 1]``. Keys are
+        guarded signal names; typos are the config layer's job to reject
+        (mirroring ``weight_for``'s permissiveness), since this constructor has
+        no notion of which detector names actually exist.
+        """
+        validated: dict[str, SuppressionRule] = {}
+        for name, rule in dict(self.suppressions).items():
+            if not isinstance(rule, SuppressionRule):
+                raise ValueError(f"suppression for {name!r} must be a SuppressionRule")
+            if not isinstance(rule.evidence, str) or not rule.evidence:
+                raise ValueError(f"suppression evidence for {name!r} must be a non-empty string")
+            min_confidence = rule.min_confidence
+            if isinstance(min_confidence, bool) or not isinstance(min_confidence, (int, float)):
+                raise ValueError(f"suppression min_confidence for {name!r} must be a number")
+            min_confidence = float(min_confidence)
+            if not 0.0 <= min_confidence <= 1.0:
+                raise ValueError(f"suppression min_confidence for {name!r} must be in [0, 1]")
+            validated[name] = SuppressionRule(evidence=rule.evidence, min_confidence=min_confidence)
+        return validated
 
     def _validate_tier_thresholds(self) -> dict[Action, float]:
         """Validate and defensively copy the intermediate ladder thresholds.
@@ -268,17 +340,52 @@ class PolicyConfig:
 
 @dataclass(slots=True)
 class Policy:
+    """Arbitration: fuse detector signals into a graded :class:`Action`.
+
+    Extension contract: subclassing and overriding ``step`` (or any other
+    method below) is an established pattern in this codebase (see the
+    scripted test-double policies in ``tests/``), not just an implementation
+    detail. Every overridable method takes an ``evidence: Mapping[str,
+    float]`` parameter with a default (see ``_NO_EVIDENCE``) so omitting it
+    keeps pre-LOOP-2 behaviour. A subclass that overrides one of these
+    methods must keep that parameter in its signature -- ``Pipeline`` always
+    calls ``step`` with three positional arguments, so an override missing
+    ``evidence`` raises ``TypeError`` at runtime rather than silently
+    dropping suppression.
+    """
+
     config: PolicyConfig = field(default_factory=PolicyConfig)
 
-    def _actionable(self, signals: Sequence[Signal]) -> list[Signal]:
-        """Signals eligible to act: everything not declared observe-only."""
-        return [s for s in signals if s.name not in self.config.advisory_signals]
+    def _actionable(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> list[Signal]:
+        """Signals eligible to act: not advisory, and not currently suppressed.
 
-    def fuse(self, signals: Sequence[Signal]) -> float:
+        A signal is dropped when it is listed in ``advisory_signals`` (observe
+        only, unconditionally) *or* when a :class:`SuppressionRule` guards it and
+        ``evidence`` carries its trigger at or above ``min_confidence`` (LOOP-2
+        precision: e.g. ``loop`` suppressed while ``evidence["progress"]`` shows
+        a fresh record). ``evidence`` defaults to empty, so omitting it is
+        exactly today's behaviour -- no suppression ever fires.
+        """
+        out: list[Signal] = []
+        for signal in signals:
+            if signal.name in self.config.advisory_signals:
+                continue
+            rule = self.config.suppressions.get(signal.name)
+            if rule is not None and evidence.get(rule.evidence, 0.0) >= rule.min_confidence:
+                continue
+            out.append(signal)
+        return out
+
+    def fuse(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> float:
         """Fuse signals into one confidence in [0, 1] via weighted noisy-OR.
 
-        Advisory signals are excluded first. With no actionable signal the
-        product is empty (1.0) so the fused confidence is 0.0.
+        Advisory and currently-suppressed signals are excluded first (see
+        :meth:`_actionable`). With no actionable signal the product is empty
+        (1.0) so the fused confidence is 0.0.
 
         Each ``signal.confidence`` is normalized into ``[0, 1]`` before entering
         the product. Built-in detectors already stay in range, so this is a guard
@@ -293,7 +400,7 @@ class Policy:
         violations are surfaced by unit tests, not by a runtime exception.
         """
         product = 1.0
-        for signal in self._actionable(signals):
+        for signal in self._actionable(signals, evidence):
             confidence = signal.confidence
             # NaN fails every comparison, so min/max would let it through; map it
             # to the inert 0.0 first, then clamp finite values into [0, 1].
@@ -301,37 +408,46 @@ class Policy:
             product *= 1.0 - self.config.weight_for(signal.name) * confidence
         return 1.0 - product
 
-    def dominant_signal(self, signals: Sequence[Signal]) -> Signal | None:
+    def dominant_signal(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> Signal | None:
         """The actionable signal that contributes most to the fused score.
 
         Ranked by weighted contribution (``weight * confidence``), not raw
         confidence, so a STOP driven by convergence names the signal that
         actually drove it rather than an unrelated louder-but-down-weighted one.
-        ``None`` when there is no actionable signal.
+        A signal currently suppressed (see :meth:`_actionable`) can never be
+        named here, so a post-mortem never blames a detector that was excluded
+        from the decision. ``None`` when there is no actionable signal.
         """
-        actionable = self._actionable(signals)
+        actionable = self._actionable(signals, evidence)
         if not actionable:
             return None
         return max(actionable, key=lambda s: self.config.weight_for(s.name) * s.confidence)
 
-    def _triggered_overrides(self, signals: Sequence[Signal]) -> list[tuple[Signal, OverrideRule]]:
+    def _triggered_overrides(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> list[tuple[Signal, OverrideRule]]:
         """Actionable ``(signal, rule)`` pairs whose confidence meets the rule.
 
-        Advisory signals are excluded first (an override never resurrects an
-        observe-only detector). Empty when no rule fires -- the common case, so
-        the normal fusion/hysteresis path runs unchanged.
+        Advisory and currently-suppressed signals are excluded first (an
+        override never resurrects a signal :meth:`_actionable` dropped). Empty
+        when no rule fires -- the common case, so the normal fusion/hysteresis
+        path runs unchanged.
         """
         overrides = self.config.overrides
         if not overrides:
             return []
         triggered: list[tuple[Signal, OverrideRule]] = []
-        for signal in self._actionable(signals):
+        for signal in self._actionable(signals, evidence):
             rule = overrides.get(signal.name)
             if rule is not None and signal.confidence >= rule.threshold:
                 triggered.append((signal, rule))
         return triggered
 
-    def override_action(self, signals: Sequence[Signal]) -> Action | None:
+    def override_action(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> Action | None:
         """The most severe overriding action for these signals, else ``None`` (ARB-4).
 
         Scans the configured :class:`OverrideRule`\\ s: an *actionable* signal at
@@ -339,12 +455,14 @@ class Policy:
         wins. ``None`` means no override fired, so :meth:`step` / :meth:`decide`
         fall back to the normal fused-confidence path.
         """
-        triggered = self._triggered_overrides(signals)
+        triggered = self._triggered_overrides(signals, evidence)
         if not triggered:
             return None
         return max(rule.action for _, rule in triggered)
 
-    def override_signal(self, signals: Sequence[Signal]) -> Signal | None:
+    def override_signal(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> Signal | None:
         """The signal that drove the winning override, for reporting (ARB-4).
 
         The actionable signal behind the most severe fired rule (tie-broken by
@@ -352,14 +470,16 @@ class Policy:
         the real trigger -- e.g. ``budget`` -- even when that detector carries a
         fusion weight of 0. ``None`` when no override fired.
         """
-        triggered = self._triggered_overrides(signals)
+        triggered = self._triggered_overrides(signals, evidence)
         if not triggered:
             return None
         top = max(rule.action for _, rule in triggered)
         candidates = [signal for signal, rule in triggered if rule.action == top]
         return max(candidates, key=lambda s: self.config.weight_for(s.name) * s.confidence)
 
-    def target_tier(self, signals: Sequence[Signal]) -> Action:
+    def target_tier(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> Action:
         """Highest active tier whose threshold the fused confidence reaches.
 
         Pure mapping of the weighted noisy-OR to a graded :class:`Action`: the
@@ -369,10 +489,10 @@ class Policy:
         so the target is ``NONE``. This is the *instantaneous* target -- the
         hysteresis in :meth:`step` decides when it is actually committed.
         """
-        actionable = self._actionable(signals)
+        actionable = self._actionable(signals, evidence)
         if not actionable:
             return Action.NONE
-        fused = self.fuse(signals)
+        fused = self.fuse(signals, evidence)
         target = Action.NONE
         for tier, threshold in self.config.active_tiers().items():
             if fused >= threshold and tier > target:
@@ -380,7 +500,10 @@ class Policy:
         return target
 
     def step(
-        self, state: HysteresisState, signals: Sequence[Signal]
+        self,
+        state: HysteresisState,
+        signals: Sequence[Signal],
+        evidence: Mapping[str, float] = _NO_EVIDENCE,
     ) -> tuple[HysteresisState, Action]:
         """Advance the hysteresis machine by one tick; return state + action.
 
@@ -409,12 +532,16 @@ class Policy:
         still follow the normal graduated path); a budget ceiling therefore stops
         now regardless of ``escalate_ticks``, and a lower-tier override can only
         escalate, never mask a fused STOP.
+
+        ``evidence`` (LOOP-2 precision) flows into every signal-eligibility check
+        below (``target_tier``, ``override_action``), so a signal it suppresses
+        for this tick cannot drive an override, the fused score, or hysteresis.
         """
-        override = self.override_action(signals)
+        override = self.override_action(signals, evidence)
         if override is not None:
-            committed = max(override, self.target_tier(signals))
+            committed = max(override, self.target_tier(signals, evidence))
             return HysteresisState(committed, 0, 0), committed
-        target = self.target_tier(signals)
+        target = self.target_tier(signals, evidence)
         committed = state.committed
         if target > committed:
             up_count = state.up_count + 1
@@ -428,26 +555,29 @@ class Policy:
             return HysteresisState(committed, 0, down_count), committed
         return HysteresisState(committed, 0, 0), committed
 
-    def decide(self, signals: Sequence[Signal]) -> Action:
+    def decide(
+        self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
+    ) -> Action:
         """Map the fused *actionable* confidence to a graded action, **no hysteresis**.
 
         Stateless single-tick mapping kept for direct use and back-compat: if the
-        weighted noisy-OR of the non-advisory signals reaches ``stop_threshold``,
-        return ``STOP``; otherwise ``NONE``. It ignores intermediate ladder tiers
-        and applies no hysteresis -- the pipeline drives :meth:`step` instead, so
-        anti-flapping and the graded ladder only apply through ``step``. Advisory
-        signals are still computed and logged upstream; with no actionable signal
-        the run is never stopped (you cannot stop on nothing).
+        weighted noisy-OR of the non-advisory, non-suppressed signals reaches
+        ``stop_threshold``, return ``STOP``; otherwise ``NONE``. It ignores
+        intermediate ladder tiers and applies no hysteresis -- the pipeline
+        drives :meth:`step` instead, so anti-flapping and the graded ladder only
+        apply through ``step``. Advisory signals are still computed and logged
+        upstream; with no actionable signal the run is never stopped (you cannot
+        stop on nothing).
 
         Priority overrides (ARB-4) are honoured here too, for parity with
         :meth:`step`: the result is ``max(override_action, base)`` where ``base``
         is the usual NONE/STOP, so an override can escalate but never downgrade.
         """
-        actionable = self._actionable(signals)
+        actionable = self._actionable(signals, evidence)
         base = Action.NONE
-        if actionable and self.fuse(actionable) >= self.config.stop_threshold:
+        if actionable and self.fuse(actionable, evidence) >= self.config.stop_threshold:
             base = Action.STOP
-        override = self.override_action(signals)
+        override = self.override_action(signals, evidence)
         if override is not None:
             return max(override, base)
         return base

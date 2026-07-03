@@ -15,9 +15,10 @@ from collections.abc import Sequence
 import pytest
 
 from pathlayer.detectors.base import Detector, Signal
+from pathlayer.detectors.progress import ExitCodeProgressAnchor, TestProgressAnchor
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action, HysteresisState, OverrideRule, Policy
+from pathlayer.policies import Action, HysteresisState, OverrideRule, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
 
 
@@ -714,3 +715,260 @@ def test_pipeline_override_stops_immediately_despite_hysteresis() -> None:
     assert pipeline.post_mortem is not None
     assert pipeline.post_mortem.stopped_at_index == 1
     assert pipeline.post_mortem.reason.startswith("budget")
+
+
+# --------------------------------------------------------------------------- #
+# LOOP-2 precision: conditional suppression (SuppressionRule)
+# --------------------------------------------------------------------------- #
+
+_LOOP_SUPPRESSED_BY_PROGRESS: dict[str, SuppressionRule] = {
+    "loop": SuppressionRule(evidence="progress", min_confidence=1.0)
+}
+
+
+def test_default_suppressions_empty() -> None:
+    assert PolicyConfig().suppressions == {}
+
+
+def test_no_evidence_is_pre_loop2_behavior() -> None:
+    # Omitting `evidence` entirely (the default {}) must behave exactly like
+    # before this feature: a suppression rule configured but never fed evidence
+    # never suppresses anything.
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.decide(signals) is Action.STOP
+    assert policy.fuse(signals) == pytest.approx(0.95)
+    assert policy.dominant_signal(signals) is signals[0]
+
+
+def test_fresh_progress_suppresses_loop_from_stopping() -> None:
+    # The F1a bug this rule fixes: loop alone would STOP, but fresh progress
+    # evidence at/above min_confidence excludes it from the actionable set.
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.decide(signals, {"progress": 1.0}) is Action.NONE
+    assert policy.fuse(signals, {"progress": 1.0}) == pytest.approx(0.0)
+    assert policy.dominant_signal(signals, {"progress": 1.0}) is None
+
+
+def test_evidence_below_min_confidence_does_not_suppress() -> None:
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.decide(signals, {"progress": 0.99}) is Action.STOP
+
+
+def test_suppression_only_affects_the_guarded_signal() -> None:
+    # A convergent second signal (retry) is untouched by loop's suppression --
+    # it still contributes to fusion and can still drive STOP on its own.
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95), Signal("retry", confidence=0.95)]
+    assert policy.fuse(signals, {"progress": 1.0}) == pytest.approx(0.95)
+    assert policy.dominant_signal(signals, {"progress": 1.0}) is signals[1]
+    assert policy.decide(signals, {"progress": 1.0}) is Action.STOP
+
+
+def test_suppression_never_confused_with_advisory() -> None:
+    # Suppression is conditional (on evidence); advisory is unconditional. A
+    # signal guarded but not currently suppressed still behaves normally.
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.decide(signals, {"progress": 0.0}) is Action.STOP
+    assert policy.decide(signals) is Action.STOP
+
+
+def test_suppression_excludes_from_override_and_dominant_signal() -> None:
+    # A suppressed signal cannot trigger an override rule, nor be named the
+    # dominant/override signal -- a post-mortem must never blame a detector
+    # that was excluded from the decision (design note in policies/base.py).
+    policy = Policy(
+        PolicyConfig(
+            suppressions=_LOOP_SUPPRESSED_BY_PROGRESS,
+            overrides={"loop": OverrideRule(0.5, Action.STOP)},
+        )
+    )
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.override_action(signals, {"progress": 1.0}) is None
+    assert policy.override_signal(signals, {"progress": 1.0}) is None
+    assert policy.dominant_signal(signals, {"progress": 1.0}) is None
+    # Without suppression, the same override fires normally.
+    assert policy.override_action(signals) is Action.STOP
+
+
+def test_suppression_excludes_from_target_tier_and_step() -> None:
+    policy = Policy(
+        PolicyConfig(tier_thresholds=_LADDER, suppressions=_LOOP_SUPPRESSED_BY_PROGRESS)
+    )
+    signals = _sig(0.95)
+    assert policy.target_tier(signals, {"progress": 1.0}) is Action.NONE
+    state, action = policy.step(HysteresisState(), signals, {"progress": 1.0})
+    assert action is Action.NONE
+    assert state.committed is Action.NONE
+
+
+def test_suppression_lifted_once_evidence_goes_stale() -> None:
+    # A loop that progressed once and now stagnates must become stoppable again
+    # as soon as the fresh-evidence tick passes (mirrors is_advancing's design:
+    # strict on the *last* step only).
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    assert policy.decide(signals, {"progress": 1.0}) is Action.NONE
+    assert policy.decide(signals, {"progress": 0.0}) is Action.STOP
+
+
+def test_suppression_alternating_with_hysteresis_never_commits_stop() -> None:
+    # Pins the examples/pathlayer.config.yaml "Trou D" mitigation: escalate_ticks
+    # above the longest gap between progress ticks absorbs flickering
+    # suppression. Worst case here is progress on every *other* tick (the
+    # longest gap escalate_ticks=2 can absorb): loop is maxed throughout, but a
+    # fresh-evidence tick always resets up_count to 0 (target == committed ==
+    # NONE) before a stale tick's up_count reaches 2, so the run never STOPs.
+    policy = Policy(PolicyConfig(escalate_ticks=2, suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    state = HysteresisState()
+    actions = []
+    for progress in (1.0, 0.0, 1.0, 0.0, 1.0, 0.0):
+        state, action = policy.step(state, signals, {"progress": progress})
+        actions.append(action)
+    assert actions == [Action.NONE] * 6
+    assert state.committed is Action.NONE
+
+
+def test_suppression_stale_for_escalate_ticks_consecutive_still_stops() -> None:
+    # Hysteresis delays the commit, it does not defeat it: once fresh evidence
+    # stops arriving for `escalate_ticks` *consecutive* ticks, the suppression's
+    # protection lifts for good and loop STOPs, same as a real loop would.
+    policy = Policy(PolicyConfig(escalate_ticks=2, suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    signals = [Signal("loop", confidence=0.95)]
+    state = HysteresisState()
+    state, action = policy.step(state, signals, {"progress": 1.0})
+    assert action is Action.NONE
+    state, action = policy.step(state, signals, {"progress": 0.0})
+    assert action is Action.NONE  # 1st consecutive confirming tick, not committed yet
+    state, action = policy.step(state, signals, {"progress": 0.0})
+    assert action is Action.STOP  # 2nd consecutive confirming tick commits
+
+
+# --- PolicyConfig suppression validation ------------------------------------ #
+
+
+def test_suppression_rule_type_enforced() -> None:
+    with pytest.raises(ValueError, match="must be a SuppressionRule"):
+        PolicyConfig(suppressions={"loop": OverrideRule(1.0, Action.STOP)})  # type: ignore[dict-item]
+
+
+def test_suppression_evidence_must_be_non_empty_string() -> None:
+    with pytest.raises(ValueError, match="non-empty string"):
+        PolicyConfig(suppressions={"loop": SuppressionRule(evidence="")})
+    with pytest.raises(ValueError, match="non-empty string"):
+        PolicyConfig(suppressions={"loop": SuppressionRule(evidence=None)})  # type: ignore[arg-type]
+
+
+def test_suppression_min_confidence_out_of_range_rejected() -> None:
+    with pytest.raises(ValueError, match="must be in \\[0, 1\\]"):
+        PolicyConfig(
+            suppressions={"loop": SuppressionRule(evidence="progress", min_confidence=1.5)}
+        )
+    with pytest.raises(ValueError, match="must be in \\[0, 1\\]"):
+        PolicyConfig(
+            suppressions={"loop": SuppressionRule(evidence="progress", min_confidence=-0.1)}
+        )
+
+
+def test_suppression_min_confidence_bool_rejected() -> None:
+    with pytest.raises(ValueError, match="must be a number"):
+        PolicyConfig(
+            suppressions={"loop": SuppressionRule(evidence="progress", min_confidence=True)}  # type: ignore[arg-type]
+        )
+
+
+def test_suppression_min_confidence_int_coerced_to_float() -> None:
+    config = PolicyConfig(
+        suppressions={"loop": SuppressionRule(evidence="progress", min_confidence=1)}
+    )
+    rule = config.suppressions["loop"]
+    assert rule.min_confidence == 1.0
+    assert isinstance(rule.min_confidence, float)
+
+
+def test_suppressions_defensively_copied() -> None:
+    source = {"loop": SuppressionRule(evidence="progress", min_confidence=1.0)}
+    config = PolicyConfig(suppressions=source)
+    source["loop"] = SuppressionRule(evidence="other", min_confidence=0.0)
+    assert config.suppressions["loop"].evidence == "progress"
+
+
+# --- Pipeline integration: suppression prevents a real STOP ----------------- #
+
+
+class _ScriptedLoop(Detector):
+    """Emits a scripted loop confidence per event, mirroring _ScriptedDetector."""
+
+    name = "loop"
+
+    def __init__(self, confidences: Sequence[float]) -> None:
+        self._confidences = list(confidences)
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        return Signal(self.name, confidence=self._confidences[len(history) - 1])
+
+
+def test_pipeline_suppresses_loop_stop_while_progress_anchor_advances() -> None:
+    # End-to-end version of the F1a fixture: a maxed loop signal would STOP on
+    # its own, but progress_anchors + the suppression rule keep it silent while
+    # the ground-truth test anchor sets a fresh record every tick. The first
+    # tick's loop confidence is deliberately below stop_threshold: is_advancing
+    # has no baseline yet on event 1 (see test_progress.py), so a realistic
+    # LoopDetector -- which also needs >=2 repeats to reach high confidence --
+    # never actually races the suppression on the very first event.
+    detector = _ScriptedLoop([0.5, 0.95, 0.95])
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    pipeline = Pipeline(
+        [detector],
+        policy,
+        progress_anchors=[TestProgressAnchor(), ExitCodeProgressAnchor()],
+    )
+    events = [
+        ToolEvent(tool="run_tests", args={}, result={"passed": p, "failed": 0}, ts=float(i))
+        for i, p in enumerate((1, 2, 3))
+    ]
+    actions = pipeline.run(events)
+
+    assert actions == [Action.NONE, Action.NONE, Action.NONE]
+    assert pipeline.stopped is False
+    assert pipeline.post_mortem is None
+
+
+def test_pipeline_stops_once_progress_evidence_goes_stale() -> None:
+    # Same setup, but the test count stops climbing after the 2nd event: the
+    # 3rd tick has no fresh evidence, so the suppression lifts and loop STOPs.
+    detector = _ScriptedLoop([0.5, 0.95, 0.95])
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    pipeline = Pipeline(
+        [detector],
+        policy,
+        progress_anchors=[TestProgressAnchor(), ExitCodeProgressAnchor()],
+    )
+    events = [
+        ToolEvent(tool="run_tests", args={}, result={"passed": p, "failed": 0}, ts=float(i))
+        for i, p in enumerate((1, 2, 2))
+    ]
+    actions = pipeline.run(events)
+
+    assert actions == [Action.NONE, Action.NONE, Action.STOP]
+    assert pipeline.stopped is True
+    assert pipeline.post_mortem is not None
+    assert pipeline.post_mortem.reason.startswith("loop")
+
+
+def test_pipeline_without_progress_anchors_never_suppresses() -> None:
+    # A pipeline that never opts into progress_anchors computes no evidence at
+    # all, so a configured suppression rule stays inert -- identical to the
+    # pre-LOOP-2 pipeline.
+    detector = _ScriptedLoop([0.95])
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    pipeline = Pipeline([detector], policy)
+    events = [
+        ToolEvent(tool="run_tests", args={}, result={"passed": 1, "failed": 0}, ts=0.0),
+    ]
+    actions = pipeline.run(events)
+    assert actions == [Action.STOP]

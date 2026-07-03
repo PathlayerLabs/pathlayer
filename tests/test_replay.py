@@ -8,7 +8,8 @@ from pathlayer.config import build_pipeline
 from pathlayer.detectors.canonical import ToolMask
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import ToolEvent
-from pathlayer.policies import Policy
+from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
+from pathlayer.policies import Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation import (
     Report,
@@ -199,9 +200,20 @@ def test_golden_anchored_no_progress_caught_under_default_policy() -> None:
 def test_active_policy_catches_anchored_no_progress() -> None:
     # Pins the behavior explicitly, independent of the default: with the advisory
     # set empty, the anchored stall is caught and no healthy trace turns into a
-    # false positive (the success-suppression guardrail). Equivalent to the
-    # default policy since NOP-3, kept as a regression anchor.
-    active = Policy(PolicyConfig(advisory_signals=frozenset()))
+    # false positive (the success-suppression guardrail, plus the LOOP-2
+    # precision loop<-progress suppression -- an explicit custom policy must
+    # opt back into it, same as build_pipeline does). Equivalent to the default
+    # policy since NOP-3, kept as a regression anchor.
+    active = Policy(
+        PolicyConfig(
+            advisory_signals=frozenset(),
+            suppressions={
+                LoopDetector.name: SuppressionRule(
+                    evidence=PROGRESS_EVIDENCE_KEY, min_confidence=1.0
+                )
+            },
+        )
+    )
     churn = load_traces(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
     assert replay_trace(churn[0], policy=active).intervened
     healthy = score(load_traces(_TRACES_DIR / "healthy"), policy=active)
