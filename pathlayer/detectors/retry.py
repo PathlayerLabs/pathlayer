@@ -1,4 +1,4 @@
-"""RetryDetector (RET-1 + RET-2).
+"""RetryDetector (RET-1 + RET-2 + RET-3).
 
 Catches two flavours of the "keep hammering, expect a different result" failure,
 folded into a single ``retry`` signal (``confidence = max`` of the two):
@@ -15,24 +15,42 @@ folded into a single ``retry`` signal (``confidence = max`` of the two):
 - **RET-2 -- same tool regardless of error.** The agent pounds one tool over and
   over with genuinely different arguments and/or mixed errors, so RET-1's
   exact-match streak stays silent yet the run is clearly stuck on that tool. We
-  count raw tool-name frequency over a sliding ``window`` and fire when one tool
-  both dominates the window (count and ratio thresholds) *and* fails at least
-  ``min_failures`` times itself -- a pure all-success burst (legitimate
-  exploration / polling) stays silent. Crucially this component is **capped** at
-  ``dominance_max_confidence`` (default 0.85, below the default
-  ``stop_threshold`` of 0.9): tool dominance is weak, framework-agnostic
-  evidence, so with the default policy it reinforces a stop via fusion with a
-  real no-progress signal but cannot stop a run on its own. The exact-match
-  RET-1 component keeps its full authority up to 1.0.
+  measure the *trailing uninterrupted run* of one tool over a sliding ``window``
+  and fire when it both dominates the window (length and ratio thresholds) *and*
+  fails at least ``min_failures`` times inside the run -- a pure all-success
+  burst (legitimate exploration / polling) stays silent. Crucially this
+  component is **capped** at ``dominance_max_confidence`` (default 0.85, below
+  the default ``stop_threshold`` of 0.9): tool dominance is weak,
+  framework-agnostic evidence, so with the default policy it reinforces a stop
+  via fusion with a real no-progress signal but cannot stop a run on its own.
+  The exact-match RET-1 component keeps its full authority up to 1.0.
+
+- **RET-3 -- reset on a genuinely different action.** The retry counters reset
+  when the agent genuinely moves on, at the granularity each component reasons
+  about:
+
+    * RET-1 already resets on a different *canonical token*: its streak breaks
+      as soon as ``canonicalize(event)`` changes (a different call, different
+      args, or a different error). This is the canonical-token reset called for
+      in the issue.
+    * RET-2 resets on a different *tool*: because the dominance component
+      deliberately ignores args and errors (its whole niche is one tool hammered
+      with genuinely different args, where every canonical token differs),
+      "genuinely different" here means a different tool. Only the trailing run
+      of the same tool counts, so a different tool anywhere in the window breaks
+      the run. Resetting RET-2 on a canonical-token change instead would nullify
+      it -- its storms carry a distinct token on every call.
+
+  Either way, an old storm the agent has since moved past no longer contributes:
+  two separate retry bursts split by real work are not merged into a false
+  alarm.
 
 Both components are pure functions of the observed history: same events in, same
-signal out. No clock, no randomness. RET-3 (reset on a genuinely different
-action) builds on this.
+signal out. No clock, no randomness.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
 
 from pathlayer.detectors.base import Detector, Signal
@@ -134,14 +152,25 @@ class RetryDetector(Detector):
         return confidence, reason
 
     def _tool_dominance_confidence(self, history: Sequence[ToolEvent]) -> tuple[float, str]:
-        """RET-2: one tool dominates the recent window, regardless of args/error.
+        """RET-2 + RET-3: one tool dominates the *most recent uninterrupted* run.
 
         Counts raw tool names (not the canonical token) so genuinely different
         arguments and mixed results still count as the same tool. Gated three
-        ways -- absolute count, share of the window, and a minimum number of
-        failures *by the dominant tool itself* -- so a legitimate all-success
+        ways -- length of the trailing run, its share of the window, and a
+        minimum number of failures inside that run -- so a legitimate all-success
         burst of one tool (exploration, polling) stays silent even if unrelated
-        calls fail. The confidence is capped at ``dominance_max_confidence``,
+        calls fail.
+
+        RET-3: only the trailing run of the *same* tool counts. A genuinely
+        different tool anywhere in the window breaks the run, so an old storm
+        that the agent has since moved past no longer counts -- the counter
+        resets on a genuinely different action instead of accumulating a bag of
+        occurrences across unrelated phases. Reset is tool-level here on purpose:
+        RET-2 ignores args/errors (that is its niche), so a canonical-token reset
+        would fire on every call and nullify it. The canonical-token reset the
+        issue asks for is provided by the RET-1 component above.
+
+        The confidence is a fixed value capped at ``dominance_max_confidence``,
         which defaults below ``stop_threshold``: with the default policy tool
         dominance reinforces a stop via fusion but cannot stop a run on its own.
         """
@@ -149,25 +178,28 @@ class RetryDetector(Detector):
         if len(window) < self._dominance_min_calls:
             return 0.0, ""
 
-        tool, count = Counter(event.tool for event in window).most_common(1)[0]
+        tool = window[-1].tool
+        count = 0
+        for event in reversed(window):
+            if event.tool != tool:
+                break
+            count += 1
+
         if count < self._dominance_min_calls or count / len(window) < self._dominance_ratio:
             return 0.0, ""
 
-        # Gate on failures of the dominant tool, not the whole window: a tool that
-        # keeps succeeding is not stuck, even if other calls around it fail.
-        failures = sum(1 for event in window if event.tool == tool and _error_of(event) is not None)
+        # Gate on failures inside the trailing run itself: a tool that keeps
+        # succeeding is not stuck, even if other calls around it fail.
+        run = window[-count:]
+        failures = sum(1 for event in run if _error_of(event) is not None)
         if failures < self._min_failures:
             return 0.0, ""
 
-        # The ramp saturates at the cap as soon as the count gate opens
-        # (``count >= dominance_min_calls`` makes the ratio term >= 1.0): the
-        # dominance contribution is a fixed, capped nudge by design, never a
-        # STOP-strength signal on its own.
-        confidence = min(
-            self._dominance_max_confidence, (count - 1) / (self._dominance_min_calls - 1)
-        )
+        # The run is at least ``dominance_min_calls`` long, so dominance is
+        # always a fixed, capped nudge by design -- weak, framework-agnostic
+        # evidence, never a STOP-strength signal on its own.
+        confidence = self._dominance_max_confidence
         reason = (
-            f"{tool!r} dominates {count}/{len(window)} recent calls "
-            f"regardless of result ({failures} failed)"
+            f"{tool!r} dominates the last {count} calls regardless of result ({failures} failed)"
         )
         return confidence, reason

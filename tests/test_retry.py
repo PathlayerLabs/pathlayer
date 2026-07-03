@@ -1,4 +1,4 @@
-"""RET-1: tests for the RetryDetector."""
+"""RET-1 + RET-2 + RET-3: tests for the RetryDetector."""
 
 from __future__ import annotations
 
@@ -250,4 +250,70 @@ def test_storm_fixture_fires_where_loop_and_ret1_are_silent() -> None:
     assert "dominates" in retry.reason
     assert LoopDetector().evaluate(trace.events).confidence == 0.0
     # Capped below stop_threshold: the storm alone never stops the run.
+    assert Policy().decide([retry]) is Action.NONE
+
+
+# --------------------------------------------------------------------------- #
+# RET-3: reset on a genuinely different action
+# --------------------------------------------------------------------------- #
+def test_dominance_resets_on_genuinely_different_action() -> None:
+    # RET-3: an old storm the agent has since moved past must not merge with a
+    # fresh, shorter burst into a false alarm. A genuinely different tool breaks
+    # the trailing run, so only the calls *after* it count. 'search' appears 5x
+    # in the window, but the trailing run is 2 (< dominance_min_calls) -> silent.
+    detector = RetryDetector(dominance_min_calls=3, min_failures=2)
+    events = [
+        _search("q0", error="boom"),
+        _search("q1", error="boom"),
+        _search("q2", error="boom"),
+        ToolEvent(tool="edit_file", args={"path": "a.py"}, result={"ok": True}),
+        _search("q3", error="boom"),
+        _search("q4", error="boom"),
+    ]
+    assert _confidence(detector, *events) == 0.0
+
+
+def test_dominance_still_fires_on_uninterrupted_run() -> None:
+    # Non-regression: an uninterrupted trailing run of one failing tool still
+    # fires (capped) -- RET-3 only resets when a genuinely different tool breaks
+    # the run, never on argument or error variation within the same tool.
+    detector = RetryDetector(dominance_min_calls=3, min_failures=2)
+    signal = detector.evaluate([_search(f"q{i}", error="boom") for i in range(5)])
+    assert signal.confidence == pytest.approx(0.85)
+    assert "'search' dominates the last 5 calls" in signal.reason
+
+
+def test_single_different_tool_at_tail_resets_even_after_long_run() -> None:
+    # RET-3 intended semantics, pinned: a single genuinely different action at
+    # the very tail resets the run, even after a long uninterrupted storm. The
+    # trailing run drops to 1 -> silent. This is a deliberate product choice (a
+    # one-off diagnostic call mid-storm mutes the capped, non-blocking signal for
+    # that tick); the signal re-fires as soon as the same-tool run resumes.
+    detector = RetryDetector(dominance_min_calls=3, min_failures=2)
+    storm = [_search(f"q{i}", error="boom") for i in range(12)]
+    diversion = [ToolEvent(tool="read_file", args={"path": "log.txt"}, result={"ok": True})]
+    assert _confidence(detector, *storm, *diversion) == 0.0
+
+
+def test_dominance_fires_again_after_reset_once_new_run_dominates() -> None:
+    # The reset is not permanent: after a genuinely different action, a fresh
+    # uninterrupted run that dominates the recent window on its own fires again.
+    detector = RetryDetector(window=4, dominance_min_calls=3, min_failures=2)
+    old = [_search(f"old{i}", error="boom") for i in range(4)]
+    interruption = [ToolEvent(tool="run_tests", args={}, result={"ok": True})]
+    fresh = [_search(f"new{i}", error="boom") for i in range(3)]
+    signal = detector.evaluate([*old, *interruption, *fresh])
+    assert signal.confidence == pytest.approx(0.85)
+    assert "the last 3 calls" in signal.reason
+
+
+def test_dominance_reset_fixture_stays_silent() -> None:
+    # RET-3 on a realistic healthy trace: transient rate-limited searches split
+    # by genuine progress (an edit + a passing test + a commit), then a short
+    # resumed search burst. The trailing run is too short to dominate, so no
+    # detector fires -- no false alarm on legitimate interleaved work.
+    trace = load_trace(_TRACES_DIR / "healthy" / "retry_reset_after_progress.json")
+    retry = RetryDetector().evaluate(trace.events)
+    assert retry.confidence == 0.0
+    assert LoopDetector().evaluate(trace.events).confidence == 0.0
     assert Policy().decide([retry]) is Action.NONE

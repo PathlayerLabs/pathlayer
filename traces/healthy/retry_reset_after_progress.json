@@ -1,0 +1,16 @@
+{
+  "label": "healthy",
+  "description": "RET-3 boundary: the agent hits a couple of transient rate-limited searches, then does genuine work (an edit, a passing test run, a commit), then resumes with a short fresh search burst. RET-2 must not merge the two search phases across the real work into one dominating run -- because only the trailing uninterrupted run of a tool counts (the counter resets on a genuinely different action), the final 3-call search burst is too short to dominate, so nothing fires. A naive bag-of-occurrences count over the window would risk a false alarm here.",
+  "metadata": { "curated_by": "RET-3", "boundary": "reset-on-different-action" },
+  "events": [
+    { "tool": "search", "args": { "query": "fix flaky deploy timeout" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "increase registry pull timeout" }, "result": { "hits": 4 } },
+    { "tool": "search", "args": { "query": "helm --timeout flag usage" }, "result": { "error": "rate_limited" } },
+    { "tool": "edit_file", "args": { "path": "deploy/values.yaml", "patch": "raise registry pull timeout to 120s" }, "result": { "ok": true } },
+    { "tool": "run_tests", "args": { "target": "tests/test_deploy.py" }, "result": { "passed": 9, "failed": 0 } },
+    { "tool": "git_commit", "args": { "message": "raise registry pull timeout" }, "result": { "ok": true } },
+    { "tool": "search", "args": { "query": "monitor deploy latency" }, "result": { "hits": 6 } },
+    { "tool": "search", "args": { "query": "grafana deploy dashboard" }, "result": { "error": "rate_limited" } },
+    { "tool": "search", "args": { "query": "deploy latency alert threshold" }, "result": { "hits": 2 } }
+  ]
+}
