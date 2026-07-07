@@ -393,6 +393,31 @@ def test_build_pipeline_wraps_retry_range_error_as_config_error() -> None:
         build_pipeline(config)
 
 
+def test_build_pipeline_threads_loop_ngram_params() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "loop": {
+                    "ngram_min_hits": 4,
+                    "ngram_min_coverage": 0.4,
+                    "ngram_max_confidence": 0.7,
+                }
+            }
+        }
+    )
+    pipeline = build_pipeline(config)
+    loop = next(d for d in pipeline._detectors if isinstance(d, LoopDetector))
+    assert loop._ngram_min_hits == 4
+    assert loop._ngram_min_coverage == 0.4
+    assert loop._ngram_max_confidence == 0.7
+
+
+def test_build_pipeline_wraps_loop_ngram_range_error_as_config_error() -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"loop": {"ngram_min_hits": 1}}})
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*ngram_min_hits"):
+        build_pipeline(config)
+
+
 def test_build_pipeline_threads_dry_run() -> None:
     assert build_pipeline().dry_run is False
     config = PathlayerConfig.from_mapping({"pipeline": {"dry_run": True}})

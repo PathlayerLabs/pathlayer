@@ -1,0 +1,27 @@
+{
+  "label": "healthy",
+  "description": "Legitimate repo exploration: alternating rg -> read_file with a distinct query and a distinct file every time. Recurring *shape* (search then read), but never a recurring *n-gram* since every pair of consecutive tokens differs in at least one argument. Adversarial fixture for LOOP-2 (#18), companion to multi_file_refactor.json: guards the coverage score against firing on merely-similar-looking-but-varied tool sequences.",
+  "metadata": { "curated_by": "LOOP-2", "issue": 18 },
+  "events": [
+    { "tool": "rg", "args": { "pattern": "def handle_request" } },
+    { "tool": "read_file", "args": { "path": "src/api/routes.py" } },
+    { "tool": "rg", "args": { "pattern": "class RequestHandler" } },
+    { "tool": "read_file", "args": { "path": "src/api/handlers.py" } },
+    { "tool": "rg", "args": { "pattern": "import requests" } },
+    { "tool": "read_file", "args": { "path": "src/api/client.py" } },
+    { "tool": "rg", "args": { "pattern": "def validate_payload" } },
+    { "tool": "read_file", "args": { "path": "src/api/validation.py" } },
+    { "tool": "rg", "args": { "pattern": "raise ValidationError" } },
+    { "tool": "read_file", "args": { "path": "src/api/errors.py" } },
+    { "tool": "rg", "args": { "pattern": "class Middleware" } },
+    { "tool": "read_file", "args": { "path": "src/api/middleware.py" } },
+    { "tool": "rg", "args": { "pattern": "def authenticate" } },
+    { "tool": "read_file", "args": { "path": "src/api/auth.py" } },
+    { "tool": "rg", "args": { "pattern": "TOKEN_EXPIRY" } },
+    { "tool": "read_file", "args": { "path": "src/api/config.py" } },
+    { "tool": "rg", "args": { "pattern": "def rate_limit" } },
+    { "tool": "read_file", "args": { "path": "src/api/limiter.py" } },
+    { "tool": "rg", "args": { "pattern": "class Cache" } },
+    { "tool": "read_file", "args": { "path": "src/api/cache.py" } }
+  ]
+}

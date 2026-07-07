@@ -194,6 +194,12 @@ class LoopConfig:
     enabled: bool = True
     k: int = 2
     window: int = 256
+    # LOOP-2: n-gram coverage fallback, only ever consulted when the exact
+    # (LOOP-1) component above is silent. ``ngram_sizes`` stays code-level (like
+    # no_progress's anchors) -- these three scalar thresholds are what's tunable.
+    ngram_min_hits: int = 3
+    ngram_min_coverage: float = 0.3
+    ngram_max_confidence: float = 0.85
 
 
 @dataclass(slots=True)
@@ -317,6 +323,9 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         enabled=loop_s.bool_("enabled", True),
         k=loop_s.int_("k", 2),
         window=loop_s.int_("window", 256),
+        ngram_min_hits=loop_s.int_("ngram_min_hits", 3),
+        ngram_min_coverage=loop_s.float_("ngram_min_coverage", 0.3),
+        ngram_max_confidence=loop_s.float_("ngram_max_confidence", 0.85),
     )
     loop_s.finish()
 
@@ -590,7 +599,14 @@ def build_pipeline(
     try:
         if spec.loop.enabled:
             detectors.append(
-                LoopDetector(k=spec.loop.k, window=spec.loop.window, tool_masks=tool_masks)
+                LoopDetector(
+                    k=spec.loop.k,
+                    window=spec.loop.window,
+                    tool_masks=tool_masks,
+                    ngram_min_hits=spec.loop.ngram_min_hits,
+                    ngram_min_coverage=spec.loop.ngram_min_coverage,
+                    ngram_max_confidence=spec.loop.ngram_max_confidence,
+                )
             )
         if spec.retry.enabled:
             detectors.append(

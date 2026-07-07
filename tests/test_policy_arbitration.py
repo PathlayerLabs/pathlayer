@@ -15,7 +15,13 @@ from collections.abc import Sequence
 import pytest
 
 from pathlayer.detectors.base import Detector, Signal
-from pathlayer.detectors.progress import ExitCodeProgressAnchor, TestProgressAnchor
+from pathlayer.detectors.loop import LoopDetector
+from pathlayer.detectors.progress import (
+    ExitCodeProgressAnchor,
+    TestProgressAnchor,
+    is_advancing,
+    loop_suppression_anchors,
+)
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, HysteresisState, OverrideRule, Policy, SuppressionRule
@@ -958,6 +964,37 @@ def test_pipeline_stops_once_progress_evidence_goes_stale() -> None:
     assert pipeline.stopped is True
     assert pipeline.post_mortem is not None
     assert pipeline.post_mortem.reason.startswith("loop")
+
+
+def test_suppression_also_guards_a_real_loop2_ngram_confidence() -> None:
+    # Non-regression (LOOP-2, #18): the suppression rule keys off the signal
+    # *name* ("loop"), not its internal source. Same guarantee must hold when
+    # the confidence comes from the real LoopDetector's n-gram fallback, not
+    # just the exact-repeat component exercised above. Cycle is (open_file,
+    # run_tests) interrupted every time by a distinct probe -- LOOP-1 stays
+    # silent (see tests/test_loop.py), only the n-gram fallback fires -- while
+    # run_tests' ever-increasing `passed` count is genuine progress evidence.
+    events: list[ToolEvent] = []
+    for i in range(10):
+        events.append(ToolEvent(tool="open_file", args={"path": "src/worker.py"}))
+        events.append(ToolEvent(tool="run_tests", args={}, result={"passed": i + 1, "failed": 0}))
+        events.append(ToolEvent(tool=f"probe_{i}", args={"n": i}))
+    # End right on a run_tests tick: is_advancing is strict on the *last* event
+    # only (see test_progress.py), so the trailing probe would make it abstain.
+    events.append(ToolEvent(tool="open_file", args={"path": "src/worker.py"}))
+    events.append(ToolEvent(tool="run_tests", args={}, result={"passed": 11, "failed": 0}))
+
+    loop_signal = LoopDetector().evaluate(events)
+    assert loop_signal.confidence > 0.0
+    assert "recurring" in loop_signal.reason  # confirms the n-gram path fired, not LOOP-1
+
+    anchors = loop_suppression_anchors()
+    assert is_advancing(anchors, events) is True
+
+    policy = Policy(PolicyConfig(suppressions=_LOOP_SUPPRESSED_BY_PROGRESS))
+    assert policy.fuse([loop_signal], {"progress": 1.0}) == 0.0
+    assert policy.fuse([loop_signal], {"progress": 0.0}) == pytest.approx(loop_signal.confidence)
+    assert policy.fuse([loop_signal]) == pytest.approx(loop_signal.confidence)
 
 
 def test_pipeline_without_progress_anchors_never_suppresses() -> None:

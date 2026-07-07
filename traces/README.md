@@ -106,3 +106,6 @@ VAL-4/VAL-5 (later).
 | `healthy/same_tool_different_args.json` | Same tool, genuinely different files (legit exploration). |
 | `healthy/expensive_but_legitimate.json` | High cumulative cost but real progress; terminates. |
 | `healthy/varied_long_run.json` | Long but progressing run; length alone is not a fault. |
+| `healthy/multi_file_refactor.json` | LOOP-2 (#18) adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
+| `healthy/repo_exploration.json` | LOOP-2 (#18) adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
+| `healthy/repeated_checkpoint_pair.json` | LOOP-2 (#18) known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
