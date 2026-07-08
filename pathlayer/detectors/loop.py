@@ -1,4 +1,4 @@
-"""LoopDetector (class i: repetition, LOOP-1 + LOOP-2).
+"""LoopDetector (class i: repetition, LOOP-1 + LOOP-2 + LOOP-3).
 
 Table stakes. Canonicalizes each event into an action token (see
 :func:`pathlayer.detectors.canonical.canonicalize`) and combines two
@@ -30,12 +30,37 @@ components into a single continuous ``loop`` signal:
   ``pathlayer.policies.base.SuppressionRule``, which this component inherits
   for free by staying under the same ``"loop"`` signal name).
 
-A windowed continuous ``B(t)`` fusing both components over time is deferred to
-LOOP-3 (#19).
+- **LOOP-3 -- windowed (continuous) scoring for LOOP-2 (#19).** Two go/no-go
+  spikes (see issue #19 discussion) ruled out the two most obvious designs:
+  fusing LOOP-1 and LOOP-2 into one blended score (pointless -- on every known
+  case where LOOP-2 fires, LOOP-1 independently reports exactly ``0.0``, so a
+  fusion would only reopen the additive-FP risk already rejected for LOOP-2
+  above) and simply lowering/removing the ``ngram_min_hits`` gate (unsafe --
+  empirically regresses a purpose-built false-positive-boundary fixture,
+  ``traces/healthy/retry_then_succeed.json``, from ``0.0`` straight to
+  ``0.333``). What *was* validated: the ``ngram_min_hits`` gate in
+  ``_ngram_coverage_confidence`` was a hard step (exactly ``0.0`` below the
+  threshold, a discontinuous jump to the raw coverage value at/above it) --
+  replaced here with a continuous sigmoid ramp centered on ``ngram_min_hits``,
+  so confidence rises smoothly with repetition count instead of jumping. The
+  hard floor of 2 occurrences (``_NGRAM_HITS_FLOOR``, not configurable) is kept
+  as-is -- it is what protects ``retry_then_succeed.json``, and the spike
+  showed removing it (not just softening the threshold above it) is what
+  caused the regression.
+
+``ngram_max_confidence`` itself is intentionally left untouched by LOOP-3:
+across the entire traces corpus, only two fixtures ever reach the LOOP-2
+fallback path at all, both around ``0.34``-``0.35`` -- nowhere near the
+``0.85`` cap, which has therefore never been the binding constraint on any
+known trace. Moving it would be an uncalibrated guess, exactly what
+``architecture-guardrails.mdc`` rules out; raising it to grant LOOP-2 solo-stop
+authority is left as an explicitly open question for a richer, non-synthetic
+corpus (``VAL-5``).
 """
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Sequence
 
@@ -56,6 +81,32 @@ from pathlayer.events import EventKind, ToolEvent
 # failures, not a scattered count over the whole window).
 _DEFAULT_NGRAM_SIZES: tuple[int, ...] = (2, 3, 4, 5)
 
+# Hard structural minimum for the LOOP-2 coverage component, deliberately not
+# configurable (unlike ngram_min_hits, which is now the *center* of the LOOP-3
+# ramp rather than a gate -- see the module docstring). A single occurrence is
+# not a repeat at all and can trivially dominate a short window (a lone repeat
+# in a 4-token window already "covers" 50%): verified in the LOOP-3 spike that
+# lowering this below 2 regresses traces/healthy/retry_then_succeed.json.
+_NGRAM_HITS_FLOOR: int = 2
+
+
+def _sigmoid(x: float, steepness: float) -> float:
+    """Logistic curve in (0, 1), steep enough to approximate a step but smooth.
+
+    Used to replace a hard threshold gate with a continuous ramp centered at
+    ``x == 0``. The *exponent* (``-steepness * x``), not ``x`` alone, is
+    clamped: ``steepness`` has no configured upper bound (only ``> 0``), and
+    ``ngram_min_hits`` has no upper bound either, so clamping ``x`` first does
+    not prevent their product from overflowing ``math.exp`` (verified: e.g.
+    ``ngram_min_hits=60, ngram_steepness=20.0`` raises ``OverflowError`` with
+    an ``x``-only clamp). Clamping the exponent to +/-700 keeps
+    ``math.exp`` within ``float64`` range regardless of ``steepness``, while
+    saturating to exactly 0.0 or 1.0 well before that -- no observable effect
+    on the ramp's shape.
+    """
+    exponent = max(-700.0, min(700.0, -steepness * x))
+    return 1.0 / (1.0 + math.exp(exponent))
+
 
 class LoopDetector(Detector):
     name = "loop"
@@ -73,6 +124,7 @@ class LoopDetector(Detector):
         ngram_min_hits: int = 3,
         ngram_min_coverage: float = 0.3,
         ngram_max_confidence: float = 0.85,
+        ngram_steepness: float = 3.0,
     ) -> None:
         if k < 2:
             raise ValueError("k must be >= 2: a loop needs at least two repetitions")
@@ -87,6 +139,8 @@ class LoopDetector(Detector):
             raise ValueError("ngram_min_coverage must be in (0, 1]")
         if not 0.0 <= ngram_max_confidence <= 1.0:
             raise ValueError("ngram_max_confidence must be in [0, 1]")
+        if ngram_steepness <= 0.0:
+            raise ValueError("ngram_steepness must be > 0: it controls a sigmoid growth rate")
         self._k = k
         self._window = window
         self._tool_masks = tool_masks
@@ -94,6 +148,7 @@ class LoopDetector(Detector):
         self._ngram_min_hits = ngram_min_hits
         self._ngram_min_coverage = ngram_min_coverage
         self._ngram_max_confidence = ngram_max_confidence
+        self._ngram_steepness = ngram_steepness
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         history = self._relevant(history)
@@ -140,7 +195,8 @@ class LoopDetector(Detector):
         return best_reps, best_period
 
     def _ngram_coverage_confidence(self, tokens: list[str]) -> tuple[float, str]:
-        """LOOP-2: share of overlapping n-gram windows dominated by one pattern.
+        """LOOP-2/LOOP-3: share of overlapping n-gram windows dominated by one
+        pattern, damped by a continuous ramp on how many times it repeats.
 
         "Coverage" here is the fraction of *overlapping size-n windows* (start
         positions) that are the single most common n-gram, not a literal
@@ -159,6 +215,20 @@ class LoopDetector(Detector):
         *single best* n-gram size is reported, never a sum across sizes --
         several sizes describing the same underlying cycle must not inflate the
         score.
+
+        LOOP-3 (#19): candidate sizes are ranked by raw coverage down to the
+        hard structural floor (``_NGRAM_HITS_FLOOR``, 2 occurrences -- a single
+        occurrence is not a repeat and can trivially dominate a short window).
+        ``ngram_min_hits`` is no longer a hard gate on top of that floor: it is
+        the *center* of a sigmoid that smoothly damps the winning candidate's
+        confidence based on how many times it actually repeated, so confidence
+        rises continuously with repetition instead of jumping from ``0.0`` to
+        the raw coverage value the instant the old threshold was crossed.
+        ``ngram_min_coverage`` remains a hard gate, unlike ``ngram_min_hits``:
+        the LOOP-3 spike only found a discontinuity problem on the *hits* axis
+        (which tracks repetition count, the DoD's "rises smoothly as repetition
+        increases"), not on the coverage-share axis, which stays a semantic
+        "does this pattern dominate the window at all" check.
         """
         n = len(tokens)
         best_coverage = 0.0
@@ -166,22 +236,19 @@ class LoopDetector(Detector):
         best_size = 0
         best_total = 0
         for size in self._ngram_sizes:
-            # `ngram_min_hits` (>= 2) already rules out any size whose gram
-            # count is too small to reach it, so the only guard needed here is
-            # against a size that would make the gram list empty (size > n),
-            # which would otherwise crash on `most_common(1)[0]`.
             if size > n:
                 continue
             grams = [tuple(tokens[i : i + size]) for i in range(n - size + 1)]
             _, hits = Counter(grams).most_common(1)[0]
-            if hits < self._ngram_min_hits:
+            if hits < _NGRAM_HITS_FLOOR:
                 continue
             coverage = hits / len(grams)
             if coverage > best_coverage:
                 best_coverage, best_hits, best_size, best_total = coverage, hits, size, len(grams)
-        if best_coverage < self._ngram_min_coverage:
+        if best_size == 0 or best_coverage < self._ngram_min_coverage:
             return 0.0, ""
-        confidence = min(self._ngram_max_confidence, best_coverage)
+        hits_factor = _sigmoid(best_hits - self._ngram_min_hits, self._ngram_steepness)
+        confidence = min(self._ngram_max_confidence, best_coverage * hits_factor)
         # `best_coverage` is the fraction of *overlapping best_size-action
         # windows* dominated by the single most common one, not a literal
         # percentage of raw tokens in the window -- spelled out as a ratio so

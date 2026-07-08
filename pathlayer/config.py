@@ -196,10 +196,12 @@ class LoopConfig:
     window: int = 256
     # LOOP-2: n-gram coverage fallback, only ever consulted when the exact
     # (LOOP-1) component above is silent. ``ngram_sizes`` stays code-level (like
-    # no_progress's anchors) -- these three scalar thresholds are what's tunable.
+    # no_progress's anchors) -- these scalar thresholds are what's tunable.
     ngram_min_hits: int = 3
     ngram_min_coverage: float = 0.3
     ngram_max_confidence: float = 0.85
+    # LOOP-3 (#19): steepness of the sigmoid ramp centered on ngram_min_hits.
+    ngram_steepness: float = 3.0
 
 
 @dataclass(slots=True)
@@ -326,6 +328,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         ngram_min_hits=loop_s.int_("ngram_min_hits", 3),
         ngram_min_coverage=loop_s.float_("ngram_min_coverage", 0.3),
         ngram_max_confidence=loop_s.float_("ngram_max_confidence", 0.85),
+        ngram_steepness=loop_s.float_("ngram_steepness", 3.0),
     )
     loop_s.finish()
 
@@ -606,6 +609,7 @@ def build_pipeline(
                     ngram_min_hits=spec.loop.ngram_min_hits,
                     ngram_min_coverage=spec.loop.ngram_min_coverage,
                     ngram_max_confidence=spec.loop.ngram_max_confidence,
+                    ngram_steepness=spec.loop.ngram_steepness,
                 )
             )
         if spec.retry.enabled:
@@ -677,13 +681,50 @@ def build_pipeline(
     except ValueError as exc:
         raise ConfigError(f"invalid configuration value: {exc}") from exc
 
+    resolved_logger = logger or logging.getLogger(__name__)
     if not detectors:
         # A pipeline with no detectors can never act -- almost always a config
         # mistake (every detector disabled). Warn rather than fail: an empty,
         # observe-nothing pipeline is technically valid.
-        (logger or logging.getLogger(__name__)).warning(
-            "build_pipeline: no detectors enabled; the pipeline will never act"
-        )
+        resolved_logger.warning("build_pipeline: no detectors enabled; the pipeline will never act")
+    # Audit #117 finding M-1: LOOP-2's n-gram fallback is an uncalibrated
+    # heuristic (see pathlayer.detectors.loop module docstring) that is only
+    # safe today because two independent guards hold: it can never solo-STOP
+    # (capped below stop_threshold, after fusion weighting), and the
+    # loop<-progress suppression catches the case where it would matter in
+    # practice (traces/healthy/repeated_checkpoint_pair.json). Both warnings
+    # are gated on `loop` actually being able to act at all: an advisory
+    # `loop` (Policy._actionable excludes it unconditionally) can never STOP
+    # or be suppressed either, so nothing here would be true for it. Warn --
+    # don't fail -- if a guard is weakened, so a deliberate override is still
+    # possible but never silent.
+    if spec.loop.enabled and LoopDetector.name not in config.policy.advisory_signals:
+        # Policy.fuse() combines a lone actionable signal as
+        # `weight * confidence` (weighted noisy-OR): a down-weighted loop
+        # needs a higher raw confidence to reach stop_threshold than the cap
+        # alone suggests, so the weight is folded into the comparison to
+        # avoid warning on setups that are actually safe.
+        loop_weight = config.policy.weights.get(LoopDetector.name, 1.0)
+        if spec.loop.ngram_max_confidence * loop_weight >= config.policy.stop_threshold:
+            resolved_logger.warning(
+                "build_pipeline: detectors.loop.ngram_max_confidence * "
+                "policy.weights.loop (%s * %s = %s) >= policy.stop_threshold (%s): "
+                "the LOOP-2 n-gram fallback, an uncalibrated heuristic (see issue "
+                "#19), can now solo-STOP an agent on its own -- see audit #117 "
+                "finding M-1",
+                spec.loop.ngram_max_confidence,
+                loop_weight,
+                spec.loop.ngram_max_confidence * loop_weight,
+                config.policy.stop_threshold,
+            )
+        if not spec.no_progress.enabled:
+            resolved_logger.warning(
+                "build_pipeline: detectors.loop is enabled but detectors.no_progress "
+                "is disabled: the loop<-progress suppression that protects against "
+                "LOOP-2 false positives on routine checkpoint patterns (see "
+                "traces/healthy/repeated_checkpoint_pair.json) will not be wired -- "
+                "see audit #117 finding M-1"
+            )
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
     progress_anchors = loop_suppression_anchors() if suppressions else None

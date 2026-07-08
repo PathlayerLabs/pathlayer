@@ -15,6 +15,7 @@ requires failures).
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 from pathlib import Path
 
@@ -76,10 +77,19 @@ def test_confidence_in_unit_interval() -> None:
 
 def test_k_threshold_blocks_short_loops() -> None:
     detector = LoopDetector(k=4)
-    # Block repeated only 3 times: below k -> silent.
-    assert detector.evaluate(_repeat([("read", {"p": "a"})], times=3)).confidence == 0.0
-    # Repeated 4 times: at k -> fires.
-    assert detector.evaluate(_repeat([("read", {"p": "a"})], times=4)).confidence > 0.0
+    # Below k, LOOP-1 is silent -- but the same 3x repeat also forms a 2-gram
+    # with hits=2 (below the default ngram_min_hits=3 ramp center), so LOOP-3's
+    # continuous fallback now reports a small-but-nonzero score instead of
+    # exactly 0.0 (see test_ngram_min_hits_blocks_short_pattern for the general
+    # case). Still far below anything that could matter: nowhere near
+    # stop_threshold, and dwarfed by the k=4 case below.
+    below_k = detector.evaluate(_repeat([("read", {"p": "a"})], times=3)).confidence
+    assert 0.0 <= below_k < 0.1
+    # Repeated 4 times: at k -> LOOP-1 fires with full authority (saturating
+    # map: reps == k -> exactly 0.5).
+    at_k = detector.evaluate(_repeat([("read", {"p": "a"})], times=4)).confidence
+    assert at_k >= 0.5
+    assert at_k > below_k
 
 
 def test_detects_loop_despite_volatile_args() -> None:
@@ -211,20 +221,27 @@ def test_ngram_reports_the_single_best_size_not_a_sum() -> None:
 def test_ngram_size_guard_does_not_wrongly_exclude_short_windows() -> None:
     # Regression (Copilot review on PR #116): the feasibility guard used to be
     # `size > n // 2`, which wrongly excluded n-gram sizes that could still
-    # reach ngram_min_hits on a short window. The only guard actually needed
-    # is against a size that would leave zero grams (size > n); ngram_min_hits
-    # already rules out any size whose gram count cannot reach it.
+    # reach the hits floor on a short window. The only guard actually needed
+    # is against a size that would leave zero grams (size > n); the hard floor
+    # (_NGRAM_HITS_FLOOR=2) already rules out any size whose gram count cannot
+    # reach it.
     detector = LoopDetector(ngram_min_hits=2, ngram_min_coverage=0.5)
     tokens = ["a", "b", "a", "b", "a"]  # n=5; size=3 has gram_count=3, hits=2
     confidence, reason = detector._ngram_coverage_confidence(tokens)
-    assert confidence == pytest.approx(2 / 3)
+    # hits=2 == ngram_min_hits=2 here -> sigmoid centered exactly at the ramp
+    # midpoint (factor 0.5), so confidence is half the raw coverage (2/3).
+    assert confidence == pytest.approx((2 / 3) * 0.5)
     assert "3-action" in reason
 
 
 def test_ngram_min_hits_blocks_short_pattern() -> None:
-    # Only 2 cycles: hits=2 < default ngram_min_hits=3 -> stays silent.
+    # Only 2 cycles: hits=2 sits one below the default ngram_min_hits=3 ramp
+    # center. LOOP-3 replaced the old hard cut (exactly 0.0) with a sigmoid, so
+    # this is now merely small, not silent -- the hard floor is 2 occurrences
+    # (_NGRAM_HITS_FLOOR), not 3. Still comfortably below anything actionable.
     history = _interrupted_cycle(cycles=2)
-    assert LoopDetector().evaluate(history).confidence == 0.0
+    confidence = LoopDetector().evaluate(history).confidence
+    assert 0.0 < confidence < 0.05
 
 
 def test_ngram_min_coverage_floor_blocks_low_coverage() -> None:
@@ -249,6 +266,8 @@ def test_ngram_max_confidence_caps_the_score() -> None:
         {"ngram_min_coverage": 1.5},
         {"ngram_max_confidence": 1.5},
         {"ngram_max_confidence": -0.1},
+        {"ngram_steepness": 0.0},
+        {"ngram_steepness": -1.0},
     ],
 )
 def test_invalid_ngram_params_raise(kwargs: dict[str, object]) -> None:
@@ -348,3 +367,75 @@ def test_existing_golden_loops_are_unaffected_by_ngram_fallback(
     signal = LoopDetector().evaluate(history)
     assert signal.confidence > 0.0
     assert "repeat of" in signal.reason  # LOOP-1's reason shape, not LOOP-2's "recurring"
+
+
+# --------------------------------------------------------------------------- #
+# LOOP-3: windowed (continuous) scoring for the LOOP-2 fallback (#19)
+# --------------------------------------------------------------------------- #
+
+
+def test_ngram_confidence_rises_smoothly_with_hits() -> None:
+    # The DoD for #19: confidence must rise smoothly as repetition increases,
+    # not jump from 0.0 straight to the raw coverage value at a hard cutoff.
+    # Build interrupted cycles with a growing number of repetitions. Raw
+    # coverage itself is not perfectly monotonic (it approaches its asymptote
+    # from above, see test_ngram_fallback_confidence_stable_as_cycles_grow),
+    # so the assertion is on the shape of the curve -- no discontinuous jump,
+    # small at the start, saturated by the end -- not strict monotonicity.
+    confidences = [
+        LoopDetector().evaluate(_interrupted_cycle(cycles=c)).confidence for c in range(2, 9)
+    ]
+    # No single step should jump by more than ~0.3 (a hard 0 -> raw-coverage
+    # cutoff would jump by roughly the full coverage value, e.g. ~0.34).
+    steps = [abs(b - a) for a, b in itertools.pairwise(confidences)]
+    assert all(step < 0.3 for step in steps)
+    # First point (cycles=2, hits=2) must be small but the ramp must have
+    # visibly grown by cycles=8 (hits=8, well past the ngram_min_hits=3 center).
+    assert 0.0 < confidences[0] < 0.05
+    assert confidences[-1] > 0.3
+
+
+def test_ngram_sigmoid_never_overflows_on_extreme_config() -> None:
+    # Regression: _sigmoid used to clamp `x` before multiplying by `steepness`,
+    # so a high ngram_min_hits combined with a high ngram_steepness could still
+    # push the exponent past math.exp's range and raise OverflowError -- a
+    # detector must never crash the host agent (architecture-guardrails.mdc).
+    detector = LoopDetector(ngram_min_hits=60, ngram_steepness=20.0, window=1000)
+    signal = detector.evaluate(_interrupted_cycle(cycles=2))
+    assert 0.0 <= signal.confidence <= 1.0
+    # Symmetric case: hits far *above* an extreme center should saturate to
+    # the coverage value (times ~1.0), not raise either.
+    saturating = LoopDetector(ngram_min_hits=2, ngram_steepness=20.0)
+    signal2 = saturating.evaluate(_interrupted_cycle(cycles=30))
+    assert 0.0 <= signal2.confidence <= 1.0
+
+
+def test_ngram_steepness_controls_ramp_sharpness() -> None:
+    # Higher steepness -> sharper transition -> smaller leak just below the
+    # ngram_min_hits center (protects adversarial fixtures like
+    # retry_then_succeed.json more aggressively, at the cost of a less smooth
+    # DoD curve). Verifies the parameter actually does something and in the
+    # expected direction.
+    history = _interrupted_cycle(cycles=2)  # hits=2, one below the default center=3
+    soft = LoopDetector(ngram_steepness=1.0).evaluate(history).confidence
+    sharp = LoopDetector(ngram_steepness=8.0).evaluate(history).confidence
+    assert 0.0 < sharp < soft
+
+
+def test_healthy_retry_then_succeed_stays_negligible(
+    trace: Callable[[str], list[ToolEvent]],
+) -> None:
+    # Regression pinned from the LOOP-3 spike (#19): this VAL-2
+    # false-positive-boundary fixture (a transient failure retried twice then
+    # resolved) has hits=2 for its best n-gram -- exactly the case the LOOP-3
+    # ramp must keep negligible. A naive fix that simply lowered/removed
+    # ngram_min_hits regressed this trace from 0.0 straight to 0.333; the
+    # sigmoid ramp keeps it near-zero instead.
+    history = trace("healthy/retry_then_succeed.json")
+    signal = LoopDetector().evaluate(history)
+    assert 0.0 <= signal.confidence < 0.05
+
+    pipeline = build_pipeline()
+    actions = {pipeline.process(event) for event in history}
+    assert actions == {Action.NONE}
+    assert pipeline.stopped is False
