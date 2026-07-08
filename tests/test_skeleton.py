@@ -113,7 +113,16 @@ def test_adapter_is_passive_observer() -> None:
     assert captured[0].tool == "probe"
 
 
-def test_openclaw_adapter_not_wired_yet() -> None:
-    adapter = OpenClawAdapter(lambda _event: None)
-    with pytest.raises(NotImplementedError):
-        adapter.attach()
+def test_openclaw_adapter_is_a_passive_observer() -> None:
+    # Full coverage of the OpenClaw adapter (HTTP wiring, translation, ADP-1
+    # DoD smoke test) lives in tests/test_adapter_openclaw.py; this only
+    # checks it conforms to the same passive-observer interface as every
+    # other adapter here.
+    captured: list[ToolEvent] = []
+    adapter = OpenClawAdapter(captured.append, port=0)
+    adapter.attach()
+    try:
+        assert adapter.port > 0
+    finally:
+        adapter.detach()
+    assert captured == []
