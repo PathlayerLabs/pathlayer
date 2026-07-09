@@ -61,11 +61,18 @@ const plugin = {
   description:
     "Forwards tool-call events to a local Pathlayer instance for loop/no-progress detection.",
   register(api) {
-    api.registerHook("after_tool_call", (event, ctx) => {
-      // Fire-and-forget: do NOT await here, so a slow Pathlayer never delays
-      // the hook's own return (and therefore the agent's next step).
-      void forward(api, "after_tool_call", event, ctx);
-    });
+    api.on(
+      "after_tool_call",
+      (event, ctx) => {
+        // Fire-and-forget: do NOT await here, so a slow Pathlayer never delays
+        // the hook's own return (and therefore the agent's next step).
+        void forward(api, "after_tool_call", event, ctx);
+      },
+      // Reuses SEND_TIMEOUT_MS on purpose: this bounds how long OpenClaw
+      // waits on the hook itself, same "never delay the hot path" intent as
+      // the fetch timeout above -- not a copy-paste leftover.
+      { timeoutMs: SEND_TIMEOUT_MS },
+    );
     api.logger.info(`[pathlayer] plugin registered, forwarding to ${PATHLAYER_URL}`);
   },
 };

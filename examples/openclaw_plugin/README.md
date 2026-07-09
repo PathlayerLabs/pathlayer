@@ -109,9 +109,11 @@ rm -rf ~/.openclaw/extensions/pathlayer-plugin && openclaw gateway restart
 Si `pathlayer.log` reste vide **et** qu'aucune ligne `[pathlayer] plugin
 registered...` n'apparait dans les logs d'OpenClaw juste apres le redemarrage
 du gateway (etape 3), c'est probablement que la methode d'enregistrement du
-hook (`api.registerHook` dans `index.js`) ne correspond pas a l'API de ta
-version d'OpenClaw -- dis-le nous, c'est un point precis a ajuster cote
-plugin, pas la peine de chercher plus loin de ton cote.
+hook (`api.on` dans `index.js`) ne correspond pas a l'API de ta version
+d'OpenClaw -- dis-le nous, c'est un point precis a ajuster cote plugin, pas la
+peine de chercher plus loin de ton cote. (Valide sur OpenClaw `2026.6.11` :
+`api.registerHook(...)` echouait au runtime avec `hook registration missing
+name`, remplace par `api.on(...)`.)
 
 ## Notes
 
