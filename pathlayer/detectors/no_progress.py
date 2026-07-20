@@ -53,16 +53,142 @@ is indistinguishable from a stall. That second one is a test-anchor/patience
 concern (a real progressing run shows the failing count *dropping*, which already
 sets records and stays silent), not something git should paper over -- using git
 to silence the test anchor is exactly the masking the deferring design avoids.
+
+PERF-2 -- incremental fold: ``evaluate`` above stays the pure specification for
+every anchor actually shipped here. :meth:`create_state`/:meth:`step` below are
+a *faster equivalent* implementation of that same contract, verified
+prefix-by-prefix against ``evaluate`` (``tests/test_perf2_incremental.py``),
+not just asserted -- the one deliberate, documented exception being a `NaN`
+level from a pathological custom anchor (see ``_cusum``'s and
+``_push_level``'s matching guard below): PERF-2 also *defines* that edge case
+(normalized to a gap), which no built-in anchor can ever produce, rather than
+leaving it as underspecified batch behaviour. The motivation for the fold
+itself is complexity, not behaviour: ``evaluate`` re-derives every anchor's
+level from scratch and calls :func:`progress_series` (itself ``window`` calls to
+``measure``, each rescanning its prefix) on *every* tick, i.e. O(window * n) per
+tick / O(window * n^2) total over a run of length n -- measured at 15-16x
+slower on a 4,000-event OpenClaw reproduction (issue #76). ``step`` instead
+folds each anchor's ``(level, satisfied)`` via :meth:`ProgressAnchor.step` (O(1)
+amortized for the three built-in coding anchors, O(n) only for a
+non-conforming custom anchor -- see ``pathlayer.detectors.progress``) and
+tracks the sliding-window running-maximum with a monotone deque bounded by
+``window`` (see :func:`_push_level`), turning the whole tick into O(window) --
+a fixed constant -- so a full run is O(window * n), linear in ``n``.
+
+The deque preserves *ties*: the running maximum's leftmost occurrence survives
+a push of an equal value, matching ``_cusum``'s own tie-breaking exactly --
+equal to ``best`` never resets ``best``, so the maximum's first index in the
+window is what the exact CUSUM distance is measured from (proof: once the
+window's true maximum is reached, ``best`` locks onto it -- nothing later can
+exceed a maximum -- so every subsequent step is "no new record", each adding
+``target_rate``; the count of such steps is exactly "positions after the
+maximum's first occurrence", which is what the deque's head index gives in
+O(1) after eviction). ``_stagnation_table`` mirrors ``_cusum``'s *repeated
+addition* (not a single multiplication) so the two paths round identically in
+floating point.
+
+Built-in anchors never emit ``NaN``/``inf`` levels, but a custom one could:
+``NaN`` is normalized to a gap (treated like ``None``) in both ``_cusum`` and
+``_push_level``, matching the NaN-is-inert convention ``Policy.fuse`` already
+uses (``pathlayer/policies/base.py``) -- required for the deque, not just
+cosmetic, since ``NaN`` fails every float comparison and would otherwise get
+stuck in the deque, permanently pinning a stale head index. ``+inf``/``-inf``
+need no special case: they compare normally (a total order holds), so ties and
+evictions work exactly like any other float.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.progress import ProgressAnchor, progress_series
 from pathlayer.events import EventKind, ToolEvent
+
+
+def _stagnation_table(window: int, target_rate: float) -> tuple[float, ...]:
+    """Precompute ``target_rate`` summed by repeated addition, 0..window-1 times.
+
+    Matches ``_cusum``'s own repeated ``cumulative += target_rate`` bit-for-bit
+    (a single ``target_rate * k`` multiplication can round differently).
+    """
+    sums = [0.0]
+    total = 0.0
+    for _ in range(window - 1):
+        total += target_rate
+        sums.append(total)
+    return tuple(sums)
+
+
+def _push_level(
+    entries: tuple[tuple[int, float], ...],
+    count: int,
+    window: int,
+    level: float | None,
+) -> tuple[tuple[tuple[int, float], ...], int, int]:
+    """Pure step of one anchor's sliding-window running-maximum (PERF-2).
+
+    ``entries`` is a monotone-decreasing-with-ties deque of ``(index, level)``,
+    oldest first; ``count`` is the number of relevant events fed so far
+    (0-indexed position of the *next* push). Returns ``(new_entries, new_count,
+    stalled)`` where ``stalled`` is the number of steps since the window's
+    current running maximum was first set -- multiply by ``target_rate`` (via
+    :func:`_stagnation_table`) for the CUSUM contribution. A ``None`` level
+    (anchor not applicable at this position) clears the deque, mirroring
+    ``_cusum``'s own reset-on-``None`` -- the next non-``None`` push starts a
+    fresh baseline, exactly as a fresh call to ``progress_series``/``_cusum``
+    would compute for the equivalent windowed batch series.
+
+    Immutable and O(window): never mutates ``entries``, and every operation is
+    bounded by ``window`` regardless of ``count`` -- this is what turns the
+    O(window * n) batch rescan per tick into O(window) per tick.
+    """
+    if level is None or math.isnan(level):
+        # A NaN level is treated exactly like a gap (no signal), matching
+        # ``_cusum`` below and the NaN-is-inert convention already used by
+        # ``Policy.fuse`` (pathlayer/policies/base.py). This is load-bearing,
+        # not cosmetic: the deque's pop-while-less-than invariant relies on a
+        # total order, and NaN fails every comparison in both directions --
+        # appending it unconditionally (as the ``level is None`` guard alone
+        # would let happen) corrupts the deque so a later, larger level no
+        # longer evicts it, permanently pinning a stale head index.
+        return (), count + 1, 0
+    index = count
+    kept = list(entries)
+    while kept and kept[-1][1] < level:
+        kept.pop()
+    kept.append((index, level))
+    new_count = count + 1
+    cutoff = new_count - window
+    while kept and kept[0][0] < cutoff:
+        kept.pop(0)
+    stalled = (new_count - 1) - kept[0][0]
+    return tuple(kept), new_count, stalled
+
+
+@dataclass(slots=True, frozen=True)
+class _AnchorRuntime:
+    """Immutable per-anchor incremental state inside ``NoProgressDetector`` (PERF-2)."""
+
+    anchor_state: object
+    entries: tuple[tuple[int, float], ...]
+    count: int
+
+
+@dataclass(slots=True, frozen=True)
+class _NoProgressState:
+    """Immutable incremental state for ``NoProgressDetector.step`` (PERF-2).
+
+    ``last_signal`` lets a non-``TOOL_CALL`` event (e.g. an LLM-cost event)
+    pass through unchanged in O(1), matching ``evaluate``'s own filtering: the
+    filtered history simply does not grow on such an event, so re-evaluating it
+    would reproduce the exact same signal anyway.
+    """
+
+    runtimes: tuple[_AnchorRuntime, ...]
+    last_signal: Signal
 
 
 class NoProgressDetector(Detector):
@@ -96,6 +222,44 @@ class NoProgressDetector(Detector):
         self._target_rate = target_rate
         self._threshold = threshold
         self._window = window
+        self._stagnation_table = _stagnation_table(window, target_rate)
+
+    def create_state(self) -> _NoProgressState:
+        runtimes = tuple(
+            _AnchorRuntime(anchor_state=anchor.create_state(), entries=(), count=0)
+            for anchor in self._anchors
+        )
+        return _NoProgressState(runtimes=runtimes, last_signal=Signal(self.name, confidence=0.0))
+
+    def step(self, state: _NoProgressState, event: ToolEvent) -> tuple[_NoProgressState, Signal]:
+        if event.kind not in self.event_kinds:
+            return state, state.last_signal
+        next_runtimes: list[_AnchorRuntime] = []
+        applicable_cusums: list[float] = []
+        any_satisfied = False
+        for anchor, runtime in zip(self._anchors, state.runtimes, strict=True):
+            new_anchor_state, snapshot = anchor.step(runtime.anchor_state, event)
+            new_entries, new_count, stalled = _push_level(
+                runtime.entries, runtime.count, self._window, snapshot.level
+            )
+            next_runtimes.append(_AnchorRuntime(new_anchor_state, new_entries, new_count))
+            if snapshot.level is not None:
+                applicable_cusums.append(self._stagnation_table[stalled])
+                if snapshot.satisfied:
+                    any_satisfied = True
+        if not applicable_cusums or any_satisfied:
+            signal = Signal(self.name, confidence=0.0)
+        else:
+            cumulative = min(applicable_cusums)
+            if cumulative <= 0.0:
+                signal = Signal(self.name, confidence=0.0)
+            else:
+                confidence = min(1.0, cumulative / self._threshold)
+                stalled_steps = round(cumulative / self._target_rate)
+                plural = "s" if stalled_steps != 1 else ""
+                reason = f"{stalled_steps} step{plural} without new progress (cusum)"
+                signal = Signal(self.name, confidence=confidence, reason=reason)
+        return _NoProgressState(runtimes=tuple(next_runtimes), last_signal=signal), signal
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         history = self._relevant(history)
@@ -133,7 +297,10 @@ class NoProgressDetector(Detector):
         best: float | None = None
         cumulative = 0.0
         for level in series:
-            if level is None:
+            if level is None or math.isnan(level):
+                # See _push_level's matching guard: NaN is inert (a gap), never
+                # a record -- kept in lockstep so evaluate()/step() agree on any
+                # anchor pathological enough to emit NaN.
                 best = None
                 cumulative = 0.0
             elif best is None or level > best:

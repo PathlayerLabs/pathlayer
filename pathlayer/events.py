@@ -30,6 +30,22 @@ class ToolEvent:
     `args` and `result` are raw here; canonicalization (stripping volatile
     metadata such as timestamps, UUIDs, PIDs, pagination cursors) happens in
     the extraction layer (`pathlayer.detectors`), not at capture time.
+
+    Contract (PERF-2): once an event has been handed to
+    `Pipeline.process`/`sink`, treat it -- and its `args`/`result`/`metadata`
+    mappings -- as immutable, and treat the stream as append-only (no removal,
+    no reordering of already-processed events). Nothing enforces this at
+    runtime (no deep freeze/copy, to keep capture allocation-free on the hot
+    path); it is a documented caller contract instead. The incremental fold
+    path (`Detector.step`/`ProgressAnchor.step`, PERF-2) extracts the scalars
+    it needs from an event once, at fold time, and never re-reads it -- so a
+    retroactive mutation of an already-processed event silently does *not*
+    propagate to already-computed incremental state, unlike the batch path
+    (`evaluate`/`measure`), which re-reads every event fresh on each call and
+    therefore *would* see the mutation. Violating the contract is undefined
+    behavior (see
+    `tests/test_perf2_incremental.py::test_mutating_a_past_event_is_undefined_behavior`
+    for the specific divergence this causes), not a supported use case.
     """
 
     tool: str

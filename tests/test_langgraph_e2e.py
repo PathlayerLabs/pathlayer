@@ -44,7 +44,12 @@ from pathlayer.adapters.langgraph import LangGraphAdapter
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.progress import coding_anchors
+from pathlayer.detectors.progress import (
+    ExitCodeProgressAnchor,
+    GitProgressAnchor,
+    TestProgressAnchor,
+    coding_anchors,
+)
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.policies import Policy
@@ -332,3 +337,111 @@ def test_loop_detected_through_a_real_stategraph() -> None:
     assert [e.tool for e in events] == ["search"] * 6
     assert LoopDetector().evaluate(events).confidence == pytest.approx(0.96875)
     assert _stops(events)
+
+
+# --------------------------------------------------------------------------- #
+# PERF-2: incremental step() vs batch evaluate()/measure(), on *real* captured
+# events (not just hand-written fixtures or the synthetic corpus in
+# test_perf2_incremental.py). Closes the gap flagged by the PERF-2 review
+# committee: the fold and the anchors are equivalence-tested prefix by prefix
+# against traces produced by actually running LangChain tools through the
+# adapter, exercising the real (tool, args, result) shapes it emits.
+# --------------------------------------------------------------------------- #
+
+
+def _assert_anchor_step_matches_batch_on_real_events(
+    anchor_factory: Callable[[], object], events: list[ToolEvent]
+) -> None:
+    anchor = anchor_factory()
+    state = anchor.create_state()  # type: ignore[attr-defined]
+    history: list[ToolEvent] = []
+    for event in events:
+        history.append(event)
+        state, snapshot = anchor.step(state, event)  # type: ignore[attr-defined]
+        expected_level = anchor.measure(history)  # type: ignore[attr-defined]
+        assert snapshot.level == expected_level, (len(history), snapshot.level, expected_level)
+        expected_satisfied = (
+            anchor.is_satisfied(history) if expected_level is not None else False  # type: ignore[attr-defined]
+        )
+        assert snapshot.satisfied == expected_satisfied
+
+
+def _assert_detector_step_matches_batch_on_real_events(
+    detector: NoProgressDetector, events: list[ToolEvent]
+) -> None:
+    state = detector.create_state()
+    history: list[ToolEvent] = []
+    for event in events:
+        history.append(event)
+        state, step_signal = detector.step(state, event)
+        batch_signal = detector.evaluate(tuple(history))
+        assert step_signal.confidence == pytest.approx(batch_signal.confidence, abs=1e-9), (
+            len(history),
+            step_signal,
+            batch_signal,
+        )
+        assert step_signal.reason == batch_signal.reason
+
+
+def _real_event_traces() -> list[tuple[str, list[ToolEvent]]]:
+    """Every captured trace already used by this module's scenario tests."""
+    traces: list[tuple[str, list[ToolEvent]]] = []
+
+    def loop_run(adapter: LangGraphAdapter) -> None:
+        for _ in range(6):
+            search.invoke({"query": "same"}, config=adapter.as_config())
+
+    traces.append(("loop", _capture(loop_run)))
+
+    def retry_run(adapter: LangGraphAdapter) -> None:
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="db timeout"):
+                flaky.invoke({"x": 1}, config=adapter.as_config())
+
+    traces.append(("retry", _capture(retry_run)))
+
+    def no_progress_run(adapter: LangGraphAdapter) -> None:
+        run_tests.invoke({"suite": "all"}, config=adapter.as_config())
+        for i in range(6):
+            edit_file.invoke({"patch": f"change {i}"}, config=adapter.as_config())
+            run_tests.invoke({"suite": "all"}, config=adapter.as_config())
+
+    traces.append(("no_progress_flat", _capture(no_progress_run)))
+
+    def improving_run(adapter: LangGraphAdapter) -> None:
+        for failed in (3, 2, 1, 0):
+            edit_file.invoke({"patch": f"fix {failed}"}, config=adapter.as_config())
+            run_tests_improving.invoke({"failed": failed}, config=adapter.as_config())
+
+    traces.append(("no_progress_improving", _capture(improving_run)))
+
+    def budget_run(adapter: LangGraphAdapter) -> None:
+        for i in range(6):
+            edit_file.invoke({"patch": f"change {i}"}, config=adapter.as_config())
+            _drive_llm_cost(adapter, output_tokens=100_000)
+
+    traces.append(("budget", _capture(budget_run)))
+
+    return traces
+
+
+_REAL_TRACES = _real_event_traces()
+_REAL_TRACE_IDS = [name for name, _ in _REAL_TRACES]
+
+
+@pytest.mark.parametrize("name,events", _REAL_TRACES, ids=_REAL_TRACE_IDS)
+@pytest.mark.parametrize(
+    "anchor_factory", [TestProgressAnchor, ExitCodeProgressAnchor, GitProgressAnchor]
+)
+def test_anchor_step_matches_batch_on_real_captured_events(
+    name: str, events: list[ToolEvent], anchor_factory: Callable[[], object]
+) -> None:
+    _assert_anchor_step_matches_batch_on_real_events(anchor_factory, events)
+
+
+@pytest.mark.parametrize("name,events", _REAL_TRACES, ids=_REAL_TRACE_IDS)
+def test_no_progress_detector_step_matches_batch_on_real_captured_events(
+    name: str, events: list[ToolEvent]
+) -> None:
+    detector = NoProgressDetector(coding_anchors())
+    _assert_detector_step_matches_batch_on_real_events(detector, events)

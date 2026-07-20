@@ -34,12 +34,25 @@ tests (abstains while test evidence is present) but *not* to exit codes: when no
 tests are present, git and the exit-code anchor are both applicable and the
 detector takes the most-progress-wins view across them. The deferring shape was
 validated on labeled traces (``tests/test_nop4_git_experiment.py``).
+
+PERF-2: ``measure``/``is_satisfied`` stay the pure specification -- an anchor's
+observable behaviour is defined by them, forever. ``create_state``/``step``
+(see :class:`AnchorState`) are an optional, *equivalent-by-construction* fold:
+folding ``step`` one event at a time must reproduce, after each event, the same
+``(level, satisfied)`` pair that calling ``measure``/``is_satisfied`` on the
+prefix ending at that event would. The built-in coding anchors below override
+both together for an O(1)-amortized-per-event fold (no more rescanning the
+whole prefix on every tick); a custom anchor that implements only
+``measure``/``is_satisfied`` (e.g. the NOP-4 experiment's prototype anchor)
+keeps working unmodified via the default batch-rebuild fallback -- correct,
+just O(n) per event for *that* anchor only.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from pathlayer.events import EventKind, ToolEvent
@@ -52,6 +65,37 @@ _INSERTIONS = "insertions"
 _DELETIONS = "deletions"
 _NET_LINES = "net_lines"
 _GIT_KEYS = (_INSERTIONS, _DELETIONS, _NET_LINES)
+
+
+@dataclass(slots=True, frozen=True)
+class AnchorSnapshot:
+    """Incremental echo of ``(measure, is_satisfied)`` after one event (PERF-2).
+
+    ``level`` mirrors ``measure(prefix)``, ``satisfied`` mirrors
+    ``is_satisfied(prefix)``, for the prefix ending at the event that produced
+    this snapshot via :meth:`AnchorState.advance`.
+    """
+
+    level: float | None
+    satisfied: bool
+
+
+class AnchorState(ABC):
+    """Pure incremental state for one :class:`ProgressAnchor` (PERF-2).
+
+    Immutable: :meth:`advance` returns a *new* state, never mutates ``self``,
+    so a caller (``NoProgressDetector``, ``Pipeline``) can compute the next
+    tick's state without touching the current one -- required for transactional
+    commit (a later detector or the policy raising must leave every prior state
+    untouched, exactly like ``Pipeline``'s existing ``HysteresisState``
+    rollback). Same rules as :meth:`ProgressAnchor.measure`: no clock, no
+    randomness, no network, no LLM.
+    """
+
+    @abstractmethod
+    def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
+        """Fold in one more event; return the next state and its snapshot."""
+        raise NotImplementedError
 
 
 class ProgressAnchor(ABC):
@@ -81,6 +125,27 @@ class ProgressAnchor(ABC):
         Pure and deterministic, like :meth:`measure`.
         """
         return False
+
+    def create_state(self) -> Any:
+        """Return a fresh incremental state for :meth:`step` (PERF-2).
+
+        Default: an empty tuple, consumed by the default :meth:`step` below as
+        the batch-rebuild fallback. A built-in coding anchor overriding both
+        this and :meth:`step` returns an :class:`AnchorState` instead.
+        """
+        return ()
+
+    def step(self, state: Any, event: ToolEvent) -> tuple[Any, AnchorSnapshot]:
+        """Advance the incremental fold by one event; see the module docstring.
+
+        Default (batch fallback): append ``event`` to the state history and call
+        ``measure``/``is_satisfied`` on the result -- correct for any anchor,
+        including ones that never heard of PERF-2, just O(n) per call for that
+        one anchor.
+        """
+        history = (*state, event)
+        level = self.measure(history)
+        return history, AnchorSnapshot(level=level, satisfied=self.is_satisfied(history))
 
 
 def _as_int(value: Any, *, default: int) -> int:
@@ -131,6 +196,63 @@ def _latest_test_results(history: Sequence[ToolEvent]) -> dict[str, tuple[int, i
     return latest
 
 
+def _target_is_green(passed: int, failed: int) -> bool:
+    """Per-suite success: no failures *and* a real (non-empty) run."""
+    return failed == 0 and passed > 0
+
+
+@dataclass(slots=True, frozen=True)
+class _TestAnchorState(AnchorState):
+    """Incremental state for :class:`TestProgressAnchor` (PERF-2).
+
+    ``latest`` mirrors :func:`_latest_test_results`; ``total_level`` and
+    ``red_count`` are running aggregates kept in lockstep with it so both
+    ``measure`` (``total_level``) and ``is_satisfied`` (``red_count == 0`` with
+    ``latest`` non-empty) are O(1) to read, updated in O(1) per event
+    regardless of how many distinct suites have ever been seen.
+
+    Stored as a ``tuple`` of ``(target, (passed, failed))`` pairs rather than
+    a ``dict``: every other ``AnchorState`` in this module is frozen *and*
+    hashable (all fields are immutable), and a ``dict`` field would silently
+    break that invariant (``hash()`` raises ``TypeError`` on an unhashable
+    field) the moment anything -- tests, memoization, a future ``set()`` of
+    states -- treats these sibling states as interchangeable.
+    """
+
+    latest: tuple[tuple[str, tuple[int, int]], ...] = ()
+    total_level: float = 0.0
+    red_count: int = 0
+
+    def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
+        source = _evidence(event, _TEST_KEYS)
+        if source is None:
+            level = self.total_level if self.latest else None
+            satisfied = bool(self.latest) and self.red_count == 0
+            return self, AnchorSnapshot(level=level, satisfied=satisfied)
+        passed = _as_int(source.get(_PASSED, 0), default=0)
+        failed = _as_int(source.get(_FAILED, 0), default=0)
+        target = _test_target(event)
+        new_latest_dict = dict(self.latest)
+        old = new_latest_dict.get(target)
+        new_latest_dict[target] = (passed, failed)
+        total_level = self.total_level
+        red_count = self.red_count
+        if old is not None:
+            total_level -= old[0] - old[1]
+            if not _target_is_green(old[0], old[1]):
+                red_count -= 1
+        total_level += passed - failed
+        if not _target_is_green(passed, failed):
+            red_count += 1
+        new_state = _TestAnchorState(
+            latest=tuple(new_latest_dict.items()),
+            total_level=total_level,
+            red_count=red_count,
+        )
+        satisfied = red_count == 0  # new_latest is non-empty: we just inserted a key.
+        return new_state, AnchorSnapshot(level=total_level, satisfied=satisfied)
+
+
 class TestProgressAnchor(ProgressAnchor):
     """Ground-truth coding progress from test results.
 
@@ -164,6 +286,45 @@ class TestProgressAnchor(ProgressAnchor):
         # suppressing the detector while that empty suite stalls.
         return all(failed == 0 and passed > 0 for passed, failed in latest.values())
 
+    def create_state(self) -> _TestAnchorState:
+        return _TestAnchorState()
+
+    def step(self, state: Any, event: ToolEvent) -> tuple[Any, AnchorSnapshot]:
+        assert isinstance(state, _TestAnchorState)
+        return state.advance(event)
+
+
+@dataclass(slots=True, frozen=True)
+class _ExitCodeAnchorState(AnchorState):
+    """Incremental state for :class:`ExitCodeProgressAnchor` (PERF-2).
+
+    ``saw_test`` is sticky (once ``True``, forever ``True``): the moment any
+    event carries test evidence, ``measure`` defers to
+    :class:`TestProgressAnchor` for the rest of the history -- exactly matching
+    the batch implementation's per-call full-history scan, which returns
+    ``None`` as soon as it meets *any* test evidence anywhere in the prefix.
+    """
+
+    saw_test: bool = False
+    saw_exit_code: bool = False
+    successes: int = 0
+
+    def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
+        if self.saw_test:
+            return self, AnchorSnapshot(level=None, satisfied=False)
+        if _evidence(event, _TEST_KEYS) is not None:
+            deferred = _ExitCodeAnchorState(
+                saw_test=True, saw_exit_code=self.saw_exit_code, successes=self.successes
+            )
+            return deferred, AnchorSnapshot(level=None, satisfied=False)
+        source = _evidence(event, (_EXIT_CODE,))
+        if source is None:
+            level = float(self.successes) if self.saw_exit_code else None
+            return self, AnchorSnapshot(level=level, satisfied=False)
+        successes = self.successes + (1 if _as_int(source.get(_EXIT_CODE), default=-1) == 0 else 0)
+        new_state = _ExitCodeAnchorState(saw_test=False, saw_exit_code=True, successes=successes)
+        return new_state, AnchorSnapshot(level=float(successes), satisfied=False)
+
 
 class ExitCodeProgressAnchor(ProgressAnchor):
     """Fallback coding progress from process exit codes.
@@ -191,6 +352,13 @@ class ExitCodeProgressAnchor(ProgressAnchor):
             if _as_int(source.get(_EXIT_CODE), default=-1) == 0:
                 successes += 1
         return float(successes) if saw_exit_code else None
+
+    def create_state(self) -> _ExitCodeAnchorState:
+        return _ExitCodeAnchorState()
+
+    def step(self, state: Any, event: ToolEvent) -> tuple[Any, AnchorSnapshot]:
+        assert isinstance(state, _ExitCodeAnchorState)
+        return state.advance(event)
 
 
 class GitProgressAnchor(ProgressAnchor):
@@ -246,6 +414,13 @@ class GitProgressAnchor(ProgressAnchor):
                 size = _diff_size(source)
         return size
 
+    def create_state(self) -> _GitAnchorState:
+        return _GitAnchorState()
+
+    def step(self, state: Any, event: ToolEvent) -> tuple[Any, AnchorSnapshot]:
+        assert isinstance(state, _GitAnchorState)
+        return state.advance(event)
+
 
 def _diff_size(source: Mapping[str, Any]) -> float:
     """Cumulative diff size from a git evidence mapping.
@@ -258,6 +433,37 @@ def _diff_size(source: Mapping[str, Any]) -> float:
         deletions = _as_int(source.get(_DELETIONS, 0), default=0)
         return float(insertions + deletions)
     return float(abs(_as_int(source.get(_NET_LINES, 0), default=0)))
+
+
+@dataclass(slots=True, frozen=True)
+class _GitAnchorState(AnchorState):
+    """Incremental state for :class:`GitProgressAnchor` (PERF-2).
+
+    ``saw_test`` is sticky, mirroring :class:`_ExitCodeAnchorState`: the git
+    anchor defers to tests forever once any test evidence is seen. Never
+    satisfied (a non-empty diff means "code changed", not "task done"),
+    matching the base :class:`ProgressAnchor.is_satisfied` default.
+    """
+
+    saw_test: bool = False
+    saw_git: bool = False
+    latest_size: float = 0.0
+
+    def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
+        if self.saw_test:
+            return self, AnchorSnapshot(level=None, satisfied=False)
+        if _evidence(event, _TEST_KEYS) is not None:
+            deferred = _GitAnchorState(
+                saw_test=True, saw_git=self.saw_git, latest_size=self.latest_size
+            )
+            return deferred, AnchorSnapshot(level=None, satisfied=False)
+        source = _evidence(event, _GIT_KEYS)
+        if source is None:
+            level = self.latest_size if self.saw_git else None
+            return self, AnchorSnapshot(level=level, satisfied=False)
+        size = _diff_size(source)
+        new_state = _GitAnchorState(saw_test=False, saw_git=True, latest_size=size)
+        return new_state, AnchorSnapshot(level=size, satisfied=False)
 
 
 def coding_anchors() -> list[ProgressAnchor]:

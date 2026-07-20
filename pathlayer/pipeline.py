@@ -11,6 +11,23 @@ the same action sequence. Arbitration is graded (ARB-3): the policy maps fused
 confidence to a tier and the pipeline threads the :class:`HysteresisState` so a
 brief spike does not flip the action. Only ``STOP`` halts the run; intermediate
 tiers (WARN..ESCALATE) are decided and logged but, in V1, not yet enforced.
+
+PERF-2: each detector's incremental state (:meth:`Detector.create_state` /
+:meth:`Detector.step`) lives here, one slot per detector instance, **never** on
+the shared ``Detector`` object itself -- the same ``Detector`` instance can
+(and, per the tests, must be able to) sit in two different ``Pipeline``s at
+once without cross-talk. A detector that has not overridden ``step`` (i.e. is
+still using the default batch-rebuild fallback from
+:mod:`pathlayer.detectors.base`) is dispatched via the historical
+``evaluate(history)`` path instead, sharing one ``tuple(self._history)`` build
+across every such detector -- byte-for-byte the pre-PERF-2 behaviour, so
+``LoopDetector``/``RetryDetector``/``BudgetDetector`` and any third-party
+detector see zero change. Every new/updated state (detector states, the
+progress-evidence tracker, hysteresis) is computed into a local variable first
+and only assigned to ``self`` after the whole tick (detectors *and* the
+policy) succeeds without raising -- mirroring the existing history
+append/rollback below -- so a raising detector or policy leaves every prior
+state untouched, ready for the same event to be retried.
 """
 
 from __future__ import annotations
@@ -18,10 +35,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from pathlayer.detectors.base import Detector, Signal
-from pathlayer.detectors.progress import ProgressAnchor, is_advancing
-from pathlayer.events import ToolEvent
+from pathlayer.detectors.progress import ProgressAnchor
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.observability import (
     log_action,
     log_decision,
@@ -38,6 +56,61 @@ from pathlayer.postmortem import PostMortem
 PROGRESS_EVIDENCE_KEY = "progress"
 
 DEFAULT_RECENT_HISTORY = 10
+
+
+@dataclass(slots=True, frozen=True)
+class _EvidenceEntry:
+    """One anchor's incremental state + last-seen level, for progress evidence."""
+
+    anchor_state: Any
+    previous_level: float | None
+
+
+@dataclass(slots=True, frozen=True)
+class _EvidenceState:
+    """Immutable incremental state backing :meth:`Pipeline._evidence` (PERF-2).
+
+    Equivalent-by-construction to ``is_advancing(progress_anchors, history)`` on
+    the full history at every tick (see the module docstring on ``step``'s
+    contract) -- ``is_advancing`` itself is untouched and remains the pure
+    batch specification, used directly by anyone who wants the O(n) reference
+    computation (e.g. tests). ``last_advancing`` lets a non-``TOOL_CALL`` event
+    pass through unchanged: ``is_advancing`` filters to ``TOOL_CALL`` first, so
+    the filtered sequence does not grow on any other event kind and the result
+    cannot change either.
+    """
+
+    entries: tuple[_EvidenceEntry, ...]
+    last_advancing: bool
+
+
+def _create_evidence_state(anchors: Sequence[ProgressAnchor]) -> _EvidenceState:
+    entries = tuple(
+        _EvidenceEntry(anchor_state=anchor.create_state(), previous_level=None)
+        for anchor in anchors
+    )
+    return _EvidenceState(entries=entries, last_advancing=False)
+
+
+def _step_evidence(
+    state: _EvidenceState, anchors: Sequence[ProgressAnchor], event: ToolEvent
+) -> tuple[_EvidenceState, bool]:
+    """Pure fold step behind :meth:`Pipeline._evidence`'s replacement (PERF-2).
+
+    See ``_EvidenceState``.
+    """
+    if event.kind is not EventKind.TOOL_CALL:
+        return state, state.last_advancing
+    next_entries: list[_EvidenceEntry] = []
+    advancing = False
+    for anchor, entry in zip(anchors, state.entries, strict=True):
+        new_anchor_state, snapshot = anchor.step(entry.anchor_state, event)
+        current = snapshot.level
+        previous = entry.previous_level
+        if previous is not None and current is not None and current > previous:
+            advancing = True
+        next_entries.append(_EvidenceEntry(anchor_state=new_anchor_state, previous_level=current))
+    return _EvidenceState(entries=tuple(next_entries), last_advancing=advancing), advancing
 
 
 @dataclass(slots=True)
@@ -100,6 +173,20 @@ class Pipeline:
         # Empty by default, so a caller that does not opt in sees no evidence
         # and therefore no suppression -- identical to pre-LOOP-2 behaviour.
         self._progress_anchors: list[ProgressAnchor] = list(progress_anchors or [])
+        self._evidence_state: _EvidenceState | None = (
+            _create_evidence_state(self._progress_anchors) if self._progress_anchors else None
+        )
+        # PERF-2: a detector that overrides `step` (together with
+        # `create_state`) gets its own incremental state slot, threaded here --
+        # never on the shared Detector instance (see the module docstring). A
+        # detector still using the default fallback (`type(d).step is
+        # Detector.step`) needs no slot: it is dispatched via the historical
+        # `evaluate(history)` path below, unchanged.
+        self._incremental: list[bool] = [type(d).step is not Detector.step for d in self._detectors]
+        self._detector_states: list[Any] = [
+            d.create_state() if inc else None
+            for d, inc in zip(self._detectors, self._incremental, strict=True)
+        ]
 
     @property
     def history(self) -> tuple[ToolEvent, ...]:
@@ -152,20 +239,52 @@ class Pipeline:
         are logged, but no action is emitted (always returns ``NONE``) and the
         run never halts, so the full would-be trajectory can be inspected via
         :attr:`would_be_actions`.
+
+        PERF-2: an incremental detector (see the module docstring) is advanced
+        via ``step(state, event)`` -- no full-history rebuild. Any detector
+        still on the batch fallback shares one ``tuple(self._history)`` build,
+        computed only if at least one such detector remains -- identical to the
+        pre-PERF-2 behaviour for those detectors. Every next-state (detector
+        states, evidence tracker, hysteresis) is held in a local variable and
+        committed to ``self`` only after the whole ``try`` block succeeds, so a
+        raising detector/policy leaves every prior state untouched, exactly
+        like the existing ``self._history.pop()`` rollback below.
         """
         if self._stopped:
             return Action.STOP
         self._history.append(event)
         try:
-            history = tuple(self._history)
-            signals = [detector.evaluate(history) for detector in self._detectors]
-            evidence = self._evidence(history)
+            batch_history: tuple[ToolEvent, ...] | None = None
+            if not all(self._incremental):
+                batch_history = tuple(self._history)
+            signals: list[Signal] = []
+            next_detector_states = list(self._detector_states)
+            for i, detector in enumerate(self._detectors):
+                if self._incremental[i]:
+                    new_state, signal = detector.step(self._detector_states[i], event)
+                    next_detector_states[i] = new_state
+                else:
+                    assert batch_history is not None
+                    signal = detector.evaluate(batch_history)
+                signals.append(signal)
+            next_evidence_state = self._evidence_state
+            if self._progress_anchors:
+                assert next_evidence_state is not None
+                next_evidence_state, advancing = _step_evidence(
+                    next_evidence_state, self._progress_anchors, event
+                )
+                evidence: Mapping[str, float] = {PROGRESS_EVIDENCE_KEY: 1.0 if advancing else 0.0}
+            else:
+                evidence = {}
             next_state, action = self._policy.step(self._hysteresis, signals, evidence)
         except Exception:
             self._history.pop()
             raise
-        # Commit hysteresis state only after the tick succeeds, so a raising
-        # detector/policy leaves both history and hysteresis untouched.
+        # Commit every next-state only after the tick succeeds, so a raising
+        # detector/policy leaves history, detector states, the evidence
+        # tracker and hysteresis all untouched.
+        self._detector_states = next_detector_states
+        self._evidence_state = next_evidence_state
         self._hysteresis = next_state
         if self._dry_run:
             return self._observe(event, signals, action, evidence)
@@ -175,18 +294,6 @@ class Pipeline:
             self._stopped = True
             self._post_mortem = self._build_post_mortem(signals, evidence)
         return action
-
-    def _evidence(self, history: Sequence[ToolEvent]) -> Mapping[str, float]:
-        """Auxiliary evidence passed to the policy alongside ``signals`` (LOOP-2 precision).
-
-        Never a :class:`Signal`, never fed into fusion: see the module-level
-        note in :mod:`pathlayer.policies.base`. Empty when no ``progress_anchors``
-        were configured, so the policy sees exactly nothing to suppress with.
-        """
-        if not self._progress_anchors:
-            return {}
-        confidence = 1.0 if is_advancing(self._progress_anchors, history) else 0.0
-        return {PROGRESS_EVIDENCE_KEY: confidence}
 
     def _observe(
         self,
