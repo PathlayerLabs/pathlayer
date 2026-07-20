@@ -97,6 +97,23 @@ from pathlayer.policies.actions import Action
 # a caller mutating a "default" that every other caller also sees.
 _NO_EVIDENCE: Mapping[str, float] = MappingProxyType({})
 
+
+def _normalized_confidence(confidence: float) -> float:
+    """Clamp a raw ``Signal.confidence`` into ``[0, 1]``, ``NaN`` -> ``0.0``.
+
+    ``Signal.confidence`` is documented as living in ``[0, 1]`` (see
+    ``pathlayer/detectors/base.py``) but the dataclass itself does not enforce
+    it -- Pathlayer never raises from inside the detection loop on a custom
+    detector's stray value (see :meth:`Policy.fuse`), so every site that
+    *compares* or *multiplies* confidences normalizes at the point of use
+    instead. ``NaN`` fails every ``<``/``>`` comparison, so left unnormalized it
+    would make ``min``/``max`` silently pick based on iteration order rather
+    than on the actual value -- mapped to the inert ``0.0`` first, then finite
+    values are clamped into range.
+    """
+    return 0.0 if math.isnan(confidence) else max(0.0, min(1.0, confidence))
+
+
 # Tiers that can be configured via ``tier_thresholds`` -- the graded ladder
 # between NONE and STOP. STOP is excluded on purpose: it is the single source of
 # truth ``stop_threshold``; NONE is the absence of action, never a threshold.
@@ -388,25 +405,31 @@ class Policy:
         (1.0) so the fused confidence is 0.0.
 
         Each ``signal.confidence`` is normalized into ``[0, 1]`` before entering
-        the product. Built-in detectors already stay in range, so this is a guard
-        for custom detectors: a stray ``confidence`` outside ``[0, 1]`` would push
-        the noisy-OR product out of ``[0, 1]`` (e.g. ``2.0`` -> ``fused == 2.0``, a
-        spurious STOP; a negative value could even invert the product). ``NaN`` is
-        treated as ``0.0`` (inert): it neither clamps nor compares, and would
-        otherwise propagate through the product so ``fused`` becomes ``NaN`` and
-        ``fused >= stop_threshold`` silently reads False. We normalize rather than
-        ``raise`` on purpose: the fusion runs inside the detection loop, and
-        Pathlayer must never crash the agent it observes. Detector range
-        violations are surfaced by unit tests, not by a runtime exception.
+        the product (see :func:`_normalized_confidence`). Built-in detectors
+        already stay in range, so this is a guard for custom detectors: a stray
+        ``confidence`` outside ``[0, 1]`` would push the noisy-OR product out of
+        ``[0, 1]`` (e.g. ``2.0`` -> ``fused == 2.0``, a spurious STOP; a negative
+        value could even invert the product). We normalize rather than ``raise``
+        on purpose: the fusion runs inside the detection loop, and Pathlayer must
+        never crash the agent it observes. Detector range violations are
+        surfaced by unit tests, not by a runtime exception.
         """
         product = 1.0
         for signal in self._actionable(signals, evidence):
-            confidence = signal.confidence
-            # NaN fails every comparison, so min/max would let it through; map it
-            # to the inert 0.0 first, then clamp finite values into [0, 1].
-            confidence = 0.0 if math.isnan(confidence) else max(0.0, min(1.0, confidence))
-            product *= 1.0 - self.config.weight_for(signal.name) * confidence
+            product *= 1.0 - self._weighted_contribution(signal)
         return 1.0 - product
+
+    def _weighted_contribution(self, signal: Signal) -> float:
+        """``weight * normalized(confidence)``, the common ranking key.
+
+        Shared by :meth:`dominant_signal` and :meth:`override_signal` so both
+        stay in lockstep with :meth:`fuse`'s normalization -- an unnormalized
+        ``NaN`` fails every comparison, which would otherwise make ``max()``
+        pick based on iteration order instead of on the actual weighted score
+        (found by audit issue #108: it named the wrong signal, or one carrying
+        ``NaN``, depending on list order).
+        """
+        return self.config.weight_for(signal.name) * _normalized_confidence(signal.confidence)
 
     def dominant_signal(
         self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
@@ -423,7 +446,7 @@ class Policy:
         actionable = self._actionable(signals, evidence)
         if not actionable:
             return None
-        return max(actionable, key=lambda s: self.config.weight_for(s.name) * s.confidence)
+        return max(actionable, key=self._weighted_contribution)
 
     def _triggered_overrides(
         self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
@@ -475,7 +498,7 @@ class Policy:
             return None
         top = max(rule.action for _, rule in triggered)
         candidates = [signal for signal, rule in triggered if rule.action == top]
-        return max(candidates, key=lambda s: self.config.weight_for(s.name) * s.confidence)
+        return max(candidates, key=self._weighted_contribution)
 
     def target_tier(
         self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE

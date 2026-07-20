@@ -41,6 +41,7 @@ from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
+from pathlayer.detectors.resource import ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
 from pathlayer.policies import Action, OverrideRule, Policy, SuppressionRule
@@ -63,7 +64,13 @@ _DISCOVERY_NAMES = ("config.yaml", "config.yml", "config.json")
 # drift from the actual ``name`` a detector emits. Used to reject typos that
 # would otherwise silently no-op.
 _KNOWN_SIGNALS: frozenset[str] = frozenset(
-    {LoopDetector.name, RetryDetector.name, BudgetDetector.name, NoProgressDetector.name}
+    {
+        LoopDetector.name,
+        RetryDetector.name,
+        BudgetDetector.name,
+        NoProgressDetector.name,
+        ResourceDetector.name,
+    }
 )
 
 # Config-facing names for the intermediate ladder tiers (ARB-3) -> Action.

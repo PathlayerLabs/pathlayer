@@ -245,6 +245,17 @@ def test_known_advisory_signal_accepted() -> None:
     assert config.policy.advisory_signals == frozenset({"no_progress"})
 
 
+def test_resource_signal_accepted_despite_stub_detector() -> None:
+    # Audit issue #104 F-2: ResourceDetector exists (as a detect-only stub, see
+    # pathlayer/detectors/resource.py) but was missing from _KNOWN_SIGNALS, so
+    # any config referencing "resource" raised a spurious "unknown signal"
+    # ConfigError. Registering it here does not wire ResourceDetector into the
+    # default pipeline (still RES-1..3, Sprint 4) -- it only lets an
+    # integrator's config mention the name without a typo-check false alarm.
+    config = PathlayerConfig.from_mapping({"policy": {"advisory_signals": ["resource"]}})
+    assert config.policy.advisory_signals == frozenset({"resource"})
+
+
 # --------------------------------------------------------------------------- #
 # policy.weights (ARB-1)
 # --------------------------------------------------------------------------- #

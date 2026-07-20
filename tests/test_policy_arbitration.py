@@ -249,6 +249,23 @@ def test_dominant_signal_none_without_actionable() -> None:
     assert policy.dominant_signal([]) is None
 
 
+def test_dominant_signal_treats_nan_confidence_as_inert_regardless_of_order() -> None:
+    # Audit issue #108: an unnormalized NaN fails every comparison, so a plain
+    # `max(key=lambda s: weight * s.confidence)` picks based on list order
+    # instead of the real weighted score. Both orderings must agree, and must
+    # never name the NaN signal over a real one.
+    nan_signal = Signal("custom", confidence=float("nan"))
+    real_signal = Signal("retry", confidence=0.5)
+    policy = Policy()
+    assert policy.dominant_signal([nan_signal, real_signal]) is real_signal
+    assert policy.dominant_signal([real_signal, nan_signal]) is real_signal
+    # All-NaN: still resolves without raising (never surfaces a NaN Signal by
+    # sheer virtue of iteration order over another NaN one -- there is no
+    # "real" signal to prefer here, but the call must not crash).
+    other_nan_signal = Signal("other", confidence=float("nan"))
+    assert policy.dominant_signal([nan_signal, other_nan_signal]) is not None
+
+
 # --------------------------------------------------------------------------- #
 # ARB-3: graded ladder (target_tier) + hysteresis (step)
 # --------------------------------------------------------------------------- #
@@ -650,6 +667,30 @@ def test_override_signal_names_trigger_despite_zero_weight() -> None:
 def test_override_signal_none_without_trigger() -> None:
     policy = Policy(PolicyConfig(overrides=_BUDGET_STOP))
     assert policy.override_signal([Signal("budget", confidence=0.1)]) is None
+
+
+def test_override_signal_tie_break_clamps_out_of_range_confidence() -> None:
+    # Audit issue #108's normalization gap, exercised on override_signal's
+    # tie-break: NaN can never reach it (_triggered_overrides' own `>=` check
+    # already excludes NaN, which fails every comparison), but a finite
+    # out-of-range confidence can, and must be clamped to [0, 1] before
+    # ranking -- otherwise a low-weight signal with a wildly out-of-range
+    # confidence can outrank the real driver.
+    # unclamped: custom -> 0.1*3.0=0.3, retry -> 0.5*0.5=0.25 (custom wins)
+    # clamped:   custom -> 0.1*1.0=0.1, retry -> 0.5*0.5=0.25 (retry wins)
+    policy = Policy(
+        PolicyConfig(
+            weights={"custom": 0.1, "retry": 0.5},
+            overrides={
+                "custom": OverrideRule(0.5, Action.STOP),
+                "retry": OverrideRule(0.5, Action.STOP),
+            },
+        )
+    )
+    custom = Signal("custom", confidence=3.0)
+    retry = Signal("retry", confidence=0.5)
+    assert policy.override_signal([custom, retry]) is retry
+    assert policy.override_signal([retry, custom]) is retry
 
 
 # --- PolicyConfig override validation --------------------------------------- #

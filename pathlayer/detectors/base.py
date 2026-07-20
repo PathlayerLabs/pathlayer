@@ -34,8 +34,25 @@ from pathlayer.events import EventKind, ToolEvent
 
 @dataclass(slots=True)
 class Signal:
+    """A detector's output: a confidence plus a short human-readable reason.
+
+    ``confidence`` should live in ``[0, 1]`` (higher = more likely a
+    failure/no-progress), but this is **not** enforced at construction on
+    purpose (audit issue #104 considered a ``__post_init__`` that raises on an
+    out-of-range value, and rejected it): a custom third-party detector is
+    ordinary user code running inside the pipeline's ``sink()`` call, and
+    Pathlayer must never crash the agent it observes just because one detector
+    misbehaves (same rationale as :meth:`~pathlayer.policies.base.Policy.fuse`,
+    which never raises either). Every site in ``pathlayer.policies.base`` that
+    compares or multiplies a ``confidence`` -- ``fuse``, ``dominant_signal``,
+    ``override_signal`` -- normalizes it into ``[0, 1]`` at the point of use
+    (``NaN`` -> ``0.0``, else clamped) instead, so a stray value from a broken
+    detector is contained there rather than needing every call site upstream
+    to already be well-behaved.
+    """
+
     name: str
-    confidence: float  # in [0, 1]; higher = more likely a failure/no-progress
+    confidence: float
     reason: str = ""
 
 
