@@ -32,6 +32,11 @@ htmlcov/
 .idea/
 .vscode/
 
+# Node (finder_probe personal tool, not part of the pathlayer package)
+node_modules/
+finder_probe/favorites.json
+finder_probe/favoris_export.*
+
 # Local-only agent context (not shared on the repo)
 AGENTS.md
 cursor.md
@@ -40,6 +45,10 @@ cursor.md
 .cursor/rules/pr-self-review.mdc
 .cursor/rules/work-plan.mdc
 .cursor/rules/copilot-comment-handling.mdc
+.cursor/rules/local-dev-conventions.mdc
 
 # Local one-off helper (chat history migration after the OneDrive move)
 restore-chats.sh
+
+# DIY Copilot hook state (per-branch "already reviewed" tracker, ephemeral)
+.cursor/hooks/state/
