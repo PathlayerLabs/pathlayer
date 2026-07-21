@@ -95,6 +95,21 @@ def run_tests_improving(failed: int) -> dict[str, int]:
 
 
 @tool
+def run_tests_rich(failed_ids: list[str], run: int) -> dict[str, object]:
+    """Report stable per-test outcomes using the optional NOP-5 contract."""
+    test_ids = ("a", "b", "c")
+    outcomes = {test_id: ("failed" if test_id in failed_ids else "passed") for test_id in test_ids}
+    return {
+        "passed": len(test_ids) - len(failed_ids),
+        "failed": len(failed_ids),
+        "test_outcomes": outcomes,
+        "scope_id": "all",
+        "collection_complete": True,
+        "scope_exhaustive": True,
+    }
+
+
+@tool
 def edit_file(patch: str) -> str:
     """A genuinely different action each turn (breaks repetition detectors)."""
     return "ok"
@@ -244,6 +259,45 @@ def test_no_progress_negative_improving_tests_stay_silent() -> None:
     assert detector.evaluate(events).confidence == 0.0
     # Not even an actionable (non-advisory) policy stops on genuine progress.
     assert not _stops(events, _actionable_policy())
+
+
+def test_rich_test_outcomes_survive_real_adapter_and_drive_progress() -> None:
+    def run(adapter: LangGraphAdapter) -> None:
+        for index, failed_ids in enumerate((["a", "b", "c"], ["b", "c"], ["c"])):
+            for edit in range(3):
+                edit_file.invoke(
+                    {"patch": f"rich repair {index}-{edit}"}, config=adapter.as_config()
+                )
+            run_tests_rich.invoke(
+                {"failed_ids": failed_ids, "run": index}, config=adapter.as_config()
+            )
+
+    events = _capture(run)
+    captured_results = [event.result for event in events if event.tool == "run_tests_rich"]
+    assert all(
+        isinstance(result, dict) and "test_outcomes" in result for result in captured_results
+    )
+    anchor = TestProgressAnchor()
+    rich_prefixes = [
+        events[: index + 1] for index, event in enumerate(events) if event.tool == "run_tests_rich"
+    ]
+    assert [anchor.measure(prefix) for prefix in rich_prefixes] == [0.0, 1.0, 2.0]
+    assert NoProgressDetector(coding_anchors()).evaluate(events).confidence == 0.0
+    assert not _stops(events, _actionable_policy())
+
+
+def test_rich_test_stall_from_real_adapter_stops_on_no_progress() -> None:
+    def run(adapter: LangGraphAdapter) -> None:
+        run_tests_rich.invoke({"failed_ids": ["a"], "run": 0}, config=adapter.as_config())
+        for index in range(11):
+            edit_file.invoke({"patch": f"rich stagnant {index}"}, config=adapter.as_config())
+
+    events = _capture(run)
+    detector = NoProgressDetector(coding_anchors())
+    assert detector.evaluate(events).confidence >= 0.9
+    assert LoopDetector().evaluate(events).confidence == 0.0
+    assert RetryDetector().evaluate(events).confidence == 0.0
+    assert _stops(events, _actionable_policy())
 
 
 # --------------------------------------------------------------------------- #
@@ -414,6 +468,15 @@ def _real_event_traces() -> list[tuple[str, list[ToolEvent]]]:
             run_tests_improving.invoke({"failed": failed}, config=adapter.as_config())
 
     traces.append(("no_progress_improving", _capture(improving_run)))
+
+    def rich_progress_run(adapter: LangGraphAdapter) -> None:
+        for index, failed_ids in enumerate((["a", "b"], ["b"], [])):
+            edit_file.invoke({"patch": f"rich fix {index}"}, config=adapter.as_config())
+            run_tests_rich.invoke(
+                {"failed_ids": failed_ids, "run": index}, config=adapter.as_config()
+            )
+
+    traces.append(("no_progress_rich", _capture(rich_progress_run)))
 
     def budget_run(adapter: LangGraphAdapter) -> None:
         for i in range(6):

@@ -19,8 +19,9 @@ has actually succeeded. The default is ``False`` (an anchor with no notion of
 success never suppresses).
 
 The coding anchors are grounded on deterministic ground truth the events
-already carry -- test ``passed`` / ``failed`` counts and process ``exit_code``
--- not text similarity. They are split so each anchor stays on a *single* scale:
+already carry -- aggregate test counts, optional stable per-test outcomes, and
+process ``exit_code`` -- not text similarity. They are split so each anchor
+stays on a *single* scale:
 folding a cumulative success count and a ``passed - failed`` level into one
 anchor would compare an early exit-code prefix against a later test level (a
 spurious "drop" -> false positive). ``ExitCodeProgressAnchor`` also abstains
@@ -42,7 +43,9 @@ folding ``step`` one event at a time must reproduce, after each event, the same
 ``(level, satisfied)`` pair that calling ``measure``/``is_satisfied`` on the
 prefix ending at that event would. The built-in coding anchors below override
 both together for an O(1)-amortized-per-event fold (no more rescanning the
-whole prefix on every tick); a custom anchor that implements only
+whole prefix on every tick). Aggregate updates are O(1) for a fixed target set;
+NOP-5 rich updates are O(K) in unique test IDs because immutable debt ledgers
+are copied transactionally. A custom anchor that implements only
 ``measure``/``is_satisfied`` (e.g. the NOP-4 experiment's prototype anchor)
 keeps working unmodified via the default batch-rebuild fallback -- correct,
 just O(n) per event for *that* anchor only.
@@ -52,15 +55,38 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pathlayer.events import EventKind, ToolEvent
 
 _PASSED = "passed"
 _FAILED = "failed"
+_TEST_OUTCOMES = "test_outcomes"
+_SCOPE_ID = "scope_id"
+_COLLECTION_COMPLETE = "collection_complete"
+_SCOPE_EXHAUSTIVE = "scope_exhaustive"
 _EXIT_CODE = "exit_code"
 _TEST_KEYS = (_PASSED, _FAILED)
+_TEST_STATUSES = frozenset({"passed", "failed", "skipped", "error", "flaky"})
+_DEBT_STATUSES = frozenset({"failed", "error", "flaky"})
+# Rich payloads are untrusted adapter input. Bounding both one payload and the
+# cumulative per-target ledger prevents ever-new IDs from turning immutable
+# transactional copies into unbounded memory growth / quadratic-time DoS.
+_MAX_TRACKED_TEST_IDS_PER_TARGET = 10_000
+_MAX_TRACKED_TEST_IDS_TOTAL = 10_000
+_MAX_RICH_TEST_TARGETS = 256
+_MAX_RICH_SCOPES_PER_TARGET = 256
+_MAX_SCOPE_STATUS_ENTRIES_TOTAL = 10_000
+_MAX_SCOPE_ID_LENGTH = 512
+# Guarded reversibility (NOP-5 follow-up): a target's rich mode is sticky
+# across a single aggregate-only event (one malformed/degraded producer tick
+# must not erase a whole debt ledger), but not forever -- this many
+# *consecutive* aggregate-only events for the same target revert it to plain
+# legacy tracking. Modeled on ARB-3's escalate/de-escalate hysteresis
+# (confirmation by repetition, not by one tick). This reopens a bounded,
+# documented re-count risk: see ``_TestAnchorState``'s docstring.
+_LEGACY_REVERT_STREAK = 3
 _INSERTIONS = "insertions"
 _DELETIONS = "deletions"
 _NET_LINES = "net_lines"
@@ -73,11 +99,16 @@ class AnchorSnapshot:
 
     ``level`` mirrors ``measure(prefix)``, ``satisfied`` mirrors
     ``is_satisfied(prefix)``, for the prefix ending at the event that produced
-    this snapshot via :meth:`AnchorState.advance`.
+    this snapshot via :meth:`AnchorState.advance`. ``diagnostics`` mirrors
+    :meth:`ProgressAnchor.diagnose` for that same prefix: human-readable notes
+    about anything degraded-but-not-fatal at *this* event (a malformed payload
+    dropped, a capacity cap reached, a sticky mode reverting) -- empty in the
+    common case, never load-bearing for ``level``/``satisfied``.
     """
 
     level: float | None
     satisfied: bool
+    diagnostics: tuple[str, ...] = ()
 
 
 class AnchorState(ABC):
@@ -126,6 +157,22 @@ class ProgressAnchor(ABC):
         """
         return False
 
+    def diagnose(self, history: Sequence[ToolEvent]) -> tuple[str, ...]:
+        """Human-readable notes on anything degraded-but-not-fatal (optional).
+
+        Default: nothing to report, ever. A concrete anchor overrides this
+        (alongside populating ``AnchorSnapshot.diagnostics`` in its incremental
+        fold) to surface conditions that are otherwise silently absorbed -- a
+        malformed payload dropped, a capacity cap reached, a sticky mode
+        reverting -- instead of just quietly changing ``measure``'s behaviour.
+        Pure and deterministic like ``measure``/``is_satisfied``: same history
+        in, same diagnostics out, describing only the *last* event of
+        ``history`` (equivalent-by-construction to the ``diagnostics`` field of
+        the ``AnchorSnapshot`` :meth:`step` returns for that same prefix,
+        verified prefix-by-prefix like every other PERF-2 fold).
+        """
+        return ()
+
     def create_state(self) -> Any:
         """Return a fresh incremental state for :meth:`step` (PERF-2).
 
@@ -145,7 +192,11 @@ class ProgressAnchor(ABC):
         """
         history = (*state, event)
         level = self.measure(history)
-        return history, AnchorSnapshot(level=level, satisfied=self.is_satisfied(history))
+        return history, AnchorSnapshot(
+            level=level,
+            satisfied=self.is_satisfied(history),
+            diagnostics=self.diagnose(history),
+        )
 
 
 def _as_int(value: Any, *, default: int) -> int:
@@ -166,6 +217,63 @@ def _evidence(event: ToolEvent, keys: tuple[str, ...]) -> Mapping[str, Any] | No
     return None
 
 
+def _has_test_evidence(event: ToolEvent) -> bool:
+    """Whether an event carries usable aggregate or per-test ground truth.
+
+    A malformed rich claim is inert rather than sticky: it cannot disable the
+    weaker anchors for the rest of the run. Valid aggregate evidence in the
+    same event still counts and is consumed by the legacy fallback.
+    """
+    return _evidence(event, _TEST_KEYS) is not None or _rich_test_result(event) is not None
+
+
+@dataclass(slots=True, frozen=True)
+class _RichTestResult:
+    """Validated per-test result carried by one tool event (NOP-5)."""
+
+    outcomes: tuple[tuple[str, str], ...]
+    scope_id: str
+    collection_complete: bool
+    scope_exhaustive: bool
+
+
+def _rich_test_result(event: ToolEvent) -> _RichTestResult | None:
+    """Parse the optional NOP-5 per-test contract, or reject it atomically."""
+    source = _evidence(event, (_TEST_OUTCOMES,))
+    if source is None:
+        return None
+    raw_outcomes = source.get(_TEST_OUTCOMES)
+    scope_id = source.get(_SCOPE_ID)
+    collection_complete = source.get(_COLLECTION_COMPLETE)
+    scope_exhaustive = source.get(_SCOPE_EXHAUSTIVE)
+    if (
+        not isinstance(raw_outcomes, Mapping)
+        or len(raw_outcomes) > _MAX_TRACKED_TEST_IDS_PER_TARGET
+        or not isinstance(scope_id, str)
+        or not scope_id
+        or len(scope_id) > _MAX_SCOPE_ID_LENGTH
+        or not isinstance(collection_complete, bool)
+        or not isinstance(scope_exhaustive, bool)
+    ):
+        return None
+    outcomes: list[tuple[str, str]] = []
+    for raw_test_id, raw_status in raw_outcomes.items():
+        if (
+            not isinstance(raw_test_id, str)
+            or not raw_test_id
+            or not isinstance(raw_status, str)
+            or raw_status not in _TEST_STATUSES
+        ):
+            return None
+        outcomes.append((raw_test_id, raw_status))
+    return _RichTestResult(
+        outcomes=tuple(outcomes),
+        scope_id=scope_id,
+        collection_complete=collection_complete,
+        scope_exhaustive=scope_exhaustive,
+    )
+
+
 def _test_target(event: ToolEvent) -> str:
     """Key identifying which test suite an event reports on.
 
@@ -177,114 +285,347 @@ def _test_target(event: ToolEvent) -> str:
     return str(target) if target is not None else event.tool
 
 
-def _latest_test_results(history: Sequence[ToolEvent]) -> dict[str, tuple[int, int]]:
-    """Most recent ``(passed, failed)`` per test suite, keyed by :func:`_test_target`.
-
-    Shared by :meth:`TestProgressAnchor.measure` (which sums ``passed - failed``)
-    and :meth:`TestProgressAnchor.is_satisfied` (which checks the totals), so both
-    aggregate per suite identically: a green re-run of suite A can never mask a
-    still-red suite B.
-    """
-    latest: dict[str, tuple[int, int]] = {}
-    for event in history:
-        source = _evidence(event, _TEST_KEYS)
-        if source is None:
-            continue
-        passed = _as_int(source.get(_PASSED, 0), default=0)
-        failed = _as_int(source.get(_FAILED, 0), default=0)
-        latest[_test_target(event)] = (passed, failed)
-    return latest
-
-
 def _target_is_green(passed: int, failed: int) -> bool:
     """Per-suite success: no failures *and* a real (non-empty) run."""
     return failed == 0 and passed > 0
 
 
 @dataclass(slots=True, frozen=True)
+class _RichTargetState:
+    """Immutable per-target debt ledger for rich test outcomes (NOP-5)."""
+
+    legacy_offset: float
+    debts: frozenset[str] = frozenset()
+    credited: frozenset[str] = frozenset()
+    scope_statuses: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+    satisfied: bool = False
+    overflowed: bool = False
+    # Consecutive aggregate-only events seen *while in rich mode* (guarded
+    # reversibility, NOP-5 follow-up). Any rich event resets this to 0 (a
+    # fresh ``_RichTargetState`` literal below always defaults it back to 0),
+    # matching ARB-3's hysteresis: only a *streak* commits the mode change.
+    legacy_streak: int = 0
+
+
+@dataclass(slots=True, frozen=True)
 class _TestAnchorState(AnchorState):
-    """Incremental state for :class:`TestProgressAnchor` (PERF-2).
+    """Immutable mixed legacy/rich state for :class:`TestProgressAnchor`.
 
-    ``latest`` mirrors :func:`_latest_test_results`; ``total_level`` and
-    ``red_count`` are running aggregates kept in lockstep with it so both
-    ``measure`` (``total_level``) and ``is_satisfied`` (``red_count == 0`` with
-    ``latest`` non-empty) are O(1) to read, updated in O(1) per event
-    regardless of how many distinct suites have ever been seen.
-
-    Stored as a ``tuple`` of ``(target, (passed, failed))`` pairs rather than
-    a ``dict``: every other ``AnchorState`` in this module is frozen *and*
-    hashable (all fields are immutable), and a ``dict`` field would silently
-    break that invariant (``hash()`` raises ``TypeError`` on an unhashable
-    field) the moment anything -- tests, memoization, a future ``set()`` of
-    states -- treats these sibling states as interchangeable.
+    Rich mode is sticky *per target*, but guarded-reversible (NOP-5
+    follow-up): see ``_LEGACY_REVERT_STREAK`` and :class:`TestProgressAnchor`'s
+    docstring. A target's debt ledger is keyed by stable test id, never by
+    scope, so overlapping selections cannot double-credit a repair.
+    Tuple/frozenset fields keep the state frozen and hashable for
+    transactional PERF-2 rollback. Updating a rich event costs O(K) time and
+    memory in the number of unique test ids observed, never in history length.
     """
 
-    latest: tuple[tuple[str, tuple[int, int]], ...] = ()
-    total_level: float = 0.0
-    red_count: int = 0
+    legacy_latest: tuple[tuple[str, tuple[int, int]], ...] = ()
+    rich_targets: tuple[tuple[str, _RichTargetState], ...] = ()
+    rich_target_overflowed: bool = False
 
-    def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
+    def _snapshot(self, *, diagnostics: tuple[str, ...] = ()) -> AnchorSnapshot:
+        legacy = dict(self.legacy_latest)
+        rich = dict(self.rich_targets)
+        targets = set(legacy) | set(rich)
+        if not targets:
+            return AnchorSnapshot(level=None, satisfied=False, diagnostics=diagnostics)
+        level = 0.0
+        satisfied = not self.rich_target_overflowed
+        # Stable ordering is part of detector determinism: floating-point
+        # accumulation must not depend on Python's per-process hash seed.
+        for target in sorted(targets):
+            rich_state = rich.get(target)
+            if rich_state is not None:
+                level += rich_state.legacy_offset + float(len(rich_state.credited))
+                satisfied = satisfied and rich_state.satisfied
+                continue
+            passed, failed = legacy[target]
+            level += passed - failed
+            satisfied = satisfied and _target_is_green(passed, failed)
+        return AnchorSnapshot(level=level, satisfied=satisfied, diagnostics=diagnostics)
+
+    def advance(self, event: ToolEvent) -> tuple[_TestAnchorState, AnchorSnapshot]:
+        target = _test_target(event)
+        rich_result = _rich_test_result(event)
+        rich_targets = dict(self.rich_targets)
+        if rich_result is not None:
+            legacy_latest = dict(self.legacy_latest)
+            current = rich_targets.get(target)
+            if current is None:
+                if len(rich_targets) >= _MAX_RICH_TEST_TARGETS:
+                    overflowed_state = _TestAnchorState(
+                        legacy_latest=self.legacy_latest,
+                        rich_targets=self.rich_targets,
+                        rich_target_overflowed=True,
+                    )
+                    diagnostic = (
+                        f"target {target!r}: rich test-target capacity "
+                        f"({_MAX_RICH_TEST_TARGETS}) reached; new target ignored"
+                    )
+                    return overflowed_state, overflowed_state._snapshot(diagnostics=(diagnostic,))
+                previous = legacy_latest.get(target)
+                offset = float(previous[0] - previous[1]) if previous is not None else 0.0
+                current = _RichTargetState(legacy_offset=offset)
+            debts = set(current.debts)
+            credited = set(current.credited)
+            previous_scope_statuses = {
+                scope_id: dict(statuses) for scope_id, statuses in current.scope_statuses
+            }
+            scope_statuses = dict(current.scope_statuses)
+            scope_is_tracked = rich_result.scope_id in scope_statuses
+            scope_can_be_tracked = (
+                scope_is_tracked
+                or len(scope_statuses) < _MAX_RICH_SCOPES_PER_TARGET
+                or (rich_result.collection_complete and rich_result.scope_exhaustive)
+            )
+            if not scope_can_be_tracked:
+                overflowed_target = _RichTargetState(
+                    legacy_offset=current.legacy_offset,
+                    debts=current.debts,
+                    credited=current.credited,
+                    scope_statuses=current.scope_statuses,
+                    satisfied=False,
+                    overflowed=True,
+                )
+                rich_targets[target] = overflowed_target
+                overflowed_state = _TestAnchorState(
+                    legacy_latest=self.legacy_latest,
+                    rich_targets=tuple(rich_targets.items()),
+                    rich_target_overflowed=self.rich_target_overflowed,
+                )
+                diagnostic = (
+                    f"target {target!r}: rich scope capacity "
+                    f"({_MAX_RICH_SCOPES_PER_TARGET}) reached; scope "
+                    f"{rich_result.scope_id!r} dropped"
+                )
+                return overflowed_state, overflowed_state._snapshot(diagnostics=(diagnostic,))
+            comparable_debts = {
+                test_id
+                for statuses in previous_scope_statuses.values()
+                for test_id, status in statuses.items()
+                if status in _DEBT_STATUSES
+            }
+            raw_outcomes = dict(rich_result.outcomes)
+            known_ids = (
+                {test_id for statuses in previous_scope_statuses.values() for test_id in statuses}
+                | debts
+                | credited
+            )
+            total_known_ids = sum(
+                len(
+                    set(rich_state.debts)
+                    | set(rich_state.credited)
+                    | {
+                        test_id
+                        for _, statuses in rich_state.scope_statuses
+                        for test_id, _ in statuses
+                    }
+                )
+                for rich_state in rich_targets.values()
+            )
+            available = min(
+                _MAX_TRACKED_TEST_IDS_PER_TARGET - len(known_ids),
+                _MAX_TRACKED_TEST_IDS_TOTAL - total_known_ids,
+            )
+            previous_scope = dict(scope_statuses.get(rich_result.scope_id, ()))
+            next_scope = {} if rich_result.collection_complete else dict(previous_scope)
+            total_scope_entries = sum(
+                len(statuses)
+                for rich_state in rich_targets.values()
+                for _, statuses in rich_state.scope_statuses
+            )
+            if rich_result.collection_complete and rich_result.scope_exhaustive:
+                total_scope_entries -= sum(len(statuses) for _, statuses in current.scope_statuses)
+            elif rich_result.collection_complete:
+                total_scope_entries -= len(previous_scope)
+            available_scope_entries = max(0, _MAX_SCOPE_STATUS_ENTRIES_TOTAL - total_scope_entries)
+            available_new_ids = max(0, available)
+            outcomes: dict[str, str] = {}
+            overflowed = current.overflowed
+            dropped_outcomes = 0
+            for test_id, status in raw_outcomes.items():
+                is_new_id = test_id not in known_ids
+                consumes_scope_entry = test_id not in next_scope
+                if (is_new_id and available_new_ids == 0) or (
+                    consumes_scope_entry and available_scope_entries == 0
+                ):
+                    overflowed = True
+                    dropped_outcomes += 1
+                    continue
+                outcomes[test_id] = status
+                if is_new_id:
+                    known_ids.add(test_id)
+                    available_new_ids -= 1
+                if consumes_scope_entry:
+                    available_scope_entries -= 1
+            for test_id, status in outcomes.items():
+                if status in _DEBT_STATUSES:
+                    debts.add(test_id)
+                elif (
+                    not overflowed
+                    and status == _PASSED
+                    and test_id in comparable_debts
+                    and test_id in debts
+                ):
+                    credited.add(test_id)
+
+            next_scope.update(outcomes)
+            if rich_result.collection_complete and rich_result.scope_exhaustive:
+                # A whole-target observation supersedes every partial view:
+                # omitted IDs lose comparability in every prior scope.
+                scope_statuses.clear()
+            scope_statuses[rich_result.scope_id] = tuple(next_scope.items())
+            satisfied = (
+                not overflowed
+                and rich_result.collection_complete
+                and rich_result.scope_exhaustive
+                and bool(outcomes)
+                and all(status == _PASSED for status in outcomes.values())
+                and all(outcomes.get(test_id) == _PASSED for test_id in debts)
+            )
+            rich_targets[target] = _RichTargetState(
+                legacy_offset=current.legacy_offset,
+                debts=frozenset(debts),
+                credited=frozenset(credited),
+                scope_statuses=tuple(scope_statuses.items()),
+                satisfied=satisfied,
+                overflowed=overflowed,
+            )
+            new_state = _TestAnchorState(
+                legacy_latest=self.legacy_latest,
+                rich_targets=tuple(rich_targets.items()),
+                rich_target_overflowed=self.rich_target_overflowed,
+            )
+            diagnostics: tuple[str, ...] = ()
+            if dropped_outcomes:
+                # Covers both cap causes in the loop above (new test-id capacity
+                # or scope-entry capacity exhausted) -- either way the operator
+                # needs the same signal: some outcomes in this event were not
+                # recorded.
+                plural = "s" if dropped_outcomes != 1 else ""
+                diagnostics = (
+                    f"target {target!r}: rich outcome capacity reached; "
+                    f"{dropped_outcomes} outcome{plural} dropped this event",
+                )
+            return new_state, new_state._snapshot(diagnostics=diagnostics)
+
+        # A malformed rich-only claim is inert. If valid aggregate counts share
+        # the event, continue below through the backward-compatible fallback.
+        if _evidence(event, (_TEST_OUTCOMES,)) is not None and _evidence(event, _TEST_KEYS) is None:
+            diagnostic = f"target {target!r}: malformed test_outcomes payload ignored"
+            return self, self._snapshot(diagnostics=(diagnostic,))
+
         source = _evidence(event, _TEST_KEYS)
         if source is None:
-            level = self.total_level if self.latest else None
-            satisfied = bool(self.latest) and self.red_count == 0
-            return self, AnchorSnapshot(level=level, satisfied=satisfied)
+            return self, self._snapshot()
         passed = _as_int(source.get(_PASSED, 0), default=0)
         failed = _as_int(source.get(_FAILED, 0), default=0)
-        target = _test_target(event)
-        new_latest_dict = dict(self.latest)
-        old = new_latest_dict.get(target)
-        new_latest_dict[target] = (passed, failed)
-        total_level = self.total_level
-        red_count = self.red_count
-        if old is not None:
-            total_level -= old[0] - old[1]
-            if not _target_is_green(old[0], old[1]):
-                red_count -= 1
-        total_level += passed - failed
-        if not _target_is_green(passed, failed):
-            red_count += 1
-        new_state = _TestAnchorState(
-            latest=tuple(new_latest_dict.items()),
-            total_level=total_level,
-            red_count=red_count,
+        # A malformed test_outcomes payload can coexist with valid aggregate
+        # counts in the same event (the rich half fails validation but the
+        # legacy half is still usable). The branch above only catches a
+        # malformed rich claim with *no* aggregate fallback; this one must not
+        # let the dropped rich half vanish silently just because the event is
+        # still usable through the legacy path below.
+        malformed_diagnostics: tuple[str, ...] = (
+            (
+                f"target {target!r}: malformed test_outcomes payload ignored "
+                "(aggregate counts still applied)",
+            )
+            if _evidence(event, (_TEST_OUTCOMES,)) is not None
+            else ()
         )
-        satisfied = red_count == 0  # new_latest is non-empty: we just inserted a key.
-        return new_state, AnchorSnapshot(level=total_level, satisfied=satisfied)
+        current_rich = rich_targets.get(target)
+        if current_rich is not None:
+            # Legacy evidence while the target is in rich mode: guarded
+            # reversion (NOP-5 follow-up). A lone aggregate-only event never
+            # flips the mode -- see ``_LEGACY_REVERT_STREAK``'s docstring --
+            # only _LEGACY_REVERT_STREAK consecutive ones do, discarding the
+            # rich debt ledger and falling back to the plain aggregate.
+            streak = current_rich.legacy_streak + 1
+            if streak < _LEGACY_REVERT_STREAK:
+                rich_targets[target] = replace(current_rich, legacy_streak=streak)
+                diagnostic = (
+                    f"target {target!r}: aggregate test evidence ignored while "
+                    f"in rich mode ({streak}/{_LEGACY_REVERT_STREAK} before revert)"
+                )
+                new_state = _TestAnchorState(
+                    legacy_latest=self.legacy_latest,
+                    rich_targets=tuple(rich_targets.items()),
+                    rich_target_overflowed=self.rich_target_overflowed,
+                )
+                return new_state, new_state._snapshot(
+                    diagnostics=(diagnostic, *malformed_diagnostics)
+                )
+            del rich_targets[target]
+            legacy_latest = dict(self.legacy_latest)
+            legacy_latest[target] = (passed, failed)
+            diagnostic = (
+                f"target {target!r}: reverted to aggregate test evidence after "
+                f"{_LEGACY_REVERT_STREAK} consecutive aggregate-only events; "
+                "rich debt ledger discarded"
+            )
+            new_state = _TestAnchorState(
+                legacy_latest=tuple(legacy_latest.items()),
+                rich_targets=tuple(rich_targets.items()),
+                rich_target_overflowed=self.rich_target_overflowed,
+            )
+            return new_state, new_state._snapshot(diagnostics=(diagnostic, *malformed_diagnostics))
+        legacy_latest = dict(self.legacy_latest)
+        legacy_latest[target] = (passed, failed)
+        new_state = _TestAnchorState(
+            legacy_latest=tuple(legacy_latest.items()),
+            rich_targets=self.rich_targets,
+            rich_target_overflowed=self.rich_target_overflowed,
+        )
+        return new_state, new_state._snapshot(diagnostics=malformed_diagnostics)
+
+
+def _test_snapshot(history: Sequence[ToolEvent]) -> AnchorSnapshot:
+    state = _TestAnchorState()
+    snapshot = AnchorSnapshot(level=None, satisfied=False)
+    for event in history:
+        state, snapshot = state.advance(event)
+    return snapshot
 
 
 class TestProgressAnchor(ProgressAnchor):
-    """Ground-truth coding progress from test results.
+    """Ground-truth coding progress from aggregate or per-test results.
 
-    The level is the **sum over test suites** of ``passed - failed`` of each
-    suite's most recent run (suites keyed by :func:`_test_target`). Summing per
-    suite means switching suites or adding a new (initially red) suite changes
-    the level by that suite's real delta, never by an artefact of comparing two
-    different suites. Returns ``None`` when the history carries no test evidence,
-    so it abstains on a test-less (e.g. non-coding) agent.
+    Legacy targets retain their latest ``passed - failed`` contribution. A
+    target switches permanently to NOP-5 rich mode when it emits a valid
+    ``test_outcomes`` payload: its prior contribution becomes a fixed offset,
+    then each stable test debt contributes exactly once on its first comparable
+    transition from ``failed``/``error``/``flaky`` to ``passed``. Deletion,
+    renaming, skipping and repeated oscillation never manufacture progress.
 
-    ``is_satisfied`` is ``True`` once every suite's latest run is green
-    (total ``failed == 0``) with at least one passing test (total ``passed > 0``,
-    so an empty "0 passed / 0 failed" run is not mistaken for success).
+    Success is deliberately separate from this monotone credit: a rich target
+    is satisfied only after a complete, exhaustive, all-green observation that
+    explicitly contains every debt it has ever exposed.
+
+    Rich mode is *sticky but not permanent* per target (NOP-5 follow-up): one
+    aggregate-only event while in rich mode is inert (a lone malformed or
+    degraded producer tick must not erase a whole debt ledger), but
+    ``_LEGACY_REVERT_STREAK`` *consecutive* aggregate-only events revert the
+    target to plain legacy tracking, discarding its rich ledger. A later rich
+    event restarts rich mode with a fresh offset from the latest legacy value.
+    This bounds, but does not eliminate, a re-count risk: a producer that
+    deliberately oscillates rich and aggregate data for the same target across
+    a revert could re-credit a debt it already fixed once, because reverting
+    forgets which debts were already resolved. Malformed payloads, capacity
+    caps and mode reversions are never silent: see :meth:`diagnose`.
     """
 
     name = "coding_tests"
 
     def measure(self, history: Sequence[ToolEvent]) -> float | None:
-        latest = _latest_test_results(history)
-        if not latest:
-            return None
-        return float(sum(passed - failed for passed, failed in latest.values()))
+        return _test_snapshot(history).level
 
     def is_satisfied(self, history: Sequence[ToolEvent]) -> bool:
-        latest = _latest_test_results(history)
-        if not latest:
-            return False
-        # Per suite, not on totals: every suite must be individually green
-        # (failed == 0) *and* carry a real result (passed > 0). Checking totals
-        # would let a passing suite mask a sibling at 0/0 ("no signal"), wrongly
-        # suppressing the detector while that empty suite stalls.
-        return all(failed == 0 and passed > 0 for passed, failed in latest.values())
+        return _test_snapshot(history).satisfied
+
+    def diagnose(self, history: Sequence[ToolEvent]) -> tuple[str, ...]:
+        return _test_snapshot(history).diagnostics
 
     def create_state(self) -> _TestAnchorState:
         return _TestAnchorState()
@@ -312,7 +653,7 @@ class _ExitCodeAnchorState(AnchorState):
     def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
         if self.saw_test:
             return self, AnchorSnapshot(level=None, satisfied=False)
-        if _evidence(event, _TEST_KEYS) is not None:
+        if _has_test_evidence(event):
             deferred = _ExitCodeAnchorState(
                 saw_test=True, saw_exit_code=self.saw_exit_code, successes=self.successes
             )
@@ -342,7 +683,7 @@ class ExitCodeProgressAnchor(ProgressAnchor):
         successes = 0
         saw_exit_code = False
         for event in history:
-            if _evidence(event, _TEST_KEYS) is not None:
+            if _has_test_evidence(event):
                 # Tests present anywhere -> defer to TestProgressAnchor.
                 return None
             source = _evidence(event, (_EXIT_CODE,))
@@ -407,7 +748,7 @@ class GitProgressAnchor(ProgressAnchor):
         # the latest git diff size.
         size: float | None = None
         for event in history:
-            if _evidence(event, _TEST_KEYS) is not None:
+            if _has_test_evidence(event):
                 return None
             source = _evidence(event, _GIT_KEYS)
             if source is not None:
@@ -452,7 +793,7 @@ class _GitAnchorState(AnchorState):
     def advance(self, event: ToolEvent) -> tuple[AnchorState, AnchorSnapshot]:
         if self.saw_test:
             return self, AnchorSnapshot(level=None, satisfied=False)
-        if _evidence(event, _TEST_KEYS) is not None:
+        if _has_test_evidence(event):
             deferred = _GitAnchorState(
                 saw_test=True, saw_git=self.saw_git, latest_size=self.latest_size
             )

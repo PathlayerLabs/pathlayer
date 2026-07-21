@@ -1,0 +1,24 @@
+{
+  "label": "healthy",
+  "description": "NOP-5 rich outcomes: a complete red suite converts one stable failing test to passed every four actions while another debt stays red. Each first comparable repair is real progress and must reset no-progress.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "stable-id-fail-to-pass" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "suite", "run": 0 }, "result": { "passed": 6, "failed": 5, "test_outcomes": { "a": "failed", "b": "failed", "c": "failed", "d": "failed", "e": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/a.py", "patch": "fix a 1" } },
+    { "tool": "edit_file", "args": { "path": "src/a.py", "patch": "fix a 2" } },
+    { "tool": "edit_file", "args": { "path": "src/a.py", "patch": "fix a 3" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 1 }, "result": { "passed": 7, "failed": 4, "test_outcomes": { "a": "passed", "b": "failed", "c": "failed", "d": "failed", "e": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/b.py", "patch": "fix b 1" } },
+    { "tool": "edit_file", "args": { "path": "src/b.py", "patch": "fix b 2" } },
+    { "tool": "edit_file", "args": { "path": "src/b.py", "patch": "fix b 3" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 2 }, "result": { "passed": 8, "failed": 3, "test_outcomes": { "a": "passed", "b": "passed", "c": "failed", "d": "failed", "e": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/c.py", "patch": "fix c 1" } },
+    { "tool": "edit_file", "args": { "path": "src/c.py", "patch": "fix c 2" } },
+    { "tool": "edit_file", "args": { "path": "src/c.py", "patch": "fix c 3" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 3 }, "result": { "passed": 9, "failed": 2, "test_outcomes": { "a": "passed", "b": "passed", "c": "passed", "d": "failed", "e": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/d.py", "patch": "fix d 1" } },
+    { "tool": "edit_file", "args": { "path": "src/d.py", "patch": "fix d 2" } },
+    { "tool": "edit_file", "args": { "path": "src/d.py", "patch": "fix d 3" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 4 }, "result": { "passed": 10, "failed": 1, "test_outcomes": { "a": "passed", "b": "passed", "c": "passed", "d": "passed", "e": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } }
+  ]
+}

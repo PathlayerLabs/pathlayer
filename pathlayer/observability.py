@@ -42,15 +42,17 @@ def _emit(logger: logging.Logger, kind: str, index: int, ts: float, **fields: An
 
 
 def log_signal(logger: logging.Logger, signal: Signal, *, index: int, ts: float) -> None:
-    _emit(
-        logger,
-        "signal",
-        index,
-        ts,
-        name=signal.name,
-        confidence=signal.confidence,
-        reason=signal.reason,
-    )
+    fields: dict[str, Any] = {
+        "name": signal.name,
+        "confidence": signal.confidence,
+        "reason": signal.reason,
+    }
+    if signal.diagnostics:
+        # Only present when non-empty, so the common case stays exactly the
+        # log shape OBS-1 already shipped -- diagnostics is additive, never a
+        # breaking change to an existing consumer parsing this payload.
+        fields["diagnostics"] = list(signal.diagnostics)
+    _emit(logger, "signal", index, ts, **fields)
 
 
 def log_decision(

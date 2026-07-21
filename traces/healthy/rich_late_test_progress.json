@@ -1,0 +1,31 @@
+{
+  "label": "healthy",
+  "description": "NOP-5 rich outcomes: fifteen distinct edits occur before test ground truth first appears, then stable failing IDs are repaired regularly. No anchor must invent stagnation before evidence exists, and each later repair must reset patience.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "late-rich-evidence" },
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 0" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 1" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 2" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 3" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 4" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 5" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 6" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 7" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 8" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 9" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 10" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 11" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 12" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 13" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "step 14" } },
+    { "tool": "run_tests", "args": { "target": "late", "run": 0 }, "result": { "passed": 1, "failed": 4, "test_outcomes": { "a": "failed", "b": "failed", "c": "failed", "d": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair a 1" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair a 2" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair a 3" } },
+    { "tool": "run_tests", "args": { "target": "late", "run": 1 }, "result": { "passed": 2, "failed": 3, "test_outcomes": { "a": "passed", "b": "failed", "c": "failed", "d": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair b 1" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair b 2" } },
+    { "tool": "edit_file", "args": { "path": "src/late.py", "patch": "repair b 3" } },
+    { "tool": "run_tests", "args": { "target": "late", "run": 2 }, "result": { "passed": 3, "failed": 2, "test_outcomes": { "a": "passed", "b": "passed", "c": "failed", "d": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } }
+  ]
+}

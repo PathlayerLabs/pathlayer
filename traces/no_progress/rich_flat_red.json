@@ -1,0 +1,21 @@
+{
+  "label": "no_progress",
+  "description": "NOP-5 rich outcomes: after an initial edit and a complete red baseline, twelve distinct edits occur without any comparable test repair. The rich level stays flat and no-progress must intervene before the tail.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "rich-flat-red" },
+  "events": [
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "start" } },
+    { "tool": "run_tests", "args": { "target": "flat", "run": 0 }, "result": { "passed": 1, "failed": 2, "test_outcomes": { "a": "failed", "b": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 0" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 1" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 2" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 3" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 4" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 5" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 6" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 7" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 8" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "stagnant 9" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "tail 10" } },
+    { "tool": "edit_file", "args": { "path": "src/flat.py", "patch": "tail 11" } }
+  ]
+}

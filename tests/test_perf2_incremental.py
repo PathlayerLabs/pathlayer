@@ -684,19 +684,16 @@ def test_llm_events_do_not_advance_no_progress_anchor_state() -> None:
 
 
 def test_test_anchor_state_memory_grows_with_unique_targets_not_history_length() -> None:
-    # Documented, not "fixed": _TestAnchorState.latest holds one entry per
+    # Documented, not "fixed": _TestAnchorState.legacy_latest holds one entry per
     # distinct suite (_test_target) ever seen, so its size is O(unique targets)
     # -- independent of how many events were folded in for a *fixed* target set,
-    # but unbounded if the agent keeps inventing new target names. This mirrors
-    # _latest_test_results' own memory profile (the batch code path re-derives
-    # the identical dict from scratch every call), so PERF-2 introduces no new
-    # memory-growth mode -- it only makes the *time* per event O(1) amortized.
+    # but unbounded if the agent keeps inventing new target names.
     anchor = TestProgressAnchor()
     state = anchor.create_state()
     same_target_event = ToolEvent(tool="run_tests", result={"passed": 1, "failed": 0})
     for _ in range(500):
         state, _ = anchor.step(state, same_target_event)
-    assert len(state.latest) == 1  # same target every time -> stays at 1 entry
+    assert len(state.legacy_latest) == 1  # same target every time -> stays at 1 entry
 
     state = anchor.create_state()
     for i in range(500):
@@ -704,7 +701,7 @@ def test_test_anchor_state_memory_grows_with_unique_targets_not_history_length()
             tool="run_tests", args={"target": f"suite_{i}"}, result={"passed": 1, "failed": 0}
         )
         state, _ = anchor.step(state, event)
-    assert len(state.latest) == 500  # 500 distinct suites -> 500 entries
+    assert len(state.legacy_latest) == 500  # 500 distinct suites -> 500 entries
 
 
 def test_no_progress_window_bounds_deque_size() -> None:

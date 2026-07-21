@@ -1,0 +1,25 @@
+{
+  "label": "healthy",
+  "description": "NOP-5 rich outcomes: a high-scoring green legacy target is followed by a new red rich target that repairs stable debts locally. The new target starts neutral and each repair must count without first exceeding the old target's absolute score.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "new-target-local-record" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "old", "run": 0 }, "result": { "passed": 20, "failed": 0 } },
+    { "tool": "run_tests", "args": { "target": "new", "run": 0 }, "result": { "passed": 0, "failed": 5, "test_outcomes": { "a": "failed", "b": "failed", "c": "failed", "d": "failed", "e": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix a 1" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix a 2" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix a 3" } },
+    { "tool": "run_tests", "args": { "target": "new", "run": 1 }, "result": { "passed": 1, "failed": 4, "test_outcomes": { "a": "passed", "b": "failed", "c": "failed", "d": "failed", "e": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix b 1" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix b 2" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix b 3" } },
+    { "tool": "run_tests", "args": { "target": "new", "run": 2 }, "result": { "passed": 2, "failed": 3, "test_outcomes": { "a": "passed", "b": "passed", "c": "failed", "d": "failed", "e": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix c 1" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix c 2" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix c 3" } },
+    { "tool": "run_tests", "args": { "target": "new", "run": 3 }, "result": { "passed": 3, "failed": 2, "test_outcomes": { "a": "passed", "b": "passed", "c": "passed", "d": "failed", "e": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix d 1" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix d 2" } },
+    { "tool": "edit_file", "args": { "path": "src/new.py", "patch": "fix d 3" } },
+    { "tool": "run_tests", "args": { "target": "new", "run": 4 }, "result": { "passed": 4, "failed": 1, "test_outcomes": { "a": "passed", "b": "passed", "c": "passed", "d": "passed", "e": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } }
+  ]
+}

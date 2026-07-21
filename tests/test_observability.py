@@ -48,6 +48,28 @@ def test_log_signal_payload(caplog: pytest.LogCaptureFixture) -> None:
     assert payload["ts"] == 1.5
 
 
+def test_log_signal_omits_diagnostics_when_empty(caplog: pytest.LogCaptureFixture) -> None:
+    logger = get_logger("pathlayer.test.signal.no_diagnostics")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        log_signal(logger, Signal("no_progress", 0.0), index=0, ts=0.0)
+
+    (record,) = _records(caplog, "signal")
+    assert "diagnostics" not in record.pathlayer
+
+
+def test_log_signal_includes_diagnostics_when_present(caplog: pytest.LogCaptureFixture) -> None:
+    # A degraded producer (malformed payload, capacity cap, guarded reversion)
+    # must be visible even on an otherwise-silent (confidence 0) tick -- that
+    # is precisely what closes the "silent degradation" gap (NOP-5 follow-up).
+    logger = get_logger("pathlayer.test.signal.diagnostics")
+    diagnostics = ("coding_tests: target 'suite': malformed test_outcomes payload ignored",)
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        log_signal(logger, Signal("no_progress", 0.0, diagnostics=diagnostics), index=0, ts=0.0)
+
+    (record,) = _records(caplog, "signal")
+    assert record.pathlayer["diagnostics"] == list(diagnostics)
+
+
 def test_log_decision_and_action_payloads(caplog: pytest.LogCaptureFixture) -> None:
     logger = get_logger("pathlayer.test.decision")
     with caplog.at_level(logging.INFO, logger=logger.name):

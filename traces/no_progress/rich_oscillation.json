@@ -1,0 +1,25 @@
+{
+  "label": "no_progress",
+  "description": "NOP-5 rich outcomes: one debt is repaired once, then oscillates fail/pass while a second debt stays red. The first repair may set one record, but repeated recovery of the same ID must never manufacture new progress.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "one-credit-oscillation" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "osc", "run": 0 }, "result": { "passed": 0, "failed": 2, "test_outcomes": { "a": "failed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "repair a" } },
+    { "tool": "run_tests", "args": { "target": "osc", "run": 1 }, "result": { "passed": 1, "failed": 1, "test_outcomes": { "a": "passed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "regress a" } },
+    { "tool": "run_tests", "args": { "target": "osc", "run": 2 }, "result": { "passed": 0, "failed": 2, "test_outcomes": { "a": "failed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "repair a again" } },
+    { "tool": "run_tests", "args": { "target": "osc", "run": 3 }, "result": { "passed": 1, "failed": 1, "test_outcomes": { "a": "passed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 0" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 1" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 2" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 3" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 4" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 5" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 6" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 7" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "churn 8" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "tail 9" } },
+    { "tool": "edit_file", "args": { "path": "src/osc.py", "patch": "tail 10" } }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "label": "no_progress",
+  "description": "NOP-5 rich outcomes: a failing test disappears from the next complete exhaustive collection while another remains red. Absence is not a comparable fail-to-pass transition and must not create progress.",
+  "metadata": { "curated_by": "NOP-5", "boundary": "deleted-failure-no-credit" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "delete", "run": 0 }, "result": { "passed": 1, "failed": 2, "test_outcomes": { "a": "failed", "b": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "tests/test_delete.py", "patch": "remove test a" } },
+    { "tool": "run_tests", "args": { "target": "delete", "run": 1 }, "result": { "passed": 1, "failed": 1, "test_outcomes": { "b": "failed", "ok": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 0" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 1" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 2" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 3" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 4" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 5" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 6" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 7" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "churn 8" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "tail 9" } },
+    { "tool": "edit_file", "args": { "path": "src/delete.py", "patch": "tail 10" } }
+  ]
+}

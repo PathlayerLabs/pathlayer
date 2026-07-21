@@ -96,6 +96,9 @@ VAL-4/VAL-5 (later).
 | `no_progress/replan_churn.json` | Plan rewritten over and over, never executed. |
 | `no_progress/failing_edit_churn.json` | Genuinely different patches each turn, but the test result never moves off `3 failed`. |
 | `no_progress/research_rabbit_hole.json` | Endless distinct searches/reads, no change applied. |
+| `no_progress/rich_flat_red.json` | NOP-5: stable per-test debts remain red while activity continues. |
+| `no_progress/rich_oscillation.json` | NOP-5: one debt oscillates after its first repair; repeated recovery earns no new credit. |
+| `no_progress/rich_deleted_failure.json` | NOP-5: a failing test disappears; absence is not credited as a repair. |
 
 ### `healthy` (false-positive boundary)
 
@@ -109,3 +112,76 @@ VAL-4/VAL-5 (later).
 | `healthy/multi_file_refactor.json` | LOOP-2 (#18) adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
 | `healthy/repo_exploration.json` | LOOP-2 (#18) adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
 | `healthy/repeated_checkpoint_pair.json` | LOOP-2 (#18) known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
+| `healthy/rich_fail_to_pass_progress.json` | NOP-5: stable failing test IDs convert to passed often enough to reset patience. |
+| `healthy/rich_late_test_progress.json` | NOP-5: work begins before test evidence exists, then rich outcomes show real repairs. |
+| `healthy/rich_new_target_progress.json` | NOP-5: a new red target progresses locally without competing with an older target's absolute score. |
+| `healthy/rich_legacy_revert_recovers.json` | NOP-5 follow-up: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
+
+## Optional rich test-result contract (NOP-5)
+
+Aggregate ``passed``/``failed`` counts remain supported unchanged. A test tool
+can additionally emit stable per-test outcomes when it can guarantee identity
+and collection scope:
+
+```json
+{
+  "passed": 2,
+  "failed": 1,
+  "test_outcomes": {
+    "tests/test_api.py::test_create": "passed",
+    "tests/test_api.py::test_delete": "failed"
+  },
+  "scope_id": "pytest:tests/test_api.py",
+  "collection_complete": true,
+  "scope_exhaustive": true
+}
+```
+
+- ``test_outcomes`` maps stable IDs to ``passed``, ``failed``, ``skipped``,
+  ``error`` or ``flaky``. ``failed``, ``error`` and ``flaky`` create a debt;
+  its first later ``passed`` earns one permanent progress credit. ``skipped``
+  creates no debt and no credit, but—like every non-``passed`` status—prevents
+  that observation from establishing satisfaction.
+- ``scope_id`` identifies the executed selection but never identifies a test
+  debt; debts are keyed by ``(target, test_id)``.
+- ``collection_complete`` says whether omissions from this selection are
+  meaningful. In a complete collection, an ID omitted from the same
+  ``scope_id`` loses comparability; omission from another partial scope does
+  not. Explicitly reported outcomes remain usable when it is false.
+- ``scope_exhaustive`` says this selection covers the whole target and may
+  establish success. A partial green run never suppresses no-progress.
+
+The producer is responsible for these guarantees; adapters transport the raw
+result without interpreting it. Malformed rich-only payloads are inert and do
+not disable weaker exit-code/git anchors; valid aggregate counts in the same
+event use the legacy fallback. Per-target rich mode is sticky, but
+**guarded-reversible**: a lone aggregate-only event for a rich target is
+inert (as above), but 3 consecutive aggregate-only events (``_LEGACY_REVERT_STREAK``)
+revert the target to plain aggregate tracking, discarding its rich debt
+ledger. A later rich event restarts rich mode with a fresh offset from the
+latest aggregate value. This is a deliberate trade-off, not a full fix: it
+bounds but does not eliminate a re-count risk -- a producer that deliberately
+oscillates rich and aggregate data for the same target could still get a debt
+it already fixed once credited again after a revert, because the ledger that
+remembered the first fix is gone. Its immutable incremental state costs O(K)
+time per rich update and O(K) memory for K unique test IDs, independent of
+history length.
+For safety, one payload and one target ledger are capped at 10,000 IDs;
+the whole anchor is capped at 10,000 tracked IDs across 256 rich targets, with
+256 remembered scopes per target, 10,000 stored ``(scope_id, test_id)`` status
+entries in total, and 512 characters per ``scope_id``. Oversized payloads are
+inert, while cumulative ID/target/scope overflow is sticky and can never earn
+credit or establish satisfaction.
+
+None of the above is silent. A malformed payload, a capacity cap reached, a
+guarded-reversion streak progressing or committing are all reported as
+human-readable notes in ``Signal.diagnostics`` (see
+[`pathlayer/detectors/base.py`](../pathlayer/detectors/base.py)), surfaced by
+the existing OBS-1 structured logging (``pathlayer/observability.py``) on
+every tick -- including the common silent (confidence 0) one, so an operator
+can see a degraded producer without the run first having to look stalled.
+Diagnostics never feed arbitration; they are purely observational.
+
+These fixtures are synthetic boundary cases, not production recordings. Runs
+without any deterministic ground truth remain outside NOP-5 and are tracked by
+ANC-1 (#135).

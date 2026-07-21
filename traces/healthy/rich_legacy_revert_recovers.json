@@ -1,0 +1,15 @@
+{
+  "label": "healthy",
+  "description": "NOP-5 follow-up: the producer stops emitting per-test outcomes for a few runs (falls back to aggregate-only), which triggers the guarded reversion (_LEGACY_REVERT_STREAK consecutive aggregate-only events) instead of staying wedged in a stale rich ledger forever. The revert lands on a new aggregate record, so the run never reads as stalled, and it resumes rich mode with a fresh ledger that ends fully green.",
+  "metadata": { "curated_by": "NOP-5-followup", "boundary": "guarded-reversion-recovers" },
+  "events": [
+    { "tool": "run_tests", "args": { "target": "suite", "run": 0 }, "result": { "passed": 0, "failed": 2, "test_outcomes": { "a": "failed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "edit_file", "args": { "path": "src/x.py", "patch": "fix a 1" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 1 }, "result": { "passed": 1, "failed": 1, "test_outcomes": { "a": "passed", "b": "failed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 2 }, "result": { "passed": 1, "failed": 1 } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 3 }, "result": { "passed": 1, "failed": 1 } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 4 }, "result": { "passed": 6, "failed": 0 } },
+    { "tool": "edit_file", "args": { "path": "src/x.py", "patch": "cleanup" } },
+    { "tool": "run_tests", "args": { "target": "suite", "run": 5 }, "result": { "passed": 2, "failed": 0, "test_outcomes": { "a": "passed", "b": "passed" }, "scope_id": "all", "collection_complete": true, "scope_exhaustive": true } }
+  ]
+}

@@ -54,6 +54,13 @@ class Signal:
     name: str
     confidence: float
     reason: str = ""
+    # Human-readable notes about anything degraded-but-not-fatal that happened
+    # while computing this signal (a malformed payload dropped, a capacity cap
+    # reached, a sticky anchor mode reverting) -- distinct from ``reason``,
+    # which explains *why the confidence is what it is*. Empty in the common
+    # case; never affects fusion/arbitration, only what an operator sees via
+    # OBS-1 logging (see ``pathlayer.observability.log_signal``).
+    diagnostics: tuple[str, ...] = ()
 
 
 class Detector(ABC):

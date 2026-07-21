@@ -41,18 +41,29 @@ would catch -- this test-deferring shape was chosen from a labeled-trace
 experiment (``tests/test_nop4_git_experiment.py``) where the naive always-on
 variant masked a genuine no-progress run.
 
-Known limitation: the signal is only as good as its anchor. Two residual blind
-spots: (1) git cannot tell *useful* from *useless* new code -- only ground truth
-(tests) can; whenever a stronger anchor is also applicable the optimistic
-aggregation lets git only quiet the detector (false negatives), not fire it. The
-one place git can fire alone is an agent with no tests and no exit codes, where a
-flat diff size could in principle false-stop a genuinely-progressing run -- the
-cost of having any signal there at all. (2) A long flat-red test suite while the
-agent genuinely writes code can still fire, because a constant ``passed - failed``
-is indistinguishable from a stall. That second one is a test-anchor/patience
-concern (a real progressing run shows the failing count *dropping*, which already
-sets records and stays silent), not something git should paper over -- using git
-to silence the test anchor is exactly the masking the deferring design avoids.
+Known limitation: the signal is only as good as its anchor. Git cannot tell
+*useful* from *useless* new code -- only ground truth can; whenever a stronger
+anchor is also applicable the optimistic aggregation lets git only quiet the
+detector (false negatives), not fire it. The one place git can fire alone is an
+agent with no tests and no exit codes, where a flat diff size could false-stop a
+genuinely-progressing run -- the cost of having any signal there at all.
+
+NOP-5 makes test ground truth precise when the producer supplies stable per-test
+IDs, collection completeness and scope exhaustiveness: only the first explicit
+debt-to-pass transition sets a record, while deletion, renaming and oscillation
+do not. Aggregate-only flat red remains semantically ambiguous and is treated as
+a stall after the configured patience; the historical NOP-4 fixtures preserve
+that boundary. Runs with no applicable anchor at all remain deliberately silent
+rather than guessed from text (tracked separately by ANC-1).
+
+Anchor diagnostics (NOP-5 follow-up) surface degraded-but-not-fatal producer
+conditions -- a malformed ``test_outcomes`` payload, a capacity cap reached, a
+sticky rich mode reverting -- as ``Signal.diagnostics`` on *every* tick,
+including the common silent (confidence 0) one: seeing the problem should never
+require the agent to already be judged stalled. This never feeds arbitration
+(``Signal.confidence``/``reason`` are unaffected); it only makes visible, via
+the existing OBS-1 logging, a condition that was previously absorbed with no
+trace at all.
 
 PERF-2 -- incremental fold: ``evaluate`` above stays the pure specification for
 every anchor actually shipped here. :meth:`create_state`/:meth:`step` below are
@@ -237,8 +248,11 @@ class NoProgressDetector(Detector):
         next_runtimes: list[_AnchorRuntime] = []
         applicable_cusums: list[float] = []
         any_satisfied = False
+        diagnostics: list[str] = []
         for anchor, runtime in zip(self._anchors, state.runtimes, strict=True):
             new_anchor_state, snapshot = anchor.step(runtime.anchor_state, event)
+            if snapshot.diagnostics:
+                diagnostics.extend(f"{anchor.name}: {message}" for message in snapshot.diagnostics)
             new_entries, new_count, stalled = _push_level(
                 runtime.entries, runtime.count, self._window, snapshot.level
             )
@@ -247,45 +261,56 @@ class NoProgressDetector(Detector):
                 applicable_cusums.append(self._stagnation_table[stalled])
                 if snapshot.satisfied:
                     any_satisfied = True
+        anchor_diagnostics = tuple(diagnostics)
         if not applicable_cusums or any_satisfied:
-            signal = Signal(self.name, confidence=0.0)
+            signal = Signal(self.name, confidence=0.0, diagnostics=anchor_diagnostics)
         else:
             cumulative = min(applicable_cusums)
             if cumulative <= 0.0:
-                signal = Signal(self.name, confidence=0.0)
+                signal = Signal(self.name, confidence=0.0, diagnostics=anchor_diagnostics)
             else:
                 confidence = min(1.0, cumulative / self._threshold)
                 stalled_steps = round(cumulative / self._target_rate)
                 plural = "s" if stalled_steps != 1 else ""
                 reason = f"{stalled_steps} step{plural} without new progress (cusum)"
-                signal = Signal(self.name, confidence=confidence, reason=reason)
+                signal = Signal(
+                    self.name, confidence=confidence, reason=reason, diagnostics=anchor_diagnostics
+                )
         return _NoProgressState(runtimes=tuple(next_runtimes), last_signal=signal), signal
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         history = self._relevant(history)
+        # Diagnostics are collected regardless of applicability/satisfaction:
+        # a degraded producer is worth surfacing even on an otherwise-silent
+        # tick (that is precisely the "silent degradation" this closes).
+        diagnostics = tuple(
+            f"{anchor.name}: {message}"
+            for anchor in self._anchors
+            for message in anchor.diagnose(history)
+        )
         # An anchor is applicable iff it has an opinion on the full history.
         applicable = [anchor for anchor in self._anchors if anchor.measure(history) is not None]
         if not applicable:
             # No anchor can measure this agent -> stay silent.
-            return Signal(self.name, confidence=0.0)
+            return Signal(self.name, confidence=0.0, diagnostics=diagnostics)
         # Success suppression: if any applicable anchor is at its success state
         # (e.g. a green test suite), a flat level is "nothing left to fix", not a
         # stall -- stay silent so a succeeded agent is never stopped. This is the
         # brake that makes the no-progress signal safe to act on (STOP).
         if any(anchor.is_satisfied(history) for anchor in applicable):
-            return Signal(self.name, confidence=0.0)
+            return Signal(self.name, confidence=0.0, diagnostics=diagnostics)
         # One CUSUM per applicable anchor; take the most optimistic (smallest):
         # if any anchor still sets records the agent is advancing.
         cumulative = min(
             self._cusum(progress_series(anchor, history, self._window)) for anchor in applicable
         )
         if cumulative <= 0.0:
-            return Signal(self.name, confidence=0.0)
+            return Signal(self.name, confidence=0.0, diagnostics=diagnostics)
         confidence = min(1.0, cumulative / self._threshold)
         stalled = round(cumulative / self._target_rate)
         plural = "s" if stalled != 1 else ""
         reason = f"{stalled} step{plural} without new progress (cusum)"
-        return Signal(self.name, confidence=confidence, reason=reason)
+        return Signal(self.name, confidence=confidence, reason=reason, diagnostics=diagnostics)
 
     def _cusum(self, series: Sequence[float | None]) -> float:
         """CUSUM over progress *records*.
