@@ -4,16 +4,26 @@ Runnable before/after demos. The key demo: an agent that loops forever
 **without** Pathlayer, vs. the same agent **with** Pathlayer detecting the
 loop, stopping execution, and producing a summary.
 
-## `demo_loop.py`
+## `demo_loop.py` (DEMO-1)
 
-Single before/after demo in one command, covering the three real Sprint 1
-detectors. For each scenario it builds a trace where a naive agent would keep
-going, then runs it through Pathlayer which detects the problem, stops cleanly,
-and reports why (post-mortem):
+Smallest complete Pathlayer story: an agent gets stuck in a loop and would run
+forever, versus the same agent stopped through the **real ACT-0 runtime path**
+(not a shortcut):
 
-- loop (`LoopDetector`): the agent replays the same actions forever;
-- retry (`RetryDetector`): the agent replays the same failing call;
-- budget (`BudgetDetector`): the agent burns through its dollar budget.
+```text
+agent -> wire(pipeline, actuator) -> LoopDetector -> Policy -> STOP
+      -> DemoActuator.apply(STOP) -> the agent drains and stops
+```
+
+`DemoActuator` is the offline analogue of `LangGraphActuator`: on `STOP` it
+requests a cooperative drain (a flag the agent observes). It never decides --
+the `Action` arrives already arbitrated by the pipeline.
+
+The demo prints a before/after for the looping agent (triggering detector,
+detection step, STOP, work avoided) and runs a **healthy bounded counterpart**
+that is deliberately *not* stopped (a false positive is worse than no
+Pathlayer at all). OBS-1 signal/decision/action logs go to stderr as JSON
+lines. Deterministic, offline, no LLM, no network.
 
 ```bash
 python examples/demo_loop.py
