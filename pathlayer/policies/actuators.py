@@ -18,6 +18,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from pathlayer.policies.actions import Action
+from pathlayer.policies.actuation import ActuationContext
 from pathlayer.postmortem import PostMortem
 
 
@@ -34,11 +35,29 @@ class Actuator(ABC):
     (``wire()``) is fail-open around it (an exception is logged, never
     propagated to the agent), but that is a last-resort safety net, not a
     substitute for an actuator handling its own expected failure modes.
+
+    ACT-1 adds :meth:`apply_with_context`, the richer entry point ``wire()``
+    actually calls. Override **exactly one** of ``apply`` / ``apply_with_context``:
+    the default ``apply_with_context`` delegates to ``apply`` so every pre-ACT-1
+    actuator keeps working unchanged, while an actuator that needs the detector
+    /score/reason/current-event context (e.g. to inject a WARN into the agent)
+    overrides ``apply_with_context`` instead.
     """
 
     @abstractmethod
     def apply(self, action: Action, post_mortem: PostMortem | None) -> None:
         raise NotImplementedError
+
+    def apply_with_context(self, context: ActuationContext) -> None:
+        """Execute an arbitrated action with full context (ACT-1).
+
+        Default: delegate to :meth:`apply` for backward compatibility. This is
+        the method :func:`~pathlayer.policies.wiring.wire` invokes, never
+        ``apply`` directly, so a context-aware actuator overrides this one while
+        legacy actuators (which only implement ``apply``) are reached through
+        this delegation with the exact same ``(action, post_mortem)`` pair.
+        """
+        self.apply(context.action, context.post_mortem)
 
 
 class LoggingActuator(Actuator):

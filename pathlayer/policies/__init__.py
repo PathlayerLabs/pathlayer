@@ -15,13 +15,16 @@ are imported directly from their module.
 """
 
 from pathlayer.policies.actions import Action
+from pathlayer.policies.actuation import ActuationContext, EventSnapshot
 from pathlayer.policies.actuators import Actuator, LoggingActuator
 from pathlayer.policies.base import HysteresisState, OverrideRule, Policy, SuppressionRule
 from pathlayer.policies.wiring import wire
 
 __all__ = [
     "Action",
+    "ActuationContext",
     "Actuator",
+    "EventSnapshot",
     "HysteresisState",
     "LoggingActuator",
     "OverrideRule",

@@ -497,6 +497,51 @@ def test_build_pipeline_does_not_warn_when_loop_weight_keeps_cap_below_threshold
     assert "ngram_max_confidence" not in caplog.text
 
 
+def test_build_pipeline_warns_when_warn_tier_enabled_without_hysteresis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # ACT-1: an enabled WARN tier with escalate_ticks == deescalate_ticks == 1
+    # re-fires on every threshold crossing, which an ACT-1 actuator turns into
+    # repeated context injections. Warn (don't fail) so the user can debounce.
+    config = PathlayerConfig.from_mapping({"policy": {"tier_thresholds": {"warn": 0.4}}})
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "WARN tier is enabled with no hysteresis" in caplog.text
+
+
+def test_build_pipeline_does_not_warn_when_warn_tier_has_escalate_hysteresis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"tier_thresholds": {"warn": 0.4}, "escalate_ticks": 2}}
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "WARN tier is enabled with no hysteresis" not in caplog.text
+
+
+def test_build_pipeline_does_not_warn_when_warn_tier_has_deescalate_hysteresis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The guard is `escalate_ticks == 1 AND deescalate_ticks == 1`; debouncing on
+    # the de-escalation side alone is enough to silence it (covers that clause).
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"tier_thresholds": {"warn": 0.4}, "deescalate_ticks": 2}}
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "WARN tier is enabled with no hysteresis" not in caplog.text
+
+
+def test_build_pipeline_does_not_warn_about_warn_tier_when_disabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Default config: no ladder tiers, so the WARN-hysteresis guard is silent.
+    with caplog.at_level("WARNING"):
+        build_pipeline()
+    assert "WARN tier is enabled with no hysteresis" not in caplog.text
+
+
 def test_build_pipeline_warns_when_loop_enabled_without_no_progress(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

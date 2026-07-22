@@ -37,14 +37,14 @@ def wire(
 ) -> EventSink:
     """Build an :data:`EventSink` that runs ``pipeline`` then applies its Action.
 
-    Only calls ``actuator.apply`` on a *transition* to a new non-``NONE``
-    action -- the same "once per transition, not once per event" rule
-    ``Pipeline`` itself uses for ``would_be_actions`` in dry-run (see
-    ``Pipeline._observe``). Without this, every event after a ``STOP`` (which
-    ``Pipeline.process`` keeps returning; see its ``_stopped`` short-circuit)
-    would re-invoke ``apply`` for no reason -- harmless for the idempotent
-    ``RunControl.request_drain``, but not a contract a generic ``Actuator``
-    should have to assume.
+    Only calls ``actuator.apply_with_context`` (ACT-1; its default delegates to
+    ``actuator.apply``) on a *transition* to a new non-``NONE`` action -- the
+    same "once per transition, not once per event" rule ``Pipeline`` itself uses
+    for ``would_be_actions`` in dry-run (see ``Pipeline._observe``). Without
+    this, every event after a ``STOP`` (which ``Pipeline.process`` keeps
+    returning; see its ``_stopped`` short-circuit) would re-invoke the actuator
+    for no reason -- harmless for the idempotent ``RunControl.request_drain``,
+    but not a contract a generic ``Actuator`` should have to assume.
 
     Precondition: the returned sink must be called sequentially. ``Pipeline``
     has no internal lock, by design (it is a pure, single-threaded decision
@@ -60,9 +60,9 @@ def wire(
     :class:`~pathlayer.policies.actuators.LoggingActuator` directly for
     dry-run tuning instead.
 
-    Any exception raised by ``actuator.apply`` is caught and logged
-    (fail-open): it must never propagate back through the sink into the
-    adapter's callback and break event capture on a live agent run.
+    Any exception raised by the actuator is caught and logged (fail-open): it
+    must never propagate back through the sink into the adapter's callback and
+    break event capture on a live agent run.
     """
     if pipeline.dry_run:
         raise ValueError(
@@ -86,7 +86,15 @@ def wire(
         if action is Action.NONE:
             return
         try:
-            actuator.apply(action, pipeline.post_mortem)
+            # ACT-1: hand the actuator the full context of this tick. The default
+            # Actuator.apply_with_context delegates to apply(action, post_mortem),
+            # so a legacy actuator behaves exactly as before. The pipeline builds
+            # the context for every emitted non-NONE action, so it is invariably
+            # present here (an AssertionError would be caught and logged like any
+            # actuator failure, keeping capture fail-open).
+            context = pipeline.actuation_context
+            assert context is not None
+            actuator.apply_with_context(context)
         except Exception:
             log.exception(
                 "actuator.apply failed for action=%s; event capture continues", action.name

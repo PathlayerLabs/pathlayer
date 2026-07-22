@@ -47,6 +47,7 @@ from pathlayer.observability import (
     log_would_be_action,
 )
 from pathlayer.policies import Action, Policy
+from pathlayer.policies.actuation import ActuationContext, EventSnapshot
 from pathlayer.policies.base import HysteresisState
 from pathlayer.postmortem import PostMortem
 
@@ -163,6 +164,10 @@ class Pipeline:
         self._dry_run = dry_run
         self._stopped = False
         self._post_mortem: PostMortem | None = None
+        # ACT-1: the context of the last emitted non-NONE action, consumed by
+        # wire() to drive an Actuator. None until the first non-NONE action, and
+        # always None in dry-run (nothing is emitted there).
+        self._last_context: ActuationContext | None = None
         self._would_be_actions: list[WouldBeAction] = []
         # Last arbitrated action, to record would-be actions only on transition.
         self._last_would_be: Action = Action.NONE
@@ -225,6 +230,16 @@ class Pipeline:
     def post_mortem(self) -> PostMortem | None:
         """The post-mortem captured at STOP, or None if the run never stopped."""
         return self._post_mortem
+
+    @property
+    def actuation_context(self) -> ActuationContext | None:
+        """Context of the last emitted non-NONE action (ACT-1), else None.
+
+        Consumed by :func:`~pathlayer.policies.wiring.wire` right after
+        :meth:`process` to drive an :class:`~pathlayer.policies.actuators.Actuator`.
+        Always None in dry-run (no action is emitted).
+        """
+        return self._last_context
 
     def process(self, event: ToolEvent) -> Action:
         """Process one event and return the arbitrated action.
@@ -293,6 +308,11 @@ class Pipeline:
         if action is Action.STOP:
             self._stopped = True
             self._post_mortem = self._build_post_mortem(signals, evidence)
+        if action is not Action.NONE:
+            # Built after the STOP branch so post_mortem is available and shared
+            # by identity (None for every non-STOP tier). Only for an emitted
+            # non-NONE action -- the transition wire() acts on.
+            self._last_context = self._build_context(event, signals, action, evidence)
         return action
 
     def _observe(
@@ -404,6 +424,36 @@ class Pipeline:
         if driver is not None:
             return f"{driver.name}: {driver.reason}" if driver.reason else driver.name
         return action.name.lower()
+
+    def _build_context(
+        self,
+        event: ToolEvent,
+        signals: list[Signal],
+        action: Action,
+        evidence: Mapping[str, float],
+    ) -> ActuationContext:
+        """Build the ACT-1 actuation context for an emitted non-NONE action.
+
+        Reuses the tick's own ``signals``/``evidence`` so the fused score and
+        reason match exactly what drove the decision. ``post_mortem`` is shared
+        by identity with :attr:`post_mortem` (non-None only at STOP). The event
+        snapshot excludes ``args``/``result``/``metadata`` (see
+        :class:`~pathlayer.policies.actuation.EventSnapshot`).
+        """
+        return ActuationContext(
+            action=action,
+            fused=self._policy.fuse(signals, evidence),
+            reason=self._action_reason(action, signals, evidence),
+            signals=tuple(signals),
+            event=EventSnapshot(
+                tool=event.tool,
+                kind=event.kind,
+                ts=event.ts,
+                index=len(self._history) - 1,
+                cost_usd=event.cost_usd,
+            ),
+            post_mortem=self._post_mortem,
+        )
 
     def _build_post_mortem(
         self, signals: list[Signal], evidence: Mapping[str, float]

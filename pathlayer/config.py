@@ -732,6 +732,23 @@ def build_pipeline(
                 "traces/healthy/repeated_checkpoint_pair.json) will not be wired -- "
                 "see audit #117 finding M-1"
             )
+    # ACT-1 anti-noise guard: an enabled WARN tier with no hysteresis re-fires on
+    # every crossing of the warn threshold, and an ACT-1 actuator turns each
+    # re-fire into a fresh context injection. Warn -- don't fail -- so a
+    # deliberate no-debounce setup stays possible but never silent. Tied to the
+    # injection mechanism, not a tuned threshold (no data needed).
+    if (
+        Action.WARN in tier_thresholds
+        and config.policy.escalate_ticks == 1
+        and config.policy.deescalate_ticks == 1
+    ):
+        resolved_logger.warning(
+            "build_pipeline: the WARN tier is enabled with no hysteresis "
+            "(policy.escalate_ticks == policy.deescalate_ticks == 1): a fused score "
+            "flapping across the warn threshold re-fires WARN on every crossing, "
+            "which an ACT-1 actuator turns into repeated context injections. "
+            "Set escalate_ticks / deescalate_ticks > 1 to debounce."
+        )
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
     progress_anchors = loop_suppression_anchors() if suppressions else None

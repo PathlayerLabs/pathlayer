@@ -28,19 +28,28 @@ Skipped entirely unless the optional ``langchain_core`` dependency is present.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypedDict
+from typing import Annotated, TypedDict
 from uuid import uuid4
 
 import pytest
 
 pytest.importorskip("langchain_core")
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.tools import tool
 
+try:
+    # Optional: only the ACT-1 StateGraph test below needs it, and that test
+    # importorskips "langgraph" before using _WarnState. Guarded so the
+    # langchain_core-only tests in this module still collect without langgraph.
+    from langgraph.graph.message import add_messages
+except ImportError:  # pragma: no cover - langgraph is an optional extra
+    add_messages = None  # type: ignore[assignment]
+
 from pathlayer import Pipeline
 from pathlayer.adapters.langgraph import LangGraphAdapter
+from pathlayer.detectors.base import Signal
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
@@ -52,7 +61,7 @@ from pathlayer.detectors.progress import (
 )
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import EventKind, ToolEvent
-from pathlayer.policies import Policy
+from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import PolicyConfig
 
 
@@ -391,6 +400,117 @@ def test_loop_detected_through_a_real_stategraph() -> None:
     assert [e.tool for e in events] == ["search"] * 6
     assert LoopDetector().evaluate(events).confidence == pytest.approx(0.96875)
     assert _stops(events)
+
+
+class _WarnState(TypedDict):
+    """Module-level (see _GraphState) messages state with the add_messages reducer."""
+
+    messages: Annotated[list[BaseMessage], add_messages]
+
+
+def test_act1_warn_injected_into_a_real_stategraph() -> None:
+    # ACT-1 end to end: a buffered WARN advisory is delivered into a live
+    # StateGraph as a SystemMessage by the actuator's injection node, *appended*
+    # (add_messages reducer) before the model node -- without stopping the run.
+    pytest.importorskip("langgraph")
+    from langgraph.graph import END, START, StateGraph
+
+    from pathlayer.policies.actuation import ActuationContext, EventSnapshot
+    from pathlayer.policies.langgraph_actuator import LangGraphActuator
+
+    actuator = LangGraphActuator()
+    actuator.attach()
+    # Simulate a WARN transition arriving from the pipeline (arbitrated already).
+    # The signal's reason carries a secret (as a RetryDetector reason would): the
+    # injected advisory must name the signal but never leak the reason (SEC-3).
+    secret_reason = "db timeout: password=hunter2"
+    actuator.apply_with_context(
+        ActuationContext(
+            action=Action.WARN,
+            fused=0.6,
+            reason=secret_reason,
+            signals=(Signal(name="no_progress", confidence=0.6, reason=secret_reason),),
+            event=EventSnapshot(
+                tool="edit_file", kind=EventKind.TOOL_CALL, ts=1.0, index=4, cost_usd=0.0
+            ),
+            post_mortem=None,
+        )
+    )
+
+    def agent(state: _WarnState) -> dict[str, list[BaseMessage]]:
+        return {"messages": [AIMessage(content="carrying on")]}
+
+    builder = StateGraph(_WarnState)
+    builder.add_node("pathlayer_warn", actuator.injection_node())
+    builder.add_node("agent", agent)
+    builder.add_edge(START, "pathlayer_warn")
+    builder.add_edge("pathlayer_warn", "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile()
+
+    result = graph.invoke({"messages": [HumanMessage(content="do the task")]})
+
+    system = [m for m in result["messages"] if isinstance(m, SystemMessage)]
+    assert len(system) == 1
+    # The advisory names the signal but never leaks the secret-bearing reason.
+    assert "no_progress" in system[0].content
+    assert secret_reason not in system[0].content
+    # The run completed normally: the agent's own message is still there and the
+    # drain was never requested (WARN never halts).
+    assert any(isinstance(m, AIMessage) for m in result["messages"])
+    assert actuator.control.drain_requested is False
+
+
+def test_act1_real_detector_warns_then_injects_into_stategraph() -> None:
+    # ACT-1 fully end to end: a *real* detector (LoopDetector) drives a *real*
+    # Policy across the WARN threshold via the Pipeline + wire() + a real
+    # LangGraphActuator, and the resulting advisory is injected into a live
+    # StateGraph -- no scripted policy or hand-built context anywhere.
+    #
+    # Calibration (see LoopDetector.evaluate): identical calls give confidence
+    # 0.5, 0.75, 0.875, 0.9375... With tier_thresholds warn=0.3 and
+    # stop_threshold=0.9, three identical calls peak at 0.75 -> WARN fires and
+    # the run is never stopped (0.75 < 0.9).
+    pytest.importorskip("langgraph")
+    from langgraph.graph import END, START, StateGraph
+
+    from pathlayer.policies.langgraph_actuator import LangGraphActuator
+    from pathlayer.policies.wiring import wire
+
+    policy = Policy(PolicyConfig(stop_threshold=0.9, tier_thresholds={Action.WARN: 0.3}))
+    pipeline = Pipeline([LoopDetector()], policy)
+    actuator = LangGraphActuator()
+    actuator.attach()
+    adapter = LangGraphAdapter(wire(pipeline, actuator))
+    adapter.attach()
+
+    # Three identical tool calls, captured for real through the adapter.
+    for _ in range(3):
+        search.invoke({"query": "same"}, config=adapter.as_config())
+    adapter.detach()
+
+    # A real WARN was arbitrated and enforced; STOP never fired.
+    assert Action.WARN in pipeline.actions
+    assert Action.STOP not in pipeline.actions
+    assert actuator.control.drain_requested is False
+
+    def agent(state: _WarnState) -> dict[str, list[BaseMessage]]:
+        return {"messages": [AIMessage(content="carrying on")]}
+
+    builder = StateGraph(_WarnState)
+    builder.add_node("pathlayer_warn", actuator.injection_node())
+    builder.add_node("agent", agent)
+    builder.add_edge(START, "pathlayer_warn")
+    builder.add_edge("pathlayer_warn", "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile()
+
+    result = graph.invoke({"messages": [HumanMessage(content="do the task")]})
+
+    system = [m for m in result["messages"] if isinstance(m, SystemMessage)]
+    assert len(system) == 1
+    assert "loop" in system[0].content
+    assert actuator.control.drain_requested is False
 
 
 # --------------------------------------------------------------------------- #
