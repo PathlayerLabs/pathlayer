@@ -464,7 +464,12 @@ class Policy:
         triggered: list[tuple[Signal, OverrideRule]] = []
         for signal in self._actionable(signals, evidence):
             rule = overrides.get(signal.name)
-            if rule is not None and signal.confidence >= rule.threshold:
+            # Normalize before comparing, like every other confidence site
+            # (fusion, ladder, post-mortem): a custom detector may emit a raw
+            # confidence outside [0, 1] or NaN, and the dataclass does not
+            # enforce the range. Left raw, an out-of-range value would fire (or
+            # skip) an override on a number the rest of the policy never sees.
+            if rule is not None and _normalized_confidence(signal.confidence) >= rule.threshold:
                 triggered.append((signal, rule))
         return triggered
 

@@ -10,6 +10,7 @@ configurable.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import pytest
@@ -671,11 +672,12 @@ def test_override_signal_none_without_trigger() -> None:
 
 def test_override_signal_tie_break_clamps_out_of_range_confidence() -> None:
     # Audit issue #108's normalization gap, exercised on override_signal's
-    # tie-break: NaN can never reach it (_triggered_overrides' own `>=` check
-    # already excludes NaN, which fails every comparison), but a finite
-    # out-of-range confidence can, and must be clamped to [0, 1] before
-    # ranking -- otherwise a low-weight signal with a wildly out-of-range
-    # confidence can outrank the real driver.
+    # tie-break: since ARB-5 (#134) _triggered_overrides normalizes NaN to 0.0,
+    # so a NaN-confidence signal is excluded here by falling below the 0.5
+    # threshold (not by NaN failing every comparison). A finite out-of-range
+    # confidence still reaches the tie-break and must be clamped to [0, 1]
+    # before ranking -- otherwise a low-weight signal with a wildly
+    # out-of-range confidence can outrank the real driver.
     # unclamped: custom -> 0.1*3.0=0.3, retry -> 0.5*0.5=0.25 (custom wins)
     # clamped:   custom -> 0.1*1.0=0.1, retry -> 0.5*0.5=0.25 (retry wins)
     policy = Policy(
@@ -691,6 +693,26 @@ def test_override_signal_tie_break_clamps_out_of_range_confidence() -> None:
     retry = Signal("retry", confidence=0.5)
     assert policy.override_signal([custom, retry]) is retry
     assert policy.override_signal([retry, custom]) is retry
+
+
+def test_override_normalizes_confidence_before_threshold() -> None:
+    # ARB-5 (#134): _triggered_overrides normalizes Signal.confidence before the
+    # `>= threshold` check, like fusion/ladder/post-mortem. A custom detector
+    # emitting a stray value (NaN or out-of-range) must be treated as its clamped
+    # [0, 1] equivalent, not compared raw. At a 0.0 threshold, both NaN and a
+    # negative confidence normalize to 0.0 and fire -- whereas the raw comparison
+    # (`NaN >= 0.0`, `-0.5 >= 0.0`) is False and would silently skip the override.
+    policy = Policy(PolicyConfig(overrides={"custom": OverrideRule(0.0, Action.STOP)}))
+    assert policy.override_action([Signal("custom", confidence=math.nan)]) is Action.STOP
+    assert policy.override_action([Signal("custom", confidence=-0.5)]) is Action.STOP
+    # And a finite out-of-range high confidence still fires (clamped to 1.0),
+    # unchanged from before: the fix never *removes* a legitimate trigger.
+    high = Policy(PolicyConfig(overrides={"custom": OverrideRule(1.0, Action.STOP)}))
+    assert high.override_action([Signal("custom", confidence=3.0)]) is Action.STOP
+    # Central Pathlayer invariant: normalization must never turn a broken
+    # detector into a false stop. A NaN confidence (-> 0.0) stays well below a
+    # realistic threshold, so the override does not fire.
+    assert high.override_action([Signal("custom", confidence=math.nan)]) is None
 
 
 # --- PolicyConfig override validation --------------------------------------- #
