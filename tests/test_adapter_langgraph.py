@@ -21,8 +21,12 @@ from langchain_core.tools import tool
 
 from pathlayer import Pipeline
 from pathlayer.adapters.langgraph import LangGraphAdapter, _coerce_result
+from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
-from pathlayer.events import EventKind, ToolEvent
+from pathlayer.detectors.no_progress import NoProgressDetector
+from pathlayer.detectors.progress import coding_anchors
+from pathlayer.detectors.retry import RetryDetector
+from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.validation.traces import Trace, dump_trace, load_trace
 
 
@@ -42,6 +46,12 @@ def boom(x: int) -> int:
 def echo(text: str) -> str:
     """Echo back the text."""
     return text
+
+
+@tool(PROGRESS_SUMMARY_TOOL)
+def pathlayer_progress_summary(completed: str, blocker: str, next_action: str) -> str:
+    """Record a structured progress summary (the ACT-2 tool, by its stable name)."""
+    return "progress summary recorded"
 
 
 def _capture() -> tuple[list[ToolEvent], LangGraphAdapter]:
@@ -139,6 +149,59 @@ def test_pipeline_integration() -> None:
 
     assert len(pipeline.history) == 2
     assert [e.tool for e in pipeline.history] == ["add", "add"]
+
+
+def test_summary_tool_is_captured_as_progress_summary_kind() -> None:
+    # ACT-2: the Pathlayer summary tool is classified as PROGRESS_SUMMARY at
+    # capture (by its stable name), carrying the three fields in args, at zero
+    # cost. Pure capture -- no tier decision descends into the adapter.
+    events, adapter = _capture()
+    args = {
+        "completed": "added a guard",
+        "blocker": "parser fails on empty input",
+        "next_action": "write a regression test",
+    }
+    pathlayer_progress_summary.invoke(args, config=adapter.as_config())
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind is EventKind.PROGRESS_SUMMARY
+    assert event.tool == PROGRESS_SUMMARY_TOOL
+    assert event.args == args
+    assert event.cost_usd == 0.0
+
+
+def test_detectors_ignore_captured_progress_summary_events() -> None:
+    # A forced summary must not add a fake stagnation step nor fool a repetition
+    # detector: the action detectors filter to TOOL_CALL, so repeated identical
+    # summaries stay invisible to them, and budget stays at zero cost.
+    events, adapter = _capture()
+    for _ in range(6):
+        pathlayer_progress_summary.invoke(
+            {"completed": "c", "blocker": "b", "next_action": "n"},
+            config=adapter.as_config(),
+        )
+
+    assert len(events) == 6
+    assert all(e.kind is EventKind.PROGRESS_SUMMARY for e in events)
+    assert LoopDetector().evaluate(events).confidence == 0.0
+    assert RetryDetector().evaluate(events).confidence == 0.0
+    assert NoProgressDetector(coding_anchors()).evaluate(events).confidence == 0.0
+    assert BudgetDetector(max_cost_usd=5.0).evaluate(events).confidence == 0.0
+
+
+def test_progress_summary_survives_trace_round_trip(tmp_path: Path) -> None:
+    # VAL-1 compat: the new event kind serializes and reloads unchanged.
+    events, adapter = _capture()
+    pathlayer_progress_summary.invoke(
+        {"completed": "c", "blocker": "b", "next_action": "n"}, config=adapter.as_config()
+    )
+    trace = Trace(label="healthy", events=events)
+    path = tmp_path / "summary.json"
+    dump_trace(trace, path)
+    reloaded = load_trace(path)
+    assert reloaded.events == events
+    assert reloaded.events[0].kind is EventKind.PROGRESS_SUMMARY
 
 
 def test_val1_round_trip(tmp_path: Path) -> None:

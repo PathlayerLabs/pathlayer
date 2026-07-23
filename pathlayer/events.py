@@ -18,9 +18,32 @@ class EventKind(str, Enum):
     # tools. Action detectors (loop/retry/no_progress) ignore it via their
     # ``event_kinds`` filter so a reasoning agent is not mistaken for a loop.
     LLM_CALL = "llm_call"
+    # A structured progress summary the agent emitted through the Pathlayer
+    # summary tool (ACT-2, ``PROGRESS_SUMMARY_TOOL``). The three summary fields
+    # (``completed``/``blocker``/``next_action``) travel in ``args``. Action
+    # detectors (loop/retry/no_progress) ignore it via their ``event_kinds``
+    # filter, so forcing a summary never adds a fake stagnation step nor fools
+    # a repetition detector; ``cost_usd`` stays 0.0 so BudgetDetector is
+    # untouched too. Capture-only, exactly like every other event kind.
+    PROGRESS_SUMMARY = "progress_summary"
     # Resource / lifecycle events (class iii incidents). Detect-only in V1.
     SUBAGENT_SPAWN = "subagent_spawn"
     RUN_RESTART = "run_restart"
+
+
+# Stable name of the Pathlayer progress-summary tool (ACT-2). The adapter keys
+# on it to classify a captured tool call as ``EventKind.PROGRESS_SUMMARY``, and
+# the LangGraph gate keys on it to let a valid summary through. A constant (not
+# a string literal scattered across layers) so capture and enforcement can never
+# drift apart.
+PROGRESS_SUMMARY_TOOL = "pathlayer_progress_summary"
+
+# Synthetic, framework-agnostic action emitted by the ACT-2 gate whenever an
+# agent tries to run another tool while a progress summary is still owed. It is
+# deliberately a normal ``TOOL_CALL`` (not a new EventKind): the blocked attempt
+# is real no-progress evidence that Loop/Retry/NoProgress must observe so Policy
+# can escalate to STOP instead of the graph re-prompting forever.
+SUMMARY_BLOCKED_TOOL = "pathlayer_summary_blocked"
 
 
 @dataclass(slots=True)

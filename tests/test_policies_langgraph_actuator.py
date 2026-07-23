@@ -232,12 +232,14 @@ def test_apply_with_context_stop_still_drains() -> None:
     assert actuator.drain_warnings() == []
 
 
-@pytest.mark.parametrize("action", [Action.SUMMARIZE, Action.FALLBACK, Action.ESCALATE])
+@pytest.mark.parametrize("action", [Action.FALLBACK, Action.ESCALATE])
 def test_apply_with_context_reserved_tiers_are_noops(action: Action) -> None:
+    # SUMMARIZE is handled by ACT-2 (below); FALLBACK/ESCALATE stay reserved.
     actuator = LangGraphActuator()
     actuator.apply_with_context(_context(action))
     assert actuator.control.drain_requested is False
     assert actuator.drain_warnings() == []
+    assert actuator.summary_pending is False
 
 
 def test_attach_clears_buffered_warnings() -> None:
@@ -287,4 +289,303 @@ def test_concurrent_warn_and_drain_do_not_raise() -> None:
     for t in threads:
         t.join()
 
+    assert errors == []
+
+
+# --------------------------------------------------------------------------- #
+# ACT-2: SUMMARIZE arms a strict gate that forces a structured summary before
+# any other tool runs.
+# --------------------------------------------------------------------------- #
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+
+from pathlayer.events import PROGRESS_SUMMARY_TOOL, SUMMARY_BLOCKED_TOOL, ToolEvent  # noqa: E402
+from pathlayer.policies.langgraph_actuator import MODEL_ROUTE, TOOLS_ROUTE  # noqa: E402
+
+
+def _tool_call(name: str, args: dict[str, object], call_id: str) -> dict[str, object]:
+    return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
+
+
+def _summary_args(
+    completed: str = "wrote a guard clause",
+    blocker: str = "the parser still fails on empty input",
+    next_action: str = "add a regression test",
+) -> dict[str, object]:
+    return {"completed": completed, "blocker": blocker, "next_action": next_action}
+
+
+def _discard_event(_event: ToolEvent) -> None:
+    """No-op sink for gate tests that do not inspect refusal evidence."""
+
+
+def test_summarize_arms_gate_and_buffers_instruction() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE, signal_name="no_progress"))
+    # The gate is armed and never touches the drain control (SUMMARIZE never halts).
+    assert actuator.summary_pending is True
+    assert actuator.control.drain_requested is False
+    # A safe instruction was buffered for injection_node to deliver.
+    (text,) = actuator.drain_warnings()
+    assert PROGRESS_SUMMARY_TOOL in text
+    assert "no_progress" in text
+
+
+def test_summary_instruction_excludes_sensitive_fields() -> None:
+    # Same SEC-3 (#133) contract as WARN: the instruction names the signal but
+    # never leaks Signal.reason (raw tool error -> secrets/PII).
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(
+        _context(Action.SUMMARIZE, signal_name="retry", signal_reason=_SECRET_IN_REASON)
+    )
+    (text,) = actuator.drain_warnings()
+    assert "retry" in text
+    assert _SECRET_IN_REASON not in text
+    assert "hunter2" not in text
+
+
+def test_attach_disarms_the_gate() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    assert actuator.summary_pending is True
+    actuator.attach()
+    assert actuator.summary_pending is False
+
+
+def test_gate_is_passthrough_when_disarmed() -> None:
+    actuator = LangGraphActuator()
+    gate = actuator.summary_gate_node(_discard_event)
+    state = {"messages": [AIMessage(content="", tool_calls=[_tool_call("search", {}, "c1")])]}
+    assert gate(state) == {}
+
+
+def test_gate_blocks_a_normal_tool_and_answers_it() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    refusal_events: list[ToolEvent] = []
+    gate = actuator.summary_gate_node(refusal_events.append)
+    ai = AIMessage(content="", tool_calls=[_tool_call("search", {"q": "x"}, "c1")])
+    update = gate({"messages": [HumanMessage(content="go"), ai]})
+    # The blocked call is answered with a ToolMessage; the gate stays armed.
+    messages = update["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], ToolMessage)
+    assert messages[0].tool_call_id == "c1"
+    assert PROGRESS_SUMMARY_TOOL in messages[0].content
+    assert actuator.summary_pending is True
+    assert len(refusal_events) == 1
+    assert refusal_events[0].tool == SUMMARY_BLOCKED_TOOL
+    assert refusal_events[0].kind is EventKind.TOOL_CALL
+    assert refusal_events[0].args == {}
+    assert refusal_events[0].result == {"error": "progress summary required"}
+    # summary_route sends the (fully-answered) turn back to the model.
+    route = actuator.summary_route()
+    assert route({"messages": [ai, messages[0]]}) == MODEL_ROUTE
+
+
+def test_gate_lets_a_valid_summary_through_and_lifts() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    gate = actuator.summary_gate_node(_discard_event)
+    summary = actuator.summary_tool()
+    ai = AIMessage(
+        content="", tool_calls=[_tool_call(PROGRESS_SUMMARY_TOOL, _summary_args(), "c1")]
+    )
+    # A lone valid summary is left untouched (returns {}), so the tools node runs it.
+    assert gate({"messages": [ai]}) == {}
+    # Validation alone never lifts the gate: the tool must actually execute.
+    assert actuator.summary_pending is True
+    # And it routes to the tools node (unanswered summary call still pending).
+    assert actuator.summary_route()({"messages": [ai]}) == TOOLS_ROUTE
+    summary.invoke(_summary_args())
+    assert actuator.summary_pending is False
+
+
+def test_gate_keeps_only_the_summary_when_emitted_with_other_tools() -> None:
+    # Parallel tool calls in one AIMessage: only the summary passes; the sibling
+    # is dropped (re-issuable next turn), never executed.
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    gate = actuator.summary_gate_node(_discard_event)
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            _tool_call("search", {"q": "x"}, "c1"),
+            _tool_call(PROGRESS_SUMMARY_TOOL, _summary_args(), "c2"),
+        ],
+    )
+    update = gate({"messages": [ai]})
+    (kept,) = update["messages"]
+    assert isinstance(kept, AIMessage)
+    assert [c["name"] for c in kept.tool_calls] == [PROGRESS_SUMMARY_TOOL]
+    assert kept.id == ai.id  # same message, rewritten in place (add_messages replace)
+    assert actuator.summary_pending is True
+    actuator.summary_tool().invoke(_summary_args())
+    assert actuator.summary_pending is False
+
+
+def test_gate_keeps_blocking_on_an_invalid_summary() -> None:
+    # A summary attempt missing a field does NOT lift the gate: it is blocked
+    # like any other call and the gate stays armed.
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    gate = actuator.summary_gate_node(_discard_event)
+    bad = _summary_args()
+    del bad["next_action"]
+    ai = AIMessage(content="", tool_calls=[_tool_call(PROGRESS_SUMMARY_TOOL, bad, "c1")])
+    update = gate({"messages": [ai]})
+    (blocked,) = update["messages"]
+    assert isinstance(blocked, ToolMessage)
+    assert actuator.summary_pending is True
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_pending"),
+    [
+        ({}, False),
+        ({"messages": []}, True),
+        ({"messages": [HumanMessage(content="hi")]}, True),
+        ({"messages": [AIMessage(content="done, no tools")]}, True),
+        ({"other_key": 123}, False),
+        ("not a mapping", False),
+    ],
+)
+def test_gate_is_fail_open_on_unexpected_state(state: object, expected_pending: bool) -> None:
+    # Defensive by construction: any anomaly degrades to "let the agent proceed"
+    # ({}) and never raises inside the agent graph.
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    gate = actuator.summary_gate_node(_discard_event)
+    assert gate(state) == {}  # type: ignore[arg-type]
+    assert actuator.summary_pending is expected_pending
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "not a mapping",
+        {"messages": []},
+        {"messages": [HumanMessage(content="hi")]},
+    ],
+)
+def test_summary_route_disarms_on_uninterpretable_state(state: object) -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    route = actuator.summary_route()
+    assert route(state) == MODEL_ROUTE  # type: ignore[arg-type]
+    assert actuator.summary_pending is False
+
+
+def test_gate_ignores_tool_calls_without_an_id() -> None:
+    # A tool call carrying no id cannot be answered with a matching ToolMessage,
+    # so it is skipped: the gate produces no update and stays armed rather than
+    # emitting an orphan block message.
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    gate = actuator.summary_gate_node(_discard_event)
+    ai = AIMessage(content="", tool_calls=[{"name": "search", "args": {}, "id": None}])
+    assert gate({"messages": [ai]}) == {}
+    assert actuator.summary_pending is True
+    # And the route must NOT let that id-less call slip through to the tools node:
+    # while the gate is armed with no valid summary, it goes back to the model.
+    # (Without consulting the armed flag it would look "unanswered" and run,
+    # bypassing the strict gate.)
+    assert actuator.summary_route()({"messages": [ai]}) == MODEL_ROUTE
+
+
+def test_route_sends_armed_gate_without_valid_summary_back_to_model() -> None:
+    # Even a normal id-bearing call that has not yet been answered routes to the
+    # model while the gate is armed and no valid summary is present: the strict
+    # gate never runs a tool on an armed, unsummarized turn.
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    ai = AIMessage(content="", tool_calls=[_tool_call("search", {"q": "x"}, "c1")])
+    assert actuator.summary_route()({"messages": [ai]}) == MODEL_ROUTE
+    # Disarmed, the same unanswered call routes to the tools node as usual.
+    actuator.attach()
+    assert actuator.summary_route()({"messages": [ai]}) == TOOLS_ROUTE
+
+
+def test_route_ignores_old_answer_when_tool_call_id_is_reused() -> None:
+    # Only ToolMessages after the most recent AIMessage answer that turn. An old
+    # response with the same id must not make a new call look already executed.
+    actuator = LangGraphActuator()
+    old_ai = AIMessage(content="", tool_calls=[_tool_call("search", {}, "reused")])
+    old_answer = ToolMessage(content="old result", tool_call_id="reused")
+    new_ai = AIMessage(content="", tool_calls=[_tool_call("search", {}, "reused")])
+    assert actuator.summary_route()({"messages": [old_ai, old_answer, new_ai]}) == TOOLS_ROUTE
+
+
+def test_gate_fails_open_if_blocked_event_sink_raises() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    ai = AIMessage(content="", tool_calls=[_tool_call("search", {}, "c1")])
+
+    def broken_sink(_event: ToolEvent) -> None:
+        raise RuntimeError("pipeline unavailable")
+
+    assert actuator.summary_gate_node(broken_sink)({"messages": [ai]}) == {}
+    assert actuator.summary_pending is False
+    assert actuator.summary_route()({"messages": [ai]}) == TOOLS_ROUTE
+
+
+def test_gate_and_route_fail_open_if_an_internal_helper_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Both run inside the agent graph: if any internal step raises unexpectedly,
+    # they must degrade to "let the agent proceed", never propagate.
+    import pathlayer.policies.langgraph_actuator as mod
+
+    def _boom(_messages: object) -> object:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(mod, "_last_ai_message", _boom)
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    ai = AIMessage(content="", tool_calls=[_tool_call("search", {}, "c1")])
+    assert actuator.summary_gate_node(_discard_event)({"messages": [ai]}) == {}
+    assert actuator.summary_pending is False
+    assert actuator.summary_route()({"messages": [ai]}) == TOOLS_ROUTE
+
+
+def test_summary_tool_has_the_stable_name_and_lifts_only_when_executed() -> None:
+    actuator = LangGraphActuator()
+    actuator.apply_with_context(_context(Action.SUMMARIZE))
+    summary = actuator.summary_tool()
+    assert summary.name == PROGRESS_SUMMARY_TOOL
+    assert actuator.summary_pending is True
+    result = summary.invoke(_summary_args())
+    assert isinstance(result, str)
+    assert actuator.summary_pending is False
+
+
+def test_gate_concurrent_arm_and_evaluate_do_not_raise() -> None:
+    actuator = LangGraphActuator()
+    gate = actuator.summary_gate_node(_discard_event)
+    ai = AIMessage(content="", tool_calls=[_tool_call("search", {}, "c1")])
+    errors: list[BaseException] = []
+
+    def arm() -> None:
+        for _ in range(300):
+            try:
+                actuator.apply_with_context(_context(Action.SUMMARIZE))
+            except BaseException as exc:  # pragma: no cover - failure path only
+                errors.append(exc)
+
+    def evaluate() -> None:
+        for _ in range(300):
+            try:
+                gate({"messages": [ai]})
+            except BaseException as exc:  # pragma: no cover - failure path only
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=arm),
+        threading.Thread(target=evaluate),
+        threading.Thread(target=evaluate),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     assert errors == []

@@ -16,6 +16,7 @@ use; ``wire()`` is additive, not a replacement.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from pathlayer.adapters.base import EventSink
@@ -46,11 +47,12 @@ def wire(
     for no reason -- harmless for the idempotent ``RunControl.request_drain``,
     but not a contract a generic ``Actuator`` should have to assume.
 
-    Precondition: the returned sink must be called sequentially. ``Pipeline``
-    has no internal lock, by design (it is a pure, single-threaded decision
-    engine); a concurrent adapter is responsible for its own serialization
-    around calling the sink, the way :class:`~pathlayer.adapters.langgraph.LangGraphAdapter`
-    already guards its own callback-to-sink path with a ``threading.Lock``.
+    The returned sink serializes calls with one private lock. ``Pipeline`` has
+    no internal lock, by design (it is a pure, single-threaded decision engine),
+    but ACT-2 gives a run two event producers: adapter capture and the summary
+    gate's synthetic refusal events. Passing this *same* sink to both keeps
+    ``Pipeline.process`` and the transition-local ``last_applied`` state safe
+    even when framework callbacks arrive from different threads.
 
     Raises ``ValueError`` if ``pipeline.dry_run`` is ``True``: a dry-run
     pipeline's ``process()`` always returns ``Action.NONE`` (the action it
@@ -72,32 +74,34 @@ def wire(
         )
     log = logger if logger is not None else logging.getLogger(__name__)
     last_applied = Action.NONE
+    sink_lock = threading.Lock()
 
     def sink(event: ToolEvent) -> None:
         nonlocal last_applied
-        action = pipeline.process(event)
-        if action is last_applied:
-            return
-        # Update on every change, including a de-escalation to NONE (mirrors
-        # Pipeline._observe/_last_would_be): otherwise a later re-escalation
-        # to the *same* tier after a NONE in between (e.g. WARN -> NONE ->
-        # WARN) would be mistaken for "unchanged" and never re-applied.
-        last_applied = action
-        if action is Action.NONE:
-            return
-        try:
-            # ACT-1: hand the actuator the full context of this tick. The default
-            # Actuator.apply_with_context delegates to apply(action, post_mortem),
-            # so a legacy actuator behaves exactly as before. The pipeline builds
-            # the context for every emitted non-NONE action, so it is invariably
-            # present here (an AssertionError would be caught and logged like any
-            # actuator failure, keeping capture fail-open).
-            context = pipeline.actuation_context
-            assert context is not None
-            actuator.apply_with_context(context)
-        except Exception:
-            log.exception(
-                "actuator.apply failed for action=%s; event capture continues", action.name
-            )
+        with sink_lock:
+            action = pipeline.process(event)
+            if action is last_applied:
+                return
+            # Update on every change, including a de-escalation to NONE (mirrors
+            # Pipeline._observe/_last_would_be): otherwise a later re-escalation
+            # to the *same* tier after a NONE in between (e.g. WARN -> NONE ->
+            # WARN) would be mistaken for "unchanged" and never re-applied.
+            last_applied = action
+            if action is Action.NONE:
+                return
+            try:
+                # ACT-1: hand the actuator the full context of this tick. The default
+                # Actuator.apply_with_context delegates to apply(action, post_mortem),
+                # so a legacy actuator behaves exactly as before. The pipeline builds
+                # the context for every emitted non-NONE action, so it is invariably
+                # present here (an AssertionError would be caught and logged like any
+                # actuator failure, keeping capture fail-open).
+                context = pipeline.actuation_context
+                assert context is not None
+                actuator.apply_with_context(context)
+            except Exception:
+                log.exception(
+                    "actuator.apply failed for action=%s; event capture continues", action.name
+                )
 
     return sink

@@ -37,6 +37,19 @@ def test_event_to_dict_omits_defaults() -> None:
     assert data == {"tool": "list_dir", "args": {"path": "src"}}
 
 
+def test_progress_summary_event_round_trips() -> None:
+    # ACT-2: the PROGRESS_SUMMARY kind serializes via the "kind" field (it is not
+    # the TOOL_CALL default) and rebuilds identically.
+    event = ToolEvent(
+        tool="pathlayer_progress_summary",
+        args={"completed": "c", "blocker": "b", "next_action": "n"},
+        kind=EventKind.PROGRESS_SUMMARY,
+    )
+    data = event_to_dict(event)
+    assert data["kind"] == "progress_summary"
+    assert event_from_dict(data) == event
+
+
 def test_event_to_dict_includes_non_default_fields() -> None:
     event = ToolEvent(
         tool="spawn",

@@ -749,6 +749,24 @@ def build_pipeline(
             "which an ACT-1 actuator turns into repeated context injections. "
             "Set escalate_ticks / deescalate_ticks > 1 to debounce."
         )
+    # ACT-2 anti-noise guard: same rationale as WARN above. An enabled SUMMARIZE
+    # tier with no hysteresis re-arms the strict gate on every crossing of the
+    # summarize threshold, forcing the agent to re-summarize on a merely flapping
+    # score. Warn -- don't fail -- so a deliberate no-debounce setup stays
+    # possible but never silent. Tied to the gate mechanism, not a tuned
+    # threshold (no data needed).
+    if (
+        Action.SUMMARIZE in tier_thresholds
+        and config.policy.escalate_ticks == 1
+        and config.policy.deescalate_ticks == 1
+    ):
+        resolved_logger.warning(
+            "build_pipeline: the SUMMARIZE tier is enabled with no hysteresis "
+            "(policy.escalate_ticks == policy.deescalate_ticks == 1): a fused score "
+            "flapping across the summarize threshold re-arms the ACT-2 strict gate on "
+            "every crossing, forcing the agent to re-summarize repeatedly. "
+            "Set escalate_ticks / deescalate_ticks > 1 to debounce."
+        )
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
     progress_anchors = loop_suppression_anchors() if suppressions else None

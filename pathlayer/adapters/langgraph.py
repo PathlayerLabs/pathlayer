@@ -46,7 +46,7 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from pathlayer.adapters.base import Adapter, EventSink
-from pathlayer.events import EventKind, ToolEvent
+from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
 
 # Bound on un-paired ``on_tool_start`` calls held in ``_pending``. A start that
@@ -78,11 +78,19 @@ def _coerce_result(output: Any) -> Any:
 
 @dataclass(slots=True)
 class _Pending:
-    """A tool call seen at ``on_tool_start``, awaiting its end/error."""
+    """A tool call seen at ``on_tool_start``, awaiting its end/error.
+
+    ``kind`` is classified once, at start, from the tool name: the Pathlayer
+    summary tool (``PROGRESS_SUMMARY_TOOL``, ACT-2) is captured as
+    ``EventKind.PROGRESS_SUMMARY`` so the detectors ignore it; every other tool
+    is a plain ``TOOL_CALL``. This is pure capture-time classification -- no tier
+    decision descends into the adapter.
+    """
 
     tool: str
     args: dict[str, Any]
     parent_run_id: str | None
+    kind: EventKind = EventKind.TOOL_CALL
 
 
 @dataclass(slots=True)
@@ -184,8 +192,11 @@ class LangGraphAdapter(Adapter):
     def _record_start(
         self, run_id: str, parent_run_id: str | None, tool: str, args: dict[str, Any]
     ) -> None:
+        kind = EventKind.PROGRESS_SUMMARY if tool == PROGRESS_SUMMARY_TOOL else EventKind.TOOL_CALL
         with self._lock:
-            self._pending[run_id] = _Pending(tool=tool, args=args, parent_run_id=parent_run_id)
+            self._pending[run_id] = _Pending(
+                tool=tool, args=args, parent_run_id=parent_run_id, kind=kind
+            )
             # Bound the map: drop the oldest never-paired start if we exceed the cap.
             if len(self._pending) > _MAX_PENDING:
                 self._pending.popitem(last=False)
@@ -219,6 +230,7 @@ class LangGraphAdapter(Adapter):
                     args=pending.args,
                     result=result,
                     ts=ts,
+                    kind=pending.kind,
                     run_id=run_id,
                     metadata=metadata,
                 )

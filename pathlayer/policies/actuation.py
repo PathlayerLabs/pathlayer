@@ -15,12 +15,61 @@ adapters: capture, never decide). It is frozen/immutable on purpose.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from pathlayer.detectors.base import Signal
 from pathlayer.events import EventKind
 from pathlayer.policies.actions import Action
 from pathlayer.postmortem import PostMortem
+
+# The exact, closed set of fields a valid progress summary carries (ACT-2). Any
+# other key the model passes to the summary tool is ignored, and all three must
+# be present and non-blank for the summary to count -- see
+# :meth:`ProgressSummary.from_tool_args`.
+_SUMMARY_FIELDS: tuple[str, ...] = ("completed", "blocker", "next_action")
+
+
+@dataclass(slots=True, frozen=True)
+class ProgressSummary:
+    """A validated structured progress summary (ACT-2).
+
+    The three fields are exactly what the Pathlayer summary tool
+    (``PROGRESS_SUMMARY_TOOL``) asks the agent for: what it ``completed``, what
+    is ``blocker``\\ ing it, and its ``next_action``. Immutable/frozen, like
+    :class:`ActuationContext`.
+
+    This is the contract the LangGraph gate validates a candidate summary
+    against before lifting: a summary with any field missing or blank does
+    **not** count, so the gate keeps blocking. Only the gate (in ``policies/``)
+    uses it -- the adapter captures the raw ``args`` mapping as-is and never
+    validates (capture never decides).
+    """
+
+    completed: str
+    blocker: str
+    next_action: str
+
+    @classmethod
+    def from_tool_args(cls, args: Any) -> ProgressSummary | None:
+        """Validate raw summary-tool args into a summary, else ``None``.
+
+        Returns ``None`` -- never raises -- for anything that is not a mapping
+        with all three fields present as non-blank strings. This is called from
+        inside the agent graph (the gate), so it must be fail-open by
+        construction: an unparseable summary is simply "no valid summary yet",
+        which keeps the gate closed rather than crashing the run.
+        """
+        if not isinstance(args, Mapping):
+            return None
+        values: dict[str, str] = {}
+        for field_name in _SUMMARY_FIELDS:
+            value = args.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                return None
+            values[field_name] = value.strip()
+        return cls(**values)
 
 
 @dataclass(slots=True, frozen=True)

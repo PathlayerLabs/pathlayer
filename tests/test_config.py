@@ -542,6 +542,28 @@ def test_build_pipeline_does_not_warn_about_warn_tier_when_disabled(
     assert "WARN tier is enabled with no hysteresis" not in caplog.text
 
 
+def test_build_pipeline_warns_when_summarize_tier_enabled_without_hysteresis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # ACT-2: same anti-noise guard as WARN. An enabled SUMMARIZE tier with no
+    # hysteresis re-arms the strict gate on every threshold crossing.
+    config = PathlayerConfig.from_mapping({"policy": {"tier_thresholds": {"summarize": 0.4}}})
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "SUMMARIZE tier is enabled with no hysteresis" in caplog.text
+
+
+def test_build_pipeline_does_not_warn_when_summarize_tier_has_hysteresis(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = PathlayerConfig.from_mapping(
+        {"policy": {"tier_thresholds": {"summarize": 0.4}, "escalate_ticks": 2}}
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "SUMMARIZE tier is enabled with no hysteresis" not in caplog.text
+
+
 def test_build_pipeline_warns_when_loop_enabled_without_no_progress(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

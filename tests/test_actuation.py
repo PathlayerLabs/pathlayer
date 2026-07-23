@@ -12,6 +12,8 @@ Framework-agnostic (no LangGraph). Covers:
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
@@ -21,7 +23,7 @@ from pathlayer.detectors.base import Detector, Signal
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
-from pathlayer.policies.actuation import ActuationContext, EventSnapshot
+from pathlayer.policies.actuation import ActuationContext, EventSnapshot, ProgressSummary
 from pathlayer.policies.actuators import Actuator
 from pathlayer.policies.base import HysteresisState, Policy
 from pathlayer.policies.wiring import wire
@@ -38,6 +40,26 @@ class _FixedLoopDetector(Detector):
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
         return Signal(name="loop", confidence=self._confidence, reason="repeated sequence")
+
+
+class _ConcurrencyProbeDetector(Detector):
+    """Records whether two ``evaluate`` calls overlap inside ``wire``."""
+
+    name = "probe"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        with self._lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        time.sleep(0.01)  # release the GIL so an unlocked sink would overlap
+        with self._lock:
+            self._active -= 1
+        return Signal(name=self.name, confidence=0.0)
 
 
 class _ScriptedPolicy(Policy):
@@ -160,3 +182,59 @@ def test_wire_routes_context_to_context_aware_actuator() -> None:
     assert context.fused == pytest.approx(0.5)
     assert context.event.tool == "b"
     assert context.event.index == 1
+
+
+def test_wire_serializes_concurrent_event_producers() -> None:
+    # ACT-2 sends both adapter-captured events and synthetic gate refusals into
+    # one sink. Pipeline is single-threaded by contract, so wire() must make that
+    # shared sink the serialization boundary for both producers.
+    detector = _ConcurrencyProbeDetector()
+    pipeline = Pipeline([detector], Policy())
+    sink = wire(pipeline, _RecordingActuator())
+    barrier = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    def emit(index: int) -> None:
+        try:
+            barrier.wait()
+            sink(ToolEvent(tool=f"tool_{index}"))
+        except BaseException as exc:  # pragma: no cover - assertion surface
+            errors.append(exc)
+
+    threads = [threading.Thread(target=emit, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert detector.max_active == 1
+
+
+# --------------------------------------------------------------------------- #
+# ACT-2: ProgressSummary validation (the closed 3-field contract the gate uses).
+# --------------------------------------------------------------------------- #
+
+
+def test_progress_summary_parses_valid_args_and_strips() -> None:
+    summary = ProgressSummary.from_tool_args(
+        {"completed": "  did X ", "blocker": "Y", "next_action": "Z", "extra": "ignored"}
+    )
+    assert summary == ProgressSummary(completed="did X", blocker="Y", next_action="Z")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"completed": "a", "blocker": "b"},  # missing next_action
+        {"completed": "a", "blocker": "b", "next_action": ""},  # blank
+        {"completed": "a", "blocker": "b", "next_action": "   "},  # whitespace-only
+        {"completed": "a", "blocker": "b", "next_action": 3},  # wrong type
+        {},  # empty
+        "not a mapping",  # non-mapping
+        None,
+    ],
+)
+def test_progress_summary_rejects_incomplete_args(args: object) -> None:
+    # Fail-open contract: never raises, returns None so the gate stays closed.
+    assert ProgressSummary.from_tool_args(args) is None

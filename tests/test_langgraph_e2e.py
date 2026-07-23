@@ -28,6 +28,7 @@ Skipped entirely unless the optional ``langchain_core`` dependency is present.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated, TypedDict
 from uuid import uuid4
 
@@ -35,7 +36,13 @@ import pytest
 
 pytest.importorskip("langchain_core")
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langchain_core.tools import tool
 
@@ -60,9 +67,10 @@ from pathlayer.detectors.progress import (
     coding_anchors,
 )
 from pathlayer.detectors.retry import RetryDetector
-from pathlayer.events import EventKind, ToolEvent
+from pathlayer.events import SUMMARY_BLOCKED_TOOL, EventKind, ToolEvent
 from pathlayer.policies import Action, Policy
 from pathlayer.policies.base import PolicyConfig
+from pathlayer.validation.traces import load_trace
 
 
 class _GraphState(TypedDict):
@@ -628,3 +636,331 @@ def test_no_progress_detector_step_matches_batch_on_real_captured_events(
 ) -> None:
     detector = NoProgressDetector(coding_anchors())
     _assert_detector_step_matches_batch_on_real_events(detector, events)
+
+
+# --------------------------------------------------------------------------- #
+# ACT-2: the strict summary gate, proven inside a real compiled StateGraph and
+# at the policy level (escalation backstop + no false positive).
+# --------------------------------------------------------------------------- #
+
+_TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
+
+
+def test_act2_strict_gate_blocks_then_admits_summary_in_a_real_stategraph() -> None:
+    # End to end in a compiled StateGraph (model -> gate -> tools): while armed,
+    # the gate blocks a normal tool (it never executes -> never captured) and
+    # re-prompts; a valid summary lifts it, is captured as PROGRESS_SUMMARY, and
+    # the next normal tool then runs.
+    pytest.importorskip("langgraph")
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from pathlayer.policies.actuation import ActuationContext, EventSnapshot
+    from pathlayer.policies.langgraph_actuator import (
+        MODEL_ROUTE,
+        TOOLS_ROUTE,
+        LangGraphActuator,
+    )
+
+    actuator = LangGraphActuator()
+    actuator.attach()
+    # Simulate the pipeline having arbitrated SUMMARIZE (arms the gate).
+    actuator.apply_with_context(
+        ActuationContext(
+            action=Action.SUMMARIZE,
+            fused=0.6,
+            reason="no_progress: flat",
+            signals=(Signal(name="no_progress", confidence=0.6),),
+            event=EventSnapshot(
+                tool="edit_file", kind=EventKind.TOOL_CALL, ts=1.0, index=4, cost_usd=0.0
+            ),
+            post_mortem=None,
+        )
+    )
+    summary = actuator.summary_tool()
+    events: list[ToolEvent] = []
+
+    turns = {"n": 0}
+
+    def model(state: _WarnState) -> dict[str, list[BaseMessage]]:
+        turns["n"] += 1
+        n = turns["n"]
+        if n == 1:  # pre-summary: a normal tool the gate must block
+            return {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "search",
+                                "args": {"query": "x"},
+                                "id": "s1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            }
+        if n == 2:  # comply with a valid summary
+            return {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "pathlayer_progress_summary",
+                                "args": {"completed": "a", "blocker": "b", "next_action": "c"},
+                                "id": "sum1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            }
+        if n == 3:  # now unblocked: the normal tool runs
+            return {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "search",
+                                "args": {"query": "x"},
+                                "id": "s2",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            }
+        return {"messages": [AIMessage(content="done")]}
+
+    def after_model(state: _WarnState) -> str:
+        last = state["messages"][-1]
+        return "gate" if isinstance(last, AIMessage) and last.tool_calls else END
+
+    builder = StateGraph(_WarnState)
+    builder.add_node("model", model)
+    builder.add_node("gate", actuator.summary_gate_node(events.append))
+    builder.add_node("tools", ToolNode([search, summary]))
+    builder.add_edge(START, "model")
+    builder.add_conditional_edges("model", after_model, {"gate": "gate", END: END})
+    builder.add_conditional_edges(
+        "gate", actuator.summary_route(), {TOOLS_ROUTE: "tools", MODEL_ROUTE: "model"}
+    )
+    builder.add_edge("tools", "model")
+    graph = builder.compile()
+
+    adapter = LangGraphAdapter(events.append)
+    adapter.attach()
+    result = graph.invoke({"messages": [HumanMessage(content="go")]}, config=adapter.as_config())
+    adapter.detach()
+
+    captured = [(e.tool, e.kind) for e in events]
+    # The summary ran and was captured as PROGRESS_SUMMARY...
+    assert ("pathlayer_progress_summary", EventKind.PROGRESS_SUMMARY) in captured
+    # ...and exactly one search ran: the post-summary one. The pre-summary search
+    # was blocked, so it never executed and was never captured.
+    assert captured.count(("search", EventKind.TOOL_CALL)) == 1
+    assert captured.count((SUMMARY_BLOCKED_TOOL, EventKind.TOOL_CALL)) == 1
+    # The gate lifted once a valid summary passed.
+    assert actuator.summary_pending is False
+    # The blocked turn-1 call was answered with the block instruction.
+    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert any("pathlayer_progress_summary" in m.content for m in tool_msgs)
+
+
+def test_act2_summarize_escalates_to_stop_on_continued_churn() -> None:
+    # Real StateGraph refusal path: a model keeps requesting a normal tool
+    # instead of summarizing. Each rejected turn emits safe synthetic evidence
+    # through wire(pipeline, actuator); RetryDetector raises SUMMARIZE then STOP,
+    # and RunControl drains before the graph can hit its recursion limit.
+    pytest.importorskip("langgraph")
+    from langgraph.errors import GraphDrained
+    from langgraph.graph import START, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from pathlayer.policies.actuation import ActuationContext, EventSnapshot
+    from pathlayer.policies.langgraph_actuator import (
+        MODEL_ROUTE,
+        TOOLS_ROUTE,
+        LangGraphActuator,
+    )
+    from pathlayer.policies.wiring import wire
+
+    actuator = LangGraphActuator()
+    actuator.attach()
+    actuator.apply_with_context(
+        ActuationContext(
+            action=Action.SUMMARIZE,
+            fused=0.6,
+            reason="no_progress: flat",
+            signals=(Signal(name="no_progress", confidence=0.6),),
+            event=EventSnapshot(
+                tool="edit_file", kind=EventKind.TOOL_CALL, ts=1.0, index=4, cost_usd=0.0
+            ),
+            post_mortem=None,
+        )
+    )
+    policy = Policy(PolicyConfig(stop_threshold=0.9, tier_thresholds={Action.SUMMARIZE: 0.5}))
+    pipeline = Pipeline([RetryDetector(threshold=3)], policy)
+    pipeline_sink = wire(pipeline, actuator)
+    events: list[ToolEvent] = []
+
+    def sink(event: ToolEvent) -> None:
+        events.append(event)
+        pipeline_sink(event)
+
+    turns = {"n": 0}
+
+    def refusing_model(_state: _WarnState) -> dict[str, list[BaseMessage]]:
+        turns["n"] += 1
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "search",
+                            "args": {"query": "ignore summary"},
+                            "id": f"blocked-{turns['n']}",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+
+    builder = StateGraph(_WarnState)
+    builder.add_node("model", refusing_model)
+    builder.add_node("gate", actuator.summary_gate_node(sink))
+    builder.add_node("tools", ToolNode([search, actuator.summary_tool()]))
+    builder.add_edge(START, "model")
+    builder.add_edge("model", "gate")
+    builder.add_conditional_edges(
+        "gate", actuator.summary_route(), {TOOLS_ROUTE: "tools", MODEL_ROUTE: "model"}
+    )
+    builder.add_edge("tools", "model")
+    graph = builder.compile()
+
+    with pytest.raises(GraphDrained):
+        graph.invoke(
+            {"messages": [HumanMessage(content="go")]},
+            control=actuator.control,
+            config={"recursion_limit": 20},
+        )
+
+    assert pipeline.stopped
+    assert actuator.control.drain_requested
+    assert turns["n"] == 3
+    assert [event.tool for event in events] == [SUMMARY_BLOCKED_TOOL] * 3
+
+
+def test_act2_summarize_then_stop_on_failing_edit_churn_trace() -> None:
+    # DEMO-2 transferable: on the flagship failing_edit_churn shape, a graded
+    # policy passes through SUMMARIZE before STOP -- warn -> summarize -> stop is
+    # reachable on the exact trace DEMO-2 will use.
+    trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
+    policy = Policy(PolicyConfig(stop_threshold=0.9, tier_thresholds={Action.SUMMARIZE: 0.5}))
+    pipeline = Pipeline([NoProgressDetector(coding_anchors())], policy)
+    actions = pipeline.run(trace.events)
+    assert Action.SUMMARIZE in actions
+    assert pipeline.stopped
+    assert actions.index(Action.SUMMARIZE) < actions.index(Action.STOP)
+
+
+def test_act2_no_summarize_below_threshold_on_healthy_progress() -> None:
+    # Negative counterpart: genuine progress never crosses the summarize
+    # threshold, so the gate is never armed (no false positive).
+    def run(adapter: LangGraphAdapter) -> None:
+        for failed in (3, 2, 1, 0):
+            edit_file.invoke({"patch": f"fix {failed}"}, config=adapter.as_config())
+            run_tests_improving.invoke({"failed": failed}, config=adapter.as_config())
+
+    events = _capture(run)
+    policy = Policy(PolicyConfig(stop_threshold=0.9, tier_thresholds={Action.SUMMARIZE: 0.5}))
+    pipeline = Pipeline([NoProgressDetector(coding_anchors())], policy)
+    actions = pipeline.run(events)
+    assert Action.SUMMARIZE not in actions
+    assert Action.STOP not in actions
+    assert not pipeline.stopped
+
+
+# Calibration retained for DEMO-2 (see the ACT-2 gameplan step 5): the raw
+# exploratory profile ``summarize=0.5`` with *no* hysteresis
+# (escalate_ticks == 1) fires SUMMARIZE on a genuinely-progressing healthy trace
+# (``slow_but_real_progress``). Adding a two-tick escalation debounce
+# (escalate_ticks=2) at the same threshold clears every forced SUMMARIZE on the
+# healthy corpus while still driving warn->summarize->stop on the flagship
+# no-progress trace. These are demo/tuning values, never zero-config defaults.
+_DEMO2_STOP = 0.9
+_DEMO2_SUMMARIZE = 0.5
+_DEMO2_ESCALATE_TICKS = 2
+
+
+def _demo2_policy() -> Policy:
+    return Policy(
+        PolicyConfig(
+            stop_threshold=_DEMO2_STOP,
+            tier_thresholds={Action.SUMMARIZE: _DEMO2_SUMMARIZE},
+            escalate_ticks=_DEMO2_ESCALATE_TICKS,
+        )
+    )
+
+
+def test_act2_demo2_calibration_forces_no_summarize_on_healthy_corpus() -> None:
+    # Gate: sweep every healthy/ trace under the retained DEMO-2 config and
+    # assert not a single one is ever forced to SUMMARIZE. A false positive here
+    # (stopping/summarizing a healthy agent) is worse than no Pathlayer at all.
+    healthy_dir = _TRACES_DIR / "healthy"
+    traces = sorted(healthy_dir.glob("*.json"))
+    assert traces, "expected a non-empty healthy corpus to calibrate against"
+
+    forced: dict[str, int] = {}
+    for path in traces:
+        trace = load_trace(path)
+        pipeline = Pipeline([NoProgressDetector(coding_anchors())], _demo2_policy())
+        actions = pipeline.run(trace.events)
+        count = sum(1 for action in actions if action is Action.SUMMARIZE)
+        if count:
+            forced[path.stem] = count
+    assert forced == {}, f"DEMO-2 config forced SUMMARIZE on healthy traces: {forced}"
+
+
+def test_act2_calibration_baseline_no_hysteresis_would_false_positive() -> None:
+    # Negative baseline that makes the calibration non-tautological: WITHOUT the
+    # two-tick debounce (escalate_ticks == 1), the same summarize threshold
+    # forces SUMMARIZE on a genuinely-progressing healthy trace
+    # (slow_but_real_progress). This is the false positive the retained DEMO-2
+    # hysteresis (test above) exists to suppress -- proving both directions per
+    # the "no threshold without a trace covering both senses" guardrail.
+    trace = load_trace(_TRACES_DIR / "healthy" / "slow_but_real_progress.json")
+    naive = Policy(
+        PolicyConfig(
+            stop_threshold=_DEMO2_STOP,
+            tier_thresholds={Action.SUMMARIZE: _DEMO2_SUMMARIZE},
+            escalate_ticks=1,
+        )
+    )
+    pipeline = Pipeline([NoProgressDetector(coding_anchors())], naive)
+    actions = pipeline.run(trace.events)
+    assert Action.SUMMARIZE in actions
+
+    # The retained DEMO-2 config (escalate_ticks=2) silences that exact trace.
+    debounced = Pipeline([NoProgressDetector(coding_anchors())], _demo2_policy())
+    assert Action.SUMMARIZE not in debounced.run(trace.events)
+
+
+def test_act2_demo2_calibration_keeps_the_positive_scenario() -> None:
+    # The calibration that silences the healthy corpus does not neuter the
+    # positive scenario: the same DEMO-2 config still escalates to SUMMARIZE on
+    # the flagship failing_edit_churn trace. The two-tick debounce trades
+    # detection latency for the zero false positives asserted above, so on this
+    # short 12-event fixture the escalation to STOP lands past the trace's end;
+    # that STOP backstop (the gate is never the only exit) is proven on
+    # unthrottled runs by test_act2_summarize_escalates_to_stop_on_continued_churn
+    # and test_act2_summarize_then_stop_on_failing_edit_churn_trace.
+    trace = load_trace(_TRACES_DIR / "no_progress" / "failing_edit_churn.json")
+    pipeline = Pipeline([NoProgressDetector(coding_anchors())], _demo2_policy())
+    actions = pipeline.run(trace.events)
+    assert Action.SUMMARIZE in actions
