@@ -1,12 +1,14 @@
 """Smoke tests: the skeleton imports and the default policy is inert."""
 
+from importlib.metadata import version
+
 from pathlayer import __version__
 from pathlayer.detectors.base import Signal
 from pathlayer.policies import Action, Policy
 
 
 def test_version() -> None:
-    assert __version__
+    assert __version__ == version("pathlayer")
 
 
 def test_default_policy_is_inert() -> None:

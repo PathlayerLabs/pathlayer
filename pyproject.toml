@@ -1,13 +1,30 @@
 [project]
 name = "pathlayer"
-version = "0.0.1"
+version = "0.1.0"
 description = "Runtime guardrail layer for AI agents: detect loops, retries, cost explosions and lack of progress, and intervene during execution."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Pathlayer" }]
 keywords = ["ai", "agents", "guardrails", "circuit-breaker", "observability", "reliability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Kropemann/Pathlayer"
+Repository = "https://github.com/Kropemann/Pathlayer"
+Issues = "https://github.com/Kropemann/Pathlayer/issues"
 
 [project.optional-dependencies]
 # Optional framework integration: the LangGraph/LangChain capture adapter
@@ -27,7 +44,8 @@ langgraph = [
 # Optional YAML config support (pathlayer.config). The core reads JSON with the
 # stdlib; PyYAML is only needed to load a .yaml config and is imported lazily.
 yaml = [
-    "pyyaml>=6",
+    # 6.0 cannot build on Python 3.12 (missing Cython build_ext support).
+    "pyyaml>=6.0.1",
 ]
 dev = [
     "pytest>=8",
@@ -38,6 +56,8 @@ dev = [
     "ruff==0.15.17",
     "mypy>=1.11",
     "types-PyYAML>=6",
+    "packaging>=24",
+    "tomli>=2; python_version < '3.11'",
     "pre-commit>=3.8",
     # Bring in the LangGraph adapter deps so the smoke test runs in dev/CI.
     "pathlayer[langgraph]",
@@ -46,8 +66,13 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+# Keep source releases deterministic and free of local-only material. Hatchling
+# always adds pyproject.toml, .gitignore, the declared README and license files.
+only-include = ["pathlayer", "README.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pathlayer"]

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -17,8 +18,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -34,3 +35,187 @@ jobs:
         run: mypy
       - name: Tests
         run: pytest
+
+  package-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build release artifacts
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine uv
+          bash scripts/build_dist.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  package-wheel:
+    needs: package-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Test core wheel outside checkout
+        run: |
+          python -m venv .package-venv
+          .package-venv/bin/python -m pip install --upgrade pip
+          .package-venv/bin/pip install --no-deps dist/*.whl
+          smoke_dir="$(mktemp -d)"
+          (
+            cd "$smoke_dir"
+            "$GITHUB_WORKSPACE/.package-venv/bin/python" \
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+          )
+          .package-venv/bin/pip check
+
+  package-sdist:
+    needs: package-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Test source distribution outside checkout
+        run: |
+          python -m venv .package-venv
+          .package-venv/bin/python -m pip install --upgrade pip
+          .package-venv/bin/pip install --no-deps dist/*.tar.gz
+          smoke_dir="$(mktemp -d)"
+          (
+            cd "$smoke_dir"
+            "$GITHUB_WORKSPACE/.package-venv/bin/python" \
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+          )
+          .package-venv/bin/pip check
+
+  package-extras:
+    needs: package-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            resolution: lowest-direct
+            mode: lower-bounds
+            extra: yaml
+          - python-version: "3.10"
+            resolution: lowest-direct
+            mode: lower-bounds
+            extra: langgraph
+          - python-version: "3.12"
+            resolution: highest
+            mode: wheel-metadata
+            extra: yaml
+          - python-version: "3.12"
+            resolution: highest
+            mode: wheel-metadata
+            extra: langgraph
+          - python-version: "3.12"
+            resolution: highest
+            mode: wheel-metadata
+            extra: all
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Test optional dependency bounds from wheel
+        run: |
+          python -m pip install --upgrade pip uv
+          python -m venv .package-venv
+          wheel="$(realpath dist/*.whl)"
+          if [ "${{ matrix.mode }}" = "wheel-metadata" ]; then
+            extra="${{ matrix.extra }}"
+            if [ "$extra" = "all" ]; then
+              extra="yaml,langgraph"
+            fi
+            uv pip install \
+              --python .package-venv/bin/python \
+              --resolution "${{ matrix.resolution }}" \
+              "${wheel}[${extra}]"
+          elif [ "${{ matrix.extra }}" = "yaml" ]; then
+            uv pip install \
+              --python .package-venv/bin/python \
+              --resolution "${{ matrix.resolution }}" \
+              "pyyaml>=6.0.1"
+            uv pip install \
+              --python .package-venv/bin/python \
+              --no-deps \
+              "$wheel"
+          else
+            uv pip install \
+              --python .package-venv/bin/python \
+              --resolution "${{ matrix.resolution }}" \
+              "langgraph>=1.2,<2" \
+              "langchain-core>=1,<2"
+            uv pip install \
+              --python .package-venv/bin/python \
+              --no-deps \
+              "$wheel"
+          fi
+          smoke_dir="$(mktemp -d)"
+          (
+            cd "$smoke_dir"
+            "$GITHUB_WORKSPACE/.package-venv/bin/python" \
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
+              --extras "${{ matrix.extra }}"
+          )
+          .package-venv/bin/pip check
+
+  package-gate:
+    if: always()
+    needs:
+      - test
+      - package-build
+      - package-wheel
+      - package-sdist
+      - package-extras
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every test and packaging job
+        env:
+          RESULTS: >-
+            ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          results = json.loads(os.environ["RESULTS"])
+          failed = {
+              name: details["result"]
+              for name, details in results.items()
+              if details["result"] != "success"
+          }
+          if failed:
+              raise SystemExit(f"required CI jobs did not succeed: {failed}")
+          PY

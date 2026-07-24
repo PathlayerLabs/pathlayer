@@ -11,7 +11,7 @@ from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline, load_
 from pathlayer.pipeline import Pipeline, WouldBeAction
 from pathlayer.postmortem import PostMortem
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "ConfigError",
