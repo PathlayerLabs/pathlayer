@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,6 +151,15 @@ class _Section:
             raise self._err(key, "number", value)
         return float(value)
 
+    def nonnegative_float(self, key: str, default: float) -> float:
+        """Parse one finite number in ``[0, +inf)``."""
+        number = self.float_(key, default)
+        if not math.isfinite(number) or number < 0.0:
+            raise ConfigError(
+                f"invalid value for '{self._name}.{key}': must be finite and >= 0, got {number}"
+            )
+        return number
+
     def str_(self, key: str, default: str) -> str:
         value = self._pop(key, default)
         if not isinstance(value, str):
@@ -181,6 +191,25 @@ class _Section:
             if not 0.0 <= number <= 1.0:
                 raise ConfigError(
                     f"invalid value for '{where}.{subkey}': must be in [0, 1], got {number}"
+                )
+            out[str(subkey)] = number
+        return out
+
+    def nonnegative_float_map(self, key: str) -> dict[str, float]:
+        """Parse a mapping of names to finite numbers in ``[0, +inf)``."""
+        where = f"{self._name}.{key}"
+        raw = _as_mapping(self._pop(key, {}), where)
+        out: dict[str, float] = {}
+        for subkey, value in raw.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(
+                    f"invalid value for '{where}.{subkey}': expected number, "
+                    f"got {type(value).__name__}"
+                )
+            number = float(value)
+            if not math.isfinite(number) or number < 0.0:
+                raise ConfigError(
+                    f"invalid value for '{where}.{subkey}': must be finite and >= 0, got {number}"
                 )
             out[str(subkey)] = number
         return out
@@ -232,6 +261,8 @@ class BudgetConfig:
     enabled: bool = False
     max_cost_usd: float = 5.0
     baseline_usd: float = 0.0
+    default_cost_usd: float = 0.0
+    tool_costs_usd: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -356,6 +387,8 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         enabled=budget_s.bool_("enabled", False),
         max_cost_usd=budget_s.float_("max_cost_usd", 5.0),
         baseline_usd=budget_s.float_("baseline_usd", 0.0),
+        default_cost_usd=budget_s.nonnegative_float("default_cost_usd", 0.0),
+        tool_costs_usd=budget_s.nonnegative_float_map("tool_costs_usd"),
     )
     budget_s.finish()
 
@@ -634,7 +667,10 @@ def build_pipeline(
         if spec.budget.enabled:
             detectors.append(
                 BudgetDetector(
-                    max_cost_usd=spec.budget.max_cost_usd, baseline_usd=spec.budget.baseline_usd
+                    max_cost_usd=spec.budget.max_cost_usd,
+                    baseline_usd=spec.budget.baseline_usd,
+                    default_cost_usd=spec.budget.default_cost_usd,
+                    tool_costs_usd=spec.budget.tool_costs_usd,
                 )
             )
         if spec.no_progress.enabled:
@@ -767,6 +803,42 @@ def build_pipeline(
             "every crossing, forcing the agent to re-summarize repeatedly. "
             "Set escalate_ticks / deescalate_ticks > 1 to debounce."
         )
+    # BUD-3 anti-surprise guard: the auto-wired (or user) budget override maps a
+    # confidence >= its threshold straight to an action, bypassing hysteresis. A
+    # single unpriced eligible event contributes at most
+    # max(default_cost_usd, max(tool_costs_usd)) USD, i.e. a confidence of that
+    # over max_cost_usd. When that alone meets the override threshold, the very
+    # first unpriced event triggers the override (typically STOP) -- an estimate
+    # calibration mistake, not a real runaway. Warn -- don't fail -- so a
+    # deliberate aggressive estimate stays possible but never silent. Gated on
+    # budget actually being able to act (enabled, not advisory, override wired).
+    budget_rule = overrides.get(BudgetDetector.name)
+    if (
+        spec.budget.enabled
+        and BudgetDetector.name not in config.policy.advisory_signals
+        and budget_rule is not None
+    ):
+        max_single_estimate = max(
+            [spec.budget.default_cost_usd, *spec.budget.tool_costs_usd.values()]
+        )
+        # A zero estimate never contributes, so the "first unpriced event" framing
+        # would be misleading -- only warn when an estimate can actually fire.
+        if max_single_estimate > 0.0 and (
+            max_single_estimate >= budget_rule.threshold * spec.budget.max_cost_usd
+        ):
+            resolved_logger.warning(
+                "build_pipeline: a single unpriced event's budget estimate "
+                "(max(default_cost_usd, tool_costs_usd) = %s) is enough to reach the "
+                "budget override threshold (%s * max_cost_usd %s = %s): the first "
+                "unpriced eligible event will immediately trigger %s, bypassing "
+                "hysteresis. Lower the estimate(s) or raise max_cost_usd if this is "
+                "not intended.",
+                max_single_estimate,
+                budget_rule.threshold,
+                spec.budget.max_cost_usd,
+                budget_rule.threshold * spec.budget.max_cost_usd,
+                budget_rule.action.name,
+            )
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
     progress_anchors = loop_suppression_anchors() if suppressions else None

@@ -58,6 +58,8 @@ def test_defaults_match_current_hardcoded_values() -> None:
     assert config.detectors.retry.threshold == 3
     assert config.detectors.budget.enabled is False
     assert config.detectors.budget.max_cost_usd == 5.0
+    assert config.detectors.budget.default_cost_usd == 0.0
+    assert config.detectors.budget.tool_costs_usd == {}
     assert config.detectors.no_progress.window == 64
     assert config.policy.stop_threshold == 0.9
     assert config.policy.advisory_signals == frozenset()
@@ -104,6 +106,41 @@ def test_load_yaml_overrides(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.detectors.retry.threshold == 5
     assert config.pipeline.recent_history == 3
+
+
+def test_load_json_parses_per_tool_cost_estimates_above_one(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.json",
+        json.dumps(
+            {
+                "detectors": {
+                    "budget": {
+                        "default_cost_usd": 0.25,
+                        "tool_costs_usd": {"read_file": 0.01, "train_model": 3},
+                    }
+                }
+            }
+        ),
+    )
+    budget = load_config(path).detectors.budget
+
+    assert budget.default_cost_usd == 0.25
+    assert budget.tool_costs_usd == {"read_file": 0.01, "train_model": 3.0}
+
+
+def test_load_yaml_parses_per_tool_cost_estimates(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        "detectors:\n"
+        "  budget:\n"
+        "    default_cost_usd: 0.2\n"
+        "    tool_costs_usd:\n"
+        "      train_model: 4.5\n",
+    )
+    budget = load_config(path).detectors.budget
+
+    assert budget.default_cost_usd == 0.2
+    assert budget.tool_costs_usd == {"train_model": 4.5}
 
 
 def test_int_field_accepts_int_float_field_accepts_int(tmp_path: Path) -> None:
@@ -225,6 +262,35 @@ def test_float_field_rejects_string() -> None:
         PathlayerConfig.from_mapping({"detectors": {"budget": {"max_cost_usd": "x"}}})
 
 
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), float("-inf")])
+def test_default_tool_cost_must_be_finite_and_nonnegative(value: float) -> None:
+    with pytest.raises(ConfigError, match=r"default_cost_usd.*finite and >= 0"):
+        PathlayerConfig.from_mapping({"detectors": {"budget": {"default_cost_usd": value}}})
+
+
+@pytest.mark.parametrize("value", [True, "1.0"])
+def test_default_tool_cost_rejects_non_number(value: object) -> None:
+    with pytest.raises(ConfigError, match=r"default_cost_usd.*expected number"):
+        PathlayerConfig.from_mapping({"detectors": {"budget": {"default_cost_usd": value}}})
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), float("-inf")])
+def test_tool_cost_mapping_values_must_be_finite_and_nonnegative(value: float) -> None:
+    with pytest.raises(ConfigError, match=r"tool_costs_usd.call.*finite and >= 0"):
+        PathlayerConfig.from_mapping({"detectors": {"budget": {"tool_costs_usd": {"call": value}}}})
+
+
+@pytest.mark.parametrize("value", [True, "1.0"])
+def test_tool_cost_mapping_rejects_non_number(value: object) -> None:
+    with pytest.raises(ConfigError, match=r"tool_costs_usd.call.*expected number"):
+        PathlayerConfig.from_mapping({"detectors": {"budget": {"tool_costs_usd": {"call": value}}}})
+
+
+def test_tool_costs_must_be_a_mapping() -> None:
+    with pytest.raises(ConfigError, match=r"tool_costs_usd.*must be a mapping"):
+        PathlayerConfig.from_mapping({"detectors": {"budget": {"tool_costs_usd": ["call"]}}})
+
+
 def test_str_field_type_error() -> None:
     with pytest.raises(ConfigError, match=r"store.path.*expected string"):
         PathlayerConfig.from_mapping({"store": {"path": 5}})
@@ -329,6 +395,51 @@ def test_build_pipeline_all_enabled_includes_budget() -> None:
     config = PathlayerConfig.from_mapping({"detectors": {"budget": {"enabled": True}}})
     pipeline = build_pipeline(config)
     assert BudgetDetector in [type(d) for d in pipeline._detectors]
+
+
+def test_build_pipeline_threads_budget_cost_estimates() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "budget": {
+                    "enabled": True,
+                    "default_cost_usd": 0.25,
+                    "tool_costs_usd": {"train_model": 3.0},
+                }
+            }
+        }
+    )
+    pipeline = build_pipeline(config)
+    budget = next(d for d in pipeline._detectors if isinstance(d, BudgetDetector))
+
+    assert budget._default_cost_usd == 0.25
+    assert budget._tool_costs_usd == {"train_model": 3.0}
+
+
+def test_estimated_budget_override_bypasses_hysteresis_end_to_end() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "loop": {"enabled": False},
+                "retry": {"enabled": False},
+                "no_progress": {"enabled": False},
+                "budget": {
+                    "enabled": True,
+                    "max_cost_usd": 5.0,
+                    "tool_costs_usd": {"read_file": 0.1, "train_model": 5.0},
+                },
+            },
+            "policy": {"escalate_ticks": 3},
+        }
+    )
+    cheap = build_pipeline(config)
+    expensive = build_pipeline(config)
+
+    assert cheap.run([ToolEvent("read_file"), ToolEvent("read_file")]) == [
+        Action.NONE,
+        Action.NONE,
+    ]
+    assert expensive.process(ToolEvent("train_model")) is Action.STOP
 
 
 def test_build_pipeline_disabled_detectors_excluded() -> None:
@@ -562,6 +673,58 @@ def test_build_pipeline_does_not_warn_when_summarize_tier_has_hysteresis(
     with caplog.at_level("WARNING"):
         build_pipeline(config)
     assert "SUMMARIZE tier is enabled with no hysteresis" not in caplog.text
+
+
+def test_build_pipeline_warns_when_single_estimate_reaches_budget_override(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # BUD-3: a per-tool estimate as large as the ceiling means the first unpriced
+    # call of that tool immediately trips the auto-wired budget->stop override,
+    # bypassing hysteresis -- almost always a calibration mistake.
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "budget": {"enabled": True, "max_cost_usd": 5.0, "tool_costs_usd": {"train": 5.0}}
+            }
+        }
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "budget estimate" in caplog.text
+    assert "STOP" in caplog.text
+
+
+def test_build_pipeline_does_not_warn_when_estimate_stays_below_override(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "budget": {"enabled": True, "max_cost_usd": 5.0, "tool_costs_usd": {"train": 0.5}}
+            }
+        }
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "budget estimate" not in caplog.text
+
+
+def test_build_pipeline_does_not_warn_about_budget_estimate_when_advisory(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Advisory budget can never STOP, so no override is wired and the guard is
+    # irrelevant -- warning here would be misleading.
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "budget": {"enabled": True, "max_cost_usd": 5.0, "tool_costs_usd": {"train": 5.0}}
+            },
+            "policy": {"advisory_signals": ["budget"]},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "budget estimate" not in caplog.text
 
 
 def test_build_pipeline_warns_when_loop_enabled_without_no_progress(

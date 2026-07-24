@@ -55,7 +55,22 @@ detectors:
   budget:
     enabled: false
     max_cost_usd: 5.0
-    baseline_usd: 0.0   # cross-run spend already recorded (wired by INF-1 later)
+    # Effective cross-run spend already recorded under the same estimate config
+    # (persistence and config migration are wired by INF-1 later).
+    baseline_usd: 0.0
+    # BUD-3: fallback estimates for TOOL_CALL / LLM_CALL events whose adapter
+    # supplied no positive cost_usd. A captured positive cost always wins, so
+    # model pricing is never charged twice. Matching is exact and case-sensitive.
+    # For LLM_CALL fallbacks the key must match the event's `tool` field exactly
+    # (the model/provider name as the adapter emits it, e.g. "gpt-4o", not a
+    # friendly label); a mismatch silently falls back to default_cost_usd.
+    default_cost_usd: 0.0
+    tool_costs_usd: {}
+    # Example:
+    # default_cost_usd: 0.01
+    # tool_costs_usd:
+    #   read_file: 0.001
+    #   train_model: 2.5
 
   # NoProgressDetector: CUSUM over progress records (the $47k slow-burn case).
   # Anchors are code-level (built-in coding anchors: tests, exit codes, git

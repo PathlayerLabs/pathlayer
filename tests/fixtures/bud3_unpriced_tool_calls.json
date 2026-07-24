@@ -1,0 +1,49 @@
+{
+  "label": "healthy",
+  "description": "BUD-3 boundary fixture: the adapter captured tool calls but supplied no cost. The same calls remain below budget with cheap estimates and reach the ceiling when train_model is configured as expensive.",
+  "metadata": {
+    "curated_by": "BUD-3",
+    "cheap_config": {
+      "max_cost_usd": 5.0,
+      "tool_costs_usd": {
+        "read_file": 0.1,
+        "train_model": 0.5
+      }
+    },
+    "expensive_config": {
+      "max_cost_usd": 5.0,
+      "tool_costs_usd": {
+        "read_file": 0.1,
+        "train_model": 4.8
+      }
+    },
+    "expectations_by_config": {
+      "cheap_config": {
+        "budget_should_reach_ceiling": false
+      },
+      "expensive_config": {
+        "budget_should_reach_ceiling": true
+      }
+    }
+  },
+  "events": [
+    {
+      "tool": "read_file",
+      "args": {
+        "path": "data.csv"
+      }
+    },
+    {
+      "tool": "read_file",
+      "args": {
+        "path": "config.yaml"
+      }
+    },
+    {
+      "tool": "train_model",
+      "args": {
+        "epochs": 3
+      }
+    }
+  ]
+}

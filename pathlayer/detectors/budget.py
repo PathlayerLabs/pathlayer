@@ -1,8 +1,11 @@
-"""BudgetDetector (BUD-1, class iii: cost runaway).
+"""BudgetDetector (BUD-1/BUD-3, class iii: cost runaway).
 
-The simplest detector: pure accumulation. It sums ``cost_usd`` across the
-observed events and reports a continuous confidence equal to the fraction of
-the budget consumed, saturating at 1.0 once the ceiling is reached.
+The detector accumulates captured ``cost_usd`` values and reports a continuous
+confidence equal to the fraction of the budget consumed, saturating at 1.0 once
+the ceiling is reached. BUD-3 fills the gap left by adapters that cannot price a
+tool/model call: a configured per-tool USD estimate is used only when a
+``TOOL_CALL`` or ``LLM_CALL`` has no positive captured cost. A captured positive
+cost always wins, so model pricing is never charged twice.
 
 Cross-run spend (the crash-resume / multi-run case) is supported via
 ``baseline_usd``: the cumulative cost already recorded for this run id before
@@ -17,28 +20,115 @@ money is already gone.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from pathlayer.detectors.base import Detector, Signal
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
+
+_ESTIMABLE_KINDS = frozenset({EventKind.TOOL_CALL, EventKind.LLM_CALL})
+
+
+def _validated_cost(value: float, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0:
+        raise ValueError(f"{name} must be finite and >= 0")
+    return number
+
+
+@dataclass(frozen=True, slots=True)
+class _BudgetState:
+    captured_usd: float = 0.0
+    estimated_usd: float = 0.0
+    invalid_costs: int = 0
 
 
 class BudgetDetector(Detector):
     name = "budget"
 
-    def __init__(self, max_cost_usd: float = 5.0, baseline_usd: float = 0.0) -> None:
-        if max_cost_usd <= 0:
+    def __init__(
+        self,
+        max_cost_usd: float = 5.0,
+        baseline_usd: float = 0.0,
+        *,
+        tool_costs_usd: Mapping[str, float] | None = None,
+        default_cost_usd: float = 0.0,
+    ) -> None:
+        max_cost = _validated_cost(max_cost_usd, "max_cost_usd")
+        if max_cost == 0.0:
             raise ValueError("max_cost_usd must be > 0")
-        if baseline_usd < 0:
-            raise ValueError("baseline_usd must be >= 0")
-        self._max_cost_usd = max_cost_usd
-        self._baseline_usd = baseline_usd
+        self._max_cost_usd = max_cost
+        self._baseline_usd = _validated_cost(baseline_usd, "baseline_usd")
+        self._default_cost_usd = _validated_cost(default_cost_usd, "default_cost_usd")
+
+        # The private ``costs`` dict is a fresh copy, so a later mutation of the
+        # caller's source mapping cannot reach the detector. The MappingProxyType
+        # only makes that private copy read-only (guarding the detector's own
+        # purity); the values are floats, so there is nothing mutable to alias.
+        costs: dict[str, float] = {}
+        for tool, value in (tool_costs_usd or {}).items():
+            if not isinstance(tool, str):
+                raise ValueError("tool_costs_usd keys must be strings")
+            costs[tool] = _validated_cost(value, f"tool_costs_usd[{tool!r}]")
+        self._tool_costs_usd: Mapping[str, float] = MappingProxyType(costs)
 
     def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
-        spend = self._baseline_usd + sum(event.cost_usd for event in history)
+        state = self.create_state()
+        for event in history:
+            state = self._advance(state, event)
+        return self._signal(state)
+
+    def create_state(self) -> _BudgetState:
+        return _BudgetState()
+
+    def step(self, state: _BudgetState, event: ToolEvent) -> tuple[_BudgetState, Signal]:
+        next_state = self._advance(state, event)
+        return next_state, self._signal(next_state)
+
+    def _advance(self, state: _BudgetState, event: ToolEvent) -> _BudgetState:
+        raw = event.cost_usd
+        valid = isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+        if valid and raw > 0.0:
+            return _BudgetState(
+                captured_usd=state.captured_usd + float(raw),
+                estimated_usd=state.estimated_usd,
+                invalid_costs=state.invalid_costs,
+            )
+
+        invalid = not valid or raw < 0.0
+        estimate = 0.0
+        if event.kind in _ESTIMABLE_KINDS:
+            estimate = self._tool_costs_usd.get(event.tool, self._default_cost_usd)
+        return _BudgetState(
+            captured_usd=state.captured_usd,
+            estimated_usd=state.estimated_usd + estimate,
+            invalid_costs=state.invalid_costs + int(invalid),
+        )
+
+    def _signal(self, state: _BudgetState) -> Signal:
+        spend = self._baseline_usd + state.captured_usd + state.estimated_usd
         confidence = min(1.0, spend / self._max_cost_usd)
+        diagnostics = (
+            (
+                f"{state.invalid_costs} invalid event cost(s) ignored; "
+                "configured estimates applied where eligible",
+            )
+            if state.invalid_costs
+            else ()
+        )
         if confidence <= 0.0:
-            return Signal(self.name, confidence=0.0)
+            return Signal(self.name, confidence=0.0, diagnostics=diagnostics)
         remaining = max(0.0, self._max_cost_usd - spend)
-        reason = f"${spend:.2f} / ${self._max_cost_usd:.2f} spent, ${remaining:.2f} left"
-        return Signal(self.name, confidence=confidence, reason=reason)
+        reason = (
+            f"${spend:.2f} effective / ${self._max_cost_usd:.2f} budget, "
+            f"${remaining:.2f} left "
+            f"(${state.captured_usd:.2f} captured + ${state.estimated_usd:.2f} estimated"
+        )
+        if self._baseline_usd:
+            reason += f" + ${self._baseline_usd:.2f} baseline"
+        reason += ")"
+        return Signal(self.name, confidence=confidence, reason=reason, diagnostics=diagnostics)
