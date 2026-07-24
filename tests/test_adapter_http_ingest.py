@@ -8,6 +8,7 @@ the wire contract an out-of-process forwarder relies on.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import urllib.error
 import urllib.request
@@ -225,27 +226,55 @@ def test_unknown_source_is_400() -> None:
     assert events == []
 
 
-def test_translator_exception_is_500_and_does_not_crash_server() -> None:
+def test_translator_exception_is_hidden_logged_and_does_not_crash_server(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "SEC3_DO_NOT_LEAK_7f42"
+
     def _boom(_payload: Any) -> list[ToolEvent]:
-        raise ValueError("bad payload")
+        raise KeyError(f"translator failed with {secret}")
 
     events: list[ToolEvent] = []
-    adapter = HttpIngestAdapter(events.append, translators={"demo": _boom})
+    adapter = HttpIngestAdapter(
+        events.append,
+        translators={"broken": _boom, "healthy": _echo_translator},
+    )
     adapter.attach()
     try:
-        status, body = _post(adapter.port, {"source": "demo", "payload": {}})
+        with caplog.at_level(logging.ERROR, logger="pathlayer.adapters.http_ingest"):
+            status, body = _post(adapter.port, {"source": "broken", "payload": {}})
+
         assert status == 500
-        assert "bad payload" in body["error"]
+        assert body == {"error": "internal error (see server log)"}
+        serialized_body = json.dumps(body)
+        assert "KeyError" not in serialized_body
+        assert secret not in serialized_body
+
+        error_records = [
+            record
+            for record in caplog.records
+            if record.name == "pathlayer.adapters.http_ingest"
+            and record.levelno == logging.ERROR
+            and record.exc_info is not None
+        ]
+        assert len(error_records) == 1
+        exc_info = error_records[0].exc_info
+        assert exc_info is not None
+        traceback_text = logging.Formatter().formatException(exc_info)
+        assert "Traceback (most recent call last)" in traceback_text
+        assert secret in traceback_text
 
         # The server must still be alive and serving other requests after a
         # translator crash -- a hostile/buggy event must never take it down.
-        adapter._translators["demo"] = _echo_translator
-        status, _ = _post(adapter.port, {"source": "demo", "payload": {"tool": "ok"}})
+        status, body = _post(
+            adapter.port,
+            {"source": "healthy", "payload": {"tool": "ok"}},
+        )
         assert status == 200
+        assert body == {"ok": True}
     finally:
         adapter.detach()
-    assert len(events) == 1
-    assert events[0].tool == "ok"
+    assert [event.tool for event in events] == ["ok"]
 
 
 def test_translator_returning_multiple_events_are_all_emitted_in_order() -> None:

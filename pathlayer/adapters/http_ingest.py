@@ -52,6 +52,11 @@ logger = logging.getLogger(__name__)
 # (never the server itself -- see ``_Handler.do_POST``).
 Translator = Callable[[Any], list[ToolEvent]]
 
+
+class _UnknownSourceError(LookupError):
+    """Raised only when no translator is registered for a source."""
+
+
 INGEST_PATH = "/ingest"
 
 # Enforced in __init__: no configuration mistake should be able to turn this
@@ -148,7 +153,7 @@ class HttpIngestAdapter(Adapter):
     def _ingest(self, source: str, payload: Any) -> None:
         """Translate one request body and emit the resulting events.
 
-        Raises ``KeyError`` for an unknown source; lets a translator's own
+        Raises ``_UnknownSourceError`` for an unknown source; lets a translator's own
         exceptions propagate. The HTTP handler turns both into an error
         response without crashing the server thread (see ``_Handler.do_POST``).
 
@@ -158,7 +163,10 @@ class HttpIngestAdapter(Adapter):
         sink sees one event at a time, matching every other adapter's
         contract.
         """
-        translator = self._translators[source]
+        try:
+            translator = self._translators[source]
+        except KeyError as exc:
+            raise _UnknownSourceError(source) from exc
         with self._lock:
             events = translator(payload)
             for event in events:
@@ -210,12 +218,12 @@ def _make_handler(adapter: HttpIngestAdapter) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 adapter._ingest(source, body["payload"])
-            except KeyError:
+            except _UnknownSourceError:
                 self._respond(400, {"error": f"unknown source {source!r}"})
                 return
-            except Exception as exc:  # never let a bad event kill the server thread
+            except Exception:  # never let a bad event kill the server thread
                 logger.exception("translator for source=%r failed", source)
-                self._respond(500, {"error": str(exc)})
+                self._respond(500, {"error": "internal error (see server log)"})
                 return
             self._respond(200, {"ok": True})
 
