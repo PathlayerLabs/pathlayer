@@ -239,6 +239,53 @@ def test_coerce_result_stringifies_non_json_objects() -> None:
     assert _coerce_result(Weird()) == "weird"
 
 
+def test_coerce_result_unwraps_tool_message() -> None:
+    from langchain_core.messages import ToolMessage
+
+    # A ToolNode wraps a dict/list return as a JSON *string* in `content`; the
+    # adapter must parse it back so TestProgressAnchor (which needs a Mapping)
+    # is not blinded.
+    assert _coerce_result(ToolMessage(content='{"passed": 11, "failed": 3}', tool_call_id="1")) == {
+        "passed": 11,
+        "failed": 3,
+    }
+    assert _coerce_result(ToolMessage(content="[1, 2]", tool_call_id="1")) == [1, 2]
+    # A structured artifact (content_and_artifact tools) is the real object.
+    assert _coerce_result(
+        ToolMessage(content="ignored", artifact={"failed": 0}, tool_call_id="1")
+    ) == {"failed": 0}
+    # Plain text stays a string; a scalar-looking string is NOT coerced to a number.
+    assert _coerce_result(ToolMessage(content="ok", tool_call_id="1")) == "ok"
+    assert _coerce_result(ToolMessage(content="11", tool_call_id="1")) == "11"
+    # Malformed JSON object falls back to the raw string (no crash).
+    assert _coerce_result(ToolMessage(content="{not json}", tool_call_id="1")) == "{not json}"
+    # Pathologically nested JSON makes json.loads raise RecursionError (not a
+    # ValueError); it must be caught too, falling back to the raw string.
+    nested = "[" * 20000 + "]" * 20000
+    assert _coerce_result(ToolMessage(content=nested, tool_call_id="1")) == nested
+
+
+def test_toolnode_style_invoke_captures_structured_result() -> None:
+    # Invoking a tool with a full ToolCall (exactly what ToolNode does) hands the
+    # callback a ToolMessage; the adapter must still capture the structured dict
+    # so a real ToolNode-based agent drives progress anchors.
+    @tool
+    def run_tests(target: str) -> dict[str, int]:
+        """Flat red suite."""
+        return {"passed": 11, "failed": 3}
+
+    events: list[ToolEvent] = []
+    adapter = LangGraphAdapter(events.append)
+    adapter.attach()
+    run_tests.invoke(
+        {"name": "run_tests", "args": {"target": "t"}, "id": "c1", "type": "tool_call"},
+        config=adapter.as_config(),
+    )
+    adapter.detach()
+    assert len(events) == 1
+    assert events[0].result == {"passed": 11, "failed": 3}
+
+
 # --------------------------------------------------------------------------- #
 # Concurrency: thread-safety is the adapter's headline feature. A single sync
 # handler serves async runs (LangChain calls sync callbacks from a thread pool),

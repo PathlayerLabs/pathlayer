@@ -35,6 +35,7 @@ deliberately *not* re-exported from :mod:`pathlayer.adapters`.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -43,6 +44,7 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks.base import BaseCallbackHandler
+from langchain_core.messages import ToolMessage
 from langchain_core.outputs import LLMResult
 
 from pathlayer.adapters.base import Adapter, EventSink
@@ -58,19 +60,59 @@ _MAX_PENDING = 1024
 
 # Top-level coercion only: scalars/containers are emitted as-is, anything else is
 # stringified. This handles the common case where a tool returns a non-serializable
-# object directly (e.g. a LangChain ``ToolMessage``) so a VAL-1 round-trip
-# (dump_trace/load) survives it. It is intentionally shallow (per the ADP-0 plan):
-# a dict/list containing a nested non-serializable value would still fail
-# ``dump_trace``. Deep coercion is out of scope here.
+# object directly so a VAL-1 round-trip (dump_trace/load) survives it. It is
+# intentionally shallow (per the ADP-0 plan): a dict/list containing a nested
+# non-serializable value would still fail ``dump_trace``. Deep coercion is out of
+# scope here.
 _JSON_FRIENDLY = (bool, int, float, str, dict, list)
+
+
+def _unwrap_tool_message(output: Any) -> Any:
+    """Return the underlying result carried by a LangChain ``ToolMessage``.
+
+    A stock ``langgraph.prebuilt.ToolNode`` invokes each tool with the full
+    ``ToolCall``, so LangChain hands the capture callback the wrapping
+    ``ToolMessage`` -- not the tool's own return value. Left as-is that wrapper
+    stringifies (below), hiding a structured ``{passed, failed}`` result from
+    ``TestProgressAnchor`` (which requires a ``Mapping``) so ``NoProgressDetector``
+    would never fire on a real ``ToolNode`` agent. We therefore unwrap it:
+
+    - a structured ``artifact`` (the idiomatic ``response_format=
+      "content_and_artifact"`` path) is the tool's real object -- use it as-is;
+    - otherwise the ``content``; a JSON object/array *string* (the default
+      serialization of a dict/list return) is parsed back to the container so
+      the structure survives. Plain-text / scalar-looking content is left as a
+      string (no surprise coercion of e.g. ``"11"`` to an int).
+
+    Any non-``ToolMessage`` output is returned untouched.
+    """
+    if not isinstance(output, ToolMessage):
+        return output
+    if output.artifact is not None:
+        return output.artifact
+    content = output.content
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                return json.loads(stripped)
+            except (ValueError, RecursionError):
+                # ValueError covers malformed JSON (JSONDecodeError); RecursionError
+                # guards deeply-nested content -- neither must escape the callback
+                # (the module's "never a crash" contract).
+                return content
+    return content
 
 
 def _coerce_result(output: Any) -> Any:
     """Coerce a tool output to a JSON-friendly value at the top level.
 
-    Scalars/dict/list are kept as-is; anything else is stringified. Shallow by
-    design: nested non-serializable values inside a dict/list are not coerced.
+    A ``ToolMessage`` wrapper (emitted when a tool is run via ``ToolNode``) is
+    unwrapped to the tool's real result first (see :func:`_unwrap_tool_message`).
+    Scalars/dict/list are then kept as-is; anything else is stringified. Shallow
+    by design: nested non-serializable values inside a dict/list are not coerced.
     """
+    output = _unwrap_tool_message(output)
     if output is None or isinstance(output, _JSON_FRIENDLY):
         return output
     return str(output)
