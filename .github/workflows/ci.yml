@@ -81,7 +81,9 @@ jobs:
           (
             cd "$smoke_dir"
             "$GITHUB_WORKSPACE/.package-venv/bin/python" \
-              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
+              --extras core \
+              --readme "$GITHUB_WORKSPACE/README.md"
           )
           .package-venv/bin/pip check
 
@@ -107,7 +109,9 @@ jobs:
           (
             cd "$smoke_dir"
             "$GITHUB_WORKSPACE/.package-venv/bin/python" \
-              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
+              --extras core \
+              --readme "$GITHUB_WORKSPACE/README.md"
           )
           .package-venv/bin/pip check
 
@@ -187,7 +191,8 @@ jobs:
             cd "$smoke_dir"
             "$GITHUB_WORKSPACE/.package-venv/bin/python" \
               "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
-              --extras "${{ matrix.extra }}"
+              --extras "${{ matrix.extra }}" \
+              --readme "$GITHUB_WORKSPACE/README.md"
           )
           .package-venv/bin/pip check
 

@@ -9,8 +9,9 @@ resulting :class:`~pathlayer.detectors.base.Signal`s through a
 It performs no I/O and no LLM calls; given the same event sequence it produces
 the same action sequence. Arbitration is graded (ARB-3): the policy maps fused
 confidence to a tier and the pipeline threads the :class:`HysteresisState` so a
-brief spike does not flip the action. Only ``STOP`` halts the run; intermediate
-tiers (WARN..ESCALATE) are decided and logged but, in V1, not yet enforced.
+brief spike does not flip the action. Only ``STOP`` halts the run; a compatible
+actuator may enforce intermediate tiers (LangGraph implements WARN/SUMMARIZE),
+while FALLBACK/ESCALATE remain unimplemented in V1.
 
 PERF-2: each detector's incremental state (:meth:`Detector.create_state` /
 :meth:`Detector.step`) lives here, one slot per detector instance, **never** on

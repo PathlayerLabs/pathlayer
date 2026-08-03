@@ -9,6 +9,8 @@ import tempfile
 from importlib.metadata import version
 from pathlib import Path
 
+from readme_quickstart import extract_quickstart
+
 _NETWORK_EVENTS = {
     "socket.connect",
     "socket.getaddrinfo",
@@ -33,7 +35,7 @@ def _deny_network(event: str, args: tuple[object, ...]) -> None:
 sys.addaudithook(_deny_network)
 
 import pathlayer  # noqa: E402
-from pathlayer import build_pipeline, load_config  # noqa: E402
+from pathlayer import ConfigError, build_pipeline, load_config  # noqa: E402
 from pathlayer.adapters import InMemoryAdapter  # noqa: E402
 from pathlayer.events import ToolEvent  # noqa: E402
 from pathlayer.policies import Action, Actuator, wire  # noqa: E402
@@ -127,16 +129,39 @@ def _exercise_yaml() -> None:
         assert load_config(config).pipeline.dry_run is True
 
 
+def _exercise_missing_yaml_extra() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        config = Path(directory) / "config.yaml"
+        config.write_text("pipeline:\n  dry_run: true\n", encoding="utf-8")
+        try:
+            load_config(config)
+        except ConfigError as exc:
+            assert "pathlayer[yaml]" in str(exc)
+        else:
+            raise AssertionError("YAML config unexpectedly loaded without pathlayer[yaml]")
+
+
 def _exercise_langgraph() -> None:
     from pathlayer.adapters.langgraph import LangGraphAdapter
     from pathlayer.policies.langgraph_actuator import LangGraphActuator
 
+    pipeline = build_pipeline(load_config())
     actuator = LangGraphActuator()
     actuator.attach()
-    adapter = LangGraphAdapter(lambda event: None)
+    adapter = LangGraphAdapter(wire(pipeline, actuator))
     adapter.attach()
     assert adapter.as_config()
+    assert actuator.control is not None
     adapter.detach()
+
+
+def _exercise_readme(readme: Path) -> None:
+    """Execute the exact marked quickstart against the installed distribution."""
+    assert Path.cwd().joinpath(".pathlayer").exists() is False
+    code = extract_quickstart(readme)
+    namespace = {"__name__": "__pathlayer_readme_quickstart__"}
+    exec(compile(code, str(readme), "exec"), namespace)
+    assert Path.cwd().joinpath(".pathlayer").exists() is False
 
 
 def main() -> None:
@@ -146,13 +171,21 @@ def main() -> None:
         choices=("core", "yaml", "langgraph", "all"),
         default="core",
     )
+    parser.add_argument(
+        "--readme",
+        type=Path,
+        help="execute the exact marked core quickstart from this README",
+    )
     args = parser.parse_args()
 
     _assert_network_blocked()
     _exercise_core()
+    if args.readme is not None:
+        _exercise_readme(args.readme)
     if args.extras == "core":
         assert importlib.util.find_spec("yaml") is None
         assert importlib.util.find_spec("langgraph") is None
+        _exercise_missing_yaml_extra()
     if args.extras in {"yaml", "all"}:
         _exercise_yaml()
         if args.extras == "yaml":

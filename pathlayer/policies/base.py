@@ -58,9 +58,9 @@ guarantees keep it safe:
 - **Advisory still wins.** An override only fires on *actionable* signals; a
   detector listed in ``advisory_signals`` stays observe-only even with a rule.
   The config layer rejects a name that is both advisory and overridden.
-- **Only STOP is enforced in V1.** An override to an intermediate tier
-  (WARN..ESCALATE) is committed and logged but, like the ARB-3 ladder tiers, not
-  yet acted on until ACT-1..4.
+- **Execution depends on the actuator.** STOP is the only hard termination.
+  LangGraph implements WARN and SUMMARIZE; FALLBACK and ESCALATE are committed
+  and logged but remain unimplemented until ACT-3/ACT-4.
 
 LOOP-2 precision adds **conditional suppression**: a configured
 :class:`SuppressionRule` (``guarded signal -> {evidence, min_confidence}``)

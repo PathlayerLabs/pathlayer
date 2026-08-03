@@ -178,7 +178,9 @@ jobs:
           (
             cd "$smoke_dir"
             "$GITHUB_WORKSPACE/.release-venv/bin/python" \
-              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
+              --extras core \
+              --readme "$GITHUB_WORKSPACE/README.md"
           )
 
   publish-pypi:
@@ -237,5 +239,7 @@ jobs:
           (
             cd "$smoke_dir"
             "$GITHUB_WORKSPACE/.release-venv/bin/python" \
-              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" --extras core
+              "$GITHUB_WORKSPACE/scripts/packaging_smoke.py" \
+              --extras core \
+              --readme "$GITHUB_WORKSPACE/README.md"
           )

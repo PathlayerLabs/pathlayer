@@ -108,21 +108,22 @@ policy:
   # Graded action ladder (ARB-3). By default only STOP is active (at
   # stop_threshold), so arbitration is NONE/STOP -- the recommended setup today.
   #
-  # STATUS: only STOP currently *acts* (halts the run). The intermediate tiers
-  # are decided and logged but NOT enforced yet -- their real behaviour lands in
-  # ACT-1..4 (Sprint 4). Until then, the one meaningful intermediate tier is a
-  # single "alert before stop": a WARN band below stop_threshold that surfaces a
-  # problem in the logs before anything is cut.
+  # STATUS: LangGraphActuator drains the run on STOP. It also gives WARN and
+  # SUMMARIZE real effects when its complete integration is wired: WARN injects
+  # an advisory and SUMMARIZE gates tools until the agent emits a structured
+  # progress summary. FALLBACK and ESCALATE are still decided and logged but
+  # remain inert until ACT-3/ACT-4. Other actuators enforce only the actions
+  # they explicitly implement.
   #
   # Opt in by giving a tier a fused-confidence threshold (< stop_threshold).
   # Recommended for now -- warn, then stop:
   # tier_thresholds:
   #   warn: 0.7
   #
-  # The other tiers (summarize, fallback, escalate) already exist in the ladder
-  # so config is forward-compatible, but they are inert until ACT-1..4. If you
-  # do set several, they must be < stop_threshold and non-decreasing with
-  # severity (warn <= summarize <= fallback <= escalate).
+  # If you set several tiers, they must be < stop_threshold and non-decreasing
+  # with severity (warn <= summarize <= fallback <= escalate). Do not enable
+  # WARN/SUMMARIZE unless the chosen actuator implements them; the core
+  # LoggingActuator only reports decisions and has no effect on the agent.
   tier_thresholds: {}
   # Hysteresis: consecutive confirming ticks before a tier change commits, so a
   # one-tick spike does not flip the action. 1 = no hysteresis (follow the
@@ -163,9 +164,9 @@ policy:
   # be combined -- that is rejected).
   #
   # Fields per rule: `threshold` (confidence in [0, 1], default 1.0) and
-  # `action` (warn/summarize/fallback/escalate/stop, default stop). As with the
-  # ladder tiers, only STOP is actually enforced in V1; an override to an
-  # intermediate tier is decided and logged but inert until ACT-1..4.
+  # `action` (warn/summarize/fallback/escalate/stop, default stop). Enforcement
+  # depends on the actuator: LangGraphActuator implements WARN/SUMMARIZE/STOP;
+  # FALLBACK and ESCALATE remain inert until ACT-3/ACT-4.
   overrides: {}
   # Example: soften the budget brake to fire at 95% of the ceiling, and add a
   # custom immediate stop when the loop detector is fully saturated.
@@ -179,6 +180,7 @@ policy:
 
 pipeline:
   recent_history: 10      # events kept in the post-mortem tail (>= 0)
+  dry_run: false          # true = detect/log only; never apply or halt (OBS-3)
 
 store:
   # Cross-run SQLite state path (INF-1). Inert today: not read or created yet.
