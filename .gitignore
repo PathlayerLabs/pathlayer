@@ -38,14 +38,7 @@ finder_probe/favorites.json
 finder_probe/favoris_export.*
 
 # Local-only agent context (not shared on the repo)
-AGENTS.md
 cursor.md
-.cursor/rules/communication-style.mdc
-.cursor/rules/architecture-guardrails.mdc
-.cursor/rules/pr-self-review.mdc
-.cursor/rules/work-plan.mdc
-.cursor/rules/copilot-comment-handling.mdc
-.cursor/rules/local-dev-conventions.mdc
 
 # Local one-off helper (chat history migration after the OneDrive move)
 restore-chats.sh

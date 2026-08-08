@@ -52,8 +52,9 @@ components into a single continuous ``loop`` signal:
 across the entire traces corpus, only two fixtures ever reach the LOOP-2
 fallback path at all, both around ``0.34``-``0.35`` -- nowhere near the
 ``0.85`` cap, which has therefore never been the binding constraint on any
-known trace. Moving it would be an uncalibrated guess, exactly what
-``architecture-guardrails.mdc`` rules out; raising it to grant LOOP-2 solo-stop
+known trace. Moving it would be an uncalibrated guess, exactly what the
+`repository rules <https://github.com/Kropemann/Pathlayer/blob/main/AGENTS.md>`_
+rule out; raising it to grant LOOP-2 solo-stop
 authority is left as an explicitly open question for a richer, non-synthetic
 corpus (``VAL-5``).
 """

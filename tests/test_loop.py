@@ -399,7 +399,7 @@ def test_ngram_sigmoid_never_overflows_on_extreme_config() -> None:
     # Regression: _sigmoid used to clamp `x` before multiplying by `steepness`,
     # so a high ngram_min_hits combined with a high ngram_steepness could still
     # push the exponent past math.exp's range and raise OverflowError -- a
-    # detector must never crash the host agent (architecture-guardrails.mdc).
+    # detector must never crash the host agent (docs/agent/architecture.md).
     detector = LoopDetector(ngram_min_hits=60, ngram_steepness=20.0, window=1000)
     signal = detector.evaluate(_interrupted_cycle(cycles=2))
     assert 0.0 <= signal.confidence <= 1.0
