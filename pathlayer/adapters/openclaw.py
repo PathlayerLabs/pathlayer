@@ -12,16 +12,11 @@ reviewed and unit-tested without needing a live OpenClaw instance. See
 ``examples/openclaw_plugin/`` for the reference plugin and the runbook used to
 validate it against a real OpenClaw instance.
 
-Scope (V1): only ``after_tool_call`` is translated (observation-only, matches
-the "passive observer" contract -- V1 never blocks or rewrites a tool call).
-Every other hook name is ignored (translated to zero events) rather than
-raising, so wiring new hooks on the plugin side can never break existing
-capture. Lifecycle events (``subagent_spawned``, session restarts, ...) for
-``ResourceDetector``, and LLM cost capture (parity with ADP-0's ``LLM_CALL``),
-are deliberately out of scope for this first cut -- same call
-``LangGraphAdapter`` made for ``SUBAGENT_SPAWN`` -- to keep this PR small and
-mergeable; both are candidates for a follow-up issue once the HTTP transport
-itself is validated against a real OpenClaw instance.
+Scope (V1): ``after_tool_call`` is translated into :class:`~pathlayer.events.ToolEvent`
+(observation-only, matches the "passive observer" contract -- V1 never blocks or
+rewrites a tool call). Lifecycle hooks (``before_agent_run``, ``agent_end``) are
+handled by :mod:`pathlayer.adapters.openclaw_recorder` and are not forced into
+``ToolEvent``. Other hook names are ignored rather than raising.
 """
 
 from __future__ import annotations
@@ -30,6 +25,11 @@ from typing import Any
 
 from pathlayer.adapters.base import Adapter, EventSink
 from pathlayer.adapters.http_ingest import HttpIngestAdapter
+from pathlayer.adapters.openclaw_lifecycle import (
+    AFTER_TOOL_CALL,
+    extract_openclaw_context,
+    extract_openclaw_run_id,
+)
 from pathlayer.events import EventKind, ToolEvent
 
 # The source key the reference plugin (examples/openclaw_plugin/) sends.
@@ -41,31 +41,20 @@ SOURCE = "openclaw"
 # examples/openclaw_plugin/pathlayer-plugin/index.js -- see the comment there.
 DEFAULT_PORT = 8787
 
-_AFTER_TOOL_CALL = "after_tool_call"
-
 
 def translate_openclaw_event(payload: Any) -> list[ToolEvent]:
-    """Translate one OpenClaw plugin-hook payload into zero or more ``ToolEvent``s.
+    """Translate one OpenClaw ``after_tool_call`` payload into ``ToolEvent``s.
 
     ``payload`` is whatever the reference plugin POSTs for a single hook
-    firing: ``{"hook": <hook name>, "event": {...}, "ctx": {...}}``, where
-    ``event``/``ctx`` follow the public plugin hook reference
-    (https://docs.openclaw.ai/plugins/hooks): ``event`` carries ``toolName``,
-    ``params``, ``result``, ``error``, ``durationMs``; ``ctx`` carries
-    ``agentId``, ``sessionKey``, ``runId``.
+    firing: ``{"hook": <hook name>, "event": {...}, "ctx": {...}}``.
 
     Raises ``ValueError`` on a structurally invalid ``after_tool_call``
-    payload (missing/falsy ``toolName``, or a non-object ``payload``) -- a
-    real bug worth surfacing loudly rather than silently dropping the event.
-    Unknown/unhandled hook names return an empty list instead, since those
-    are expected and not an error. Malformed ``event``/``ctx``/``params``
-    (e.g. not an object) fall back to empty rather than raising, since a
-    stray non-object field there is best treated as "no extra data" coming
-    from a best-effort, un-typed JavaScript forwarder.
+    payload (missing/falsy ``toolName``, or a non-object ``payload``).
+    Unknown/unhandled hook names return an empty list.
     """
     if not isinstance(payload, dict):
         raise ValueError(f"OpenClaw payload must be an object, got {type(payload).__name__}")
-    if payload.get("hook") != _AFTER_TOOL_CALL:
+    if payload.get("hook") != AFTER_TOOL_CALL:
         return []
 
     event = payload.get("event") or {}
@@ -81,11 +70,14 @@ def translate_openclaw_event(payload: Any) -> list[ToolEvent]:
     if not isinstance(params, dict):
         params = {}
 
+    context = extract_openclaw_context(payload)
     metadata: dict[str, Any] = {}
-    if ctx.get("agentId") is not None:
-        metadata["agent_id"] = ctx["agentId"]
-    if ctx.get("sessionKey") is not None:
-        metadata["session_key"] = ctx["sessionKey"]
+    if context.agent_id is not None:
+        metadata["agent_id"] = context.agent_id
+    if context.session_key is not None:
+        metadata["session_key"] = context.session_key
+    if event.get("toolCallId") is not None:
+        metadata["tool_call_id"] = event["toolCallId"]
     if event.get("error") is not None:
         metadata["error"] = event["error"]
     if event.get("durationMs") is not None:
@@ -97,18 +89,10 @@ def translate_openclaw_event(payload: Any) -> list[ToolEvent]:
             args=dict(params),
             result=event.get("result"),
             kind=EventKind.TOOL_CALL,
-            run_id=_first_str(event.get("runId"), event.get("toolCallId"), ctx.get("runId")),
+            run_id=extract_openclaw_run_id(payload),
             metadata=metadata,
         )
     ]
-
-
-def _first_str(*values: Any) -> str | None:
-    """The first non-``None`` value, stringified -- ``run_id`` is best-effort."""
-    for value in values:
-        if value is not None:
-            return str(value)
-    return None
 
 
 class OpenClawAdapter(Adapter):
@@ -116,14 +100,6 @@ class OpenClawAdapter(Adapter):
 
     A thin wrapper over :class:`~pathlayer.adapters.http_ingest.HttpIngestAdapter`
     that fixes the translator and gives OpenClaw a documented default port.
-
-    Usage::
-
-        adapter = OpenClawAdapter(pipeline.sink)
-        adapter.attach()
-        print(f"OpenClaw plugin should POST to http://127.0.0.1:{adapter.port}/ingest")
-        ...
-        adapter.detach()
     """
 
     def __init__(

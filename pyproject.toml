@@ -26,6 +26,9 @@ Homepage = "https://github.com/Kropemann/Pathlayer"
 Repository = "https://github.com/Kropemann/Pathlayer"
 Issues = "https://github.com/Kropemann/Pathlayer/issues"
 
+[project.scripts]
+pathlayer-export-run = "pathlayer.adapters.openclaw_export:main"
+
 [project.optional-dependencies]
 # Optional framework integration: the LangGraph/LangChain capture adapter
 # (pathlayer.adapters.langgraph) and the LangGraph actuator

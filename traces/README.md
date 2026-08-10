@@ -21,7 +21,7 @@ A trace is a single JSON object:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `label` | yes | One of `loop`, `no_progress`, `healthy`. |
+| `label` | yes | One of `loop`, `no_progress`, `healthy` (or `unknown` for an unclassified recorded run). |
 | `description` | no | Short human note on why the run has that label. |
 | `metadata` | no | Free-form object (source, seed, ...). |
 | `events` | yes | Ordered list of events. |
@@ -50,6 +50,11 @@ Fields left at their default are omitted on write, so simple traces stay terse.
   47k$-style slow burn).
 - **`healthy`** - a normal run that must **not** trigger any intervention (guards
   against false positives).
+- **`unknown`** - neutral, non-curated label: the run's class was never
+  established. Live recordings (ADP-2) use it rather than claiming `healthy`
+  just because the agent reached the end. Such traces never belong to the golden
+  set; VAL-3 may replay them for inspection but excludes them from confusion
+  metrics. The three labels above are the curated classes.
 
 ## Loading / writing
 

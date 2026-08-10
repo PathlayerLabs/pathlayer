@@ -20,6 +20,9 @@ from pathlayer.validation.replay import (
     score,
 )
 from pathlayer.validation.traces import (
+    CURATED_LABELS,
+    HEALTHY_LABEL,
+    UNKNOWN_LABEL,
     VALID_LABELS,
     Trace,
     dump_trace,
@@ -31,6 +34,9 @@ from pathlayer.validation.traces import (
 )
 
 __all__ = [
+    "CURATED_LABELS",
+    "HEALTHY_LABEL",
+    "UNKNOWN_LABEL",
     "VALID_LABELS",
     "CorpusSummary",
     "ReplayResult",

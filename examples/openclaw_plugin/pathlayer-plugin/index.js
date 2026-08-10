@@ -1,38 +1,33 @@
 /**
  * Pathlayer capture plugin (reference implementation for ADP-1).
  *
- * Deliberately dumb: reads the `after_tool_call` hook payload and forwards it
- * verbatim to a local Pathlayer instance over HTTP. All translation logic
- * lives in Python (`pathlayer.adapters.openclaw.translate_openclaw_event`),
- * reviewed and unit-tested there -- this file has as little logic as
- * possible on purpose, since it cannot be tested against a real gateway from
- * this repo.
+ * Forwards OpenClaw lifecycle hooks to a local Pathlayer HTTP ingest endpoint.
+ * Translation and per-run recording live in Python (`pathlayer.adapters.openclaw*`);
+ * this file stays as dumb as possible.
  *
- * Best-effort / not CI-tested: written against the public plugin hook
- * reference (https://docs.openclaw.ai/plugins/hooks), never run against a
- * real OpenClaw gateway from this repo. See ../README.md for the runbook
- * used to validate it manually against a live instance.
+ * Required OpenClaw config (conversation hooks need explicit opt-in):
  *
- * Never blocks or crashes the agent run: every send is fire-and-forget
- * (the hook handler does not await it), wrapped in try/catch, with a short
- * timeout -- if Pathlayer is slow, down, or unreachable, the agent's tool
- * call is never delayed or affected. Every attempt (success or failure) is
- * logged via `api.logger`, so a silent failure is still visible somewhere
- * even if nobody is watching Pathlayer's own output.
+ * {
+ *   "plugins": {
+ *     "entries": {
+ *       "pathlayer-plugin": {
+ *         "hooks": {
+ *           "allowConversationAccess": true
+ *         }
+ *       }
+ *     }
+ *   }
+ * }
  *
- * Plain JavaScript on purpose (no TypeScript, no build step): copy this
- * folder into OpenClaw's extensions directory and it runs as-is.
+ * Best-effort / non-blocking: every send is fire-and-forget with a short timeout.
  */
 
-// Keep this literal in sync by hand with DEFAULT_PORT in
-// pathlayer/adapters/openclaw.py -- there is no shared source of truth
-// across the Python/JavaScript boundary, so a change on one side must be
-// mirrored on the other.
+// Keep in sync with DEFAULT_PORT in pathlayer/adapters/openclaw.py
 const DEFAULT_PORT = 8787;
 const PATHLAYER_URL = process.env.PATHLAYER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}/ingest`;
-// Short on purpose: this runs on the agent's hot path (after_tool_call), so a
-// hung Pathlayer must never noticeably delay the agent.
 const SEND_TIMEOUT_MS = 300;
+
+const FORWARDED_HOOKS = ["before_agent_run", "after_tool_call", "agent_end"];
 
 async function forward(api, hook, event, ctx) {
   try {
@@ -43,37 +38,37 @@ async function forward(api, hook, event, ctx) {
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
     if (response.ok) {
-      api.logger.info(`[pathlayer] forwarded ${hook} for tool=${event?.toolName ?? "?"}`);
+      api.logger.info(`[pathlayer] forwarded ${hook}`);
     } else {
       api.logger.warn(`[pathlayer] ${hook} rejected by Pathlayer: HTTP ${response.status}`);
     }
   } catch (err) {
-    // Pathlayer is optional tooling: a failed/slow send must never affect the
-    // agent run. Logged so a silent failure is still visible somewhere (e.g.
-    // Pathlayer's listener isn't running, or the port is wrong).
     api.logger.warn(`[pathlayer] failed to forward ${hook}: ${err}`);
   }
+}
+
+function registerHook(api, hook) {
+  api.on(
+    hook,
+    (event, ctx) => {
+      void forward(api, hook, event, ctx);
+    },
+    { timeoutMs: SEND_TIMEOUT_MS },
+  );
 }
 
 const plugin = {
   id: "pathlayer-plugin",
   name: "Pathlayer capture",
   description:
-    "Forwards tool-call events to a local Pathlayer instance for loop/no-progress detection.",
+    "Forwards OpenClaw run lifecycle and tool events to a local Pathlayer recorder.",
   register(api) {
-    api.on(
-      "after_tool_call",
-      (event, ctx) => {
-        // Fire-and-forget: do NOT await here, so a slow Pathlayer never delays
-        // the hook's own return (and therefore the agent's next step).
-        void forward(api, "after_tool_call", event, ctx);
-      },
-      // Reuses SEND_TIMEOUT_MS on purpose: this bounds how long OpenClaw
-      // waits on the hook itself, same "never delay the hot path" intent as
-      // the fetch timeout above -- not a copy-paste leftover.
-      { timeoutMs: SEND_TIMEOUT_MS },
+    for (const hook of FORWARDED_HOOKS) {
+      registerHook(api, hook);
+    }
+    api.logger.info(
+      `[pathlayer] plugin registered (${FORWARDED_HOOKS.join(", ")}) -> ${PATHLAYER_URL}`,
     );
-    api.logger.info(`[pathlayer] plugin registered, forwarding to ${PATHLAYER_URL}`);
   },
 };
 

@@ -58,6 +58,7 @@ def test_after_tool_call_is_translated() -> None:
     assert event.metadata == {
         "agent_id": "agent-1",
         "session_key": "sess-1",
+        "tool_call_id": "call-1",
         "duration_ms": 42,
     }
 
@@ -74,38 +75,57 @@ def test_after_tool_call_error_is_captured_in_metadata() -> None:
     assert events[0].result is None
 
 
-def test_run_id_falls_back_to_tool_call_id_then_ctx_run_id() -> None:
+def test_run_id_prefers_ctx_over_event_and_never_tool_call_id() -> None:
     events = translate_openclaw_event(
         {
             "hook": "after_tool_call",
-            "event": {"toolName": "x", "params": {}, "toolCallId": "call-9"},
-            "ctx": {"runId": "ctx-run"},
-        }
-    )
-    assert events[0].run_id == "call-9"  # toolCallId wins over ctx.runId
-
-    events = translate_openclaw_event(
-        {
-            "hook": "after_tool_call",
-            "event": {"toolName": "x", "params": {}},
+            "event": {
+                "toolName": "x",
+                "params": {},
+                "runId": "event-run",
+                "toolCallId": "call-9",
+            },
             "ctx": {"runId": "ctx-run"},
         }
     )
     assert events[0].run_id == "ctx-run"
+    assert events[0].metadata["tool_call_id"] == "call-9"
 
     events = translate_openclaw_event(
-        {"hook": "after_tool_call", "event": {"toolName": "x", "params": {}}, "ctx": {}}
+        {
+            "hook": "after_tool_call",
+            "event": {"toolName": "x", "params": {}, "runId": "event-run"},
+            "ctx": {},
+        }
+    )
+    assert events[0].run_id == "event-run"
+
+    events = translate_openclaw_event(
+        {
+            "hook": "after_tool_call",
+            "event": {"toolName": "x", "params": {}, "toolCallId": "call-9"},
+            "ctx": {},
+        }
     )
     assert events[0].run_id is None
+    assert events[0].metadata["tool_call_id"] == "call-9"
 
 
 @pytest.mark.parametrize(
     "hook",
-    ["session_start", "session_end", "before_tool_call", "subagent_spawned", "gateway_start"],
+    [
+        "session_start",
+        "session_end",
+        "before_tool_call",
+        "subagent_spawned",
+        "gateway_start",
+        "before_agent_run",
+        "agent_end",
+    ],
 )
 def test_unhandled_hooks_are_ignored_not_errors(hook: str) -> None:
-    # V1 scope is after_tool_call only; every other hook must be silently
-    # ignored so wiring new hooks on the plugin side never breaks capture.
+    # Only after_tool_call becomes ToolEvents; lifecycle hooks are handled by
+    # the run recorder and must not raise during translation.
     assert translate_openclaw_event({"hook": hook, "event": {}, "ctx": {}}) == []
 
 
@@ -207,13 +227,13 @@ def test_adapter_end_to_end_over_http() -> None:
     assert events[0].tool == "read_file"
 
 
-# A plausible sequence of hook firings for one OpenClaw agent run, following
-# the public plugin hook payload shapes. This is the "recorded OpenClaw
-# session" the ADP-1 Definition of Done calls for: a real live OpenClaw
-# instance cannot run in CI, so this fixture is the offline stand-in, driven
-# through the adapter exactly as the reference JavaScript plugin would.
+# A plausible sequence of hook firings for one OpenClaw agent run.
 _RECORDED_OPENCLAW_SESSION: list[dict[str, Any]] = [
-    {"hook": "session_start", "event": {}, "ctx": {"sessionKey": "sess-1", "agentId": "agent-1"}},
+    {
+        "hook": "before_agent_run",
+        "event": {"prompt": "read README"},
+        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1", "runId": "run-1"},
+    },
     {
         "hook": "after_tool_call",
         "event": {
@@ -223,7 +243,7 @@ _RECORDED_OPENCLAW_SESSION: list[dict[str, Any]] = [
             "toolCallId": "call-1",
             "durationMs": 12,
         },
-        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1"},
+        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1", "runId": "run-1"},
     },
     {
         "hook": "after_tool_call",
@@ -234,7 +254,7 @@ _RECORDED_OPENCLAW_SESSION: list[dict[str, Any]] = [
             "toolCallId": "call-2",
             "durationMs": 8,
         },
-        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1"},
+        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1", "runId": "run-1"},
     },
     {
         "hook": "after_tool_call",
@@ -245,9 +265,13 @@ _RECORDED_OPENCLAW_SESSION: list[dict[str, Any]] = [
             "toolCallId": "call-3",
             "durationMs": 950,
         },
-        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1"},
+        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1", "runId": "run-1"},
     },
-    {"hook": "session_end", "event": {}, "ctx": {"sessionKey": "sess-1", "agentId": "agent-1"}},
+    {
+        "hook": "agent_end",
+        "event": {"success": True, "durationMs": 5000},
+        "ctx": {"sessionKey": "sess-1", "agentId": "agent-1", "runId": "run-1"},
+    },
 ]
 
 
@@ -262,8 +286,8 @@ def test_recorded_openclaw_session_smoke_test(tmp_path: Path) -> None:
     finally:
         adapter.detach()
 
-    # session_start/session_end are out of scope for V1 -- only the three
-    # after_tool_call hooks become events, in order.
+    # Lifecycle hooks are handled by the run recorder; only tool calls become
+    # ToolEvents through translate_openclaw_event / OpenClawAdapter.
     assert [e.tool for e in events] == ["read_file", "edit_file", "run_tests"]
     assert [e.ts for e in events] == [0, 1, 2]
     assert events[2].metadata["error"] == "1 failed, 3 passed"

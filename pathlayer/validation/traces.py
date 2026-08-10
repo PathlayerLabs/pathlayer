@@ -27,7 +27,21 @@ from typing import Any
 
 from pathlayer.events import EventKind, ToolEvent
 
-VALID_LABELS: tuple[str, ...] = ("loop", "no_progress", "healthy")
+HEALTHY_LABEL = "healthy"
+
+# Neutral label for a trace whose class was never established -- a run recorded
+# live (ADP-2) is the case that needs it: reaching the end of a run proves the
+# agent finished, never that it was healthy. It is deliberately **not** part of
+# :data:`CURATED_LABELS`: the golden set (VAL-2) requires a minimum number of
+# traces per curated class, and the replay harness (VAL-3) scores
+# ``healthy`` against everything else -- neither statement is meaningful for an
+# unclassified run, so such a trace never belongs to the scored corpus.
+UNKNOWN_LABEL = "unknown"
+
+# The three hand-curated behavioural classes of the golden set.
+CURATED_LABELS: tuple[str, ...] = ("loop", "no_progress", HEALTHY_LABEL)
+
+VALID_LABELS: tuple[str, ...] = (*CURATED_LABELS, UNKNOWN_LABEL)
 
 
 @dataclass(slots=True)

@@ -2,7 +2,7 @@
 
 These tests discover *every* committed trace under ``traces/`` (recursively),
 load it through the VAL-1 loader, and assert the corpus stays well-formed and
-balanced: a valid label, non-empty events, and at least five runs per class.
+balanced: a curated label, non-empty events, and at least five runs per class.
 The set anchors threshold tuning and regression tests, so it must not silently
 shrink or drift.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from pathlayer.events import ToolEvent
-from pathlayer.validation import VALID_LABELS, load_trace
+from pathlayer.validation import CURATED_LABELS, load_trace
 
 _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
 
@@ -33,7 +33,7 @@ def test_traces_dir_is_populated() -> None:
 @pytest.mark.parametrize("path", _TRACE_FILES, ids=lambda p: str(p.relative_to(_TRACES_DIR)))
 def test_trace_is_well_formed(path: Path) -> None:
     trace = load_trace(path)
-    assert trace.label in VALID_LABELS
+    assert trace.label in CURATED_LABELS
     assert trace.events, f"{path} has no events"
     assert all(isinstance(event, ToolEvent) for event in trace.events)
     assert all(event.tool for event in trace.events), f"{path} has an event with no tool"
@@ -45,8 +45,11 @@ def test_trace_has_description(path: Path) -> None:
 
 
 def test_at_least_five_traces_per_class() -> None:
+    # Only the curated classes are balanced by construction: the neutral
+    # ``unknown`` label exists for live-recorded runs, which never enter the
+    # golden set (see pathlayer.validation.traces.UNKNOWN_LABEL).
     counts = Counter(load_trace(path).label for path in _TRACE_FILES)
-    for label in VALID_LABELS:
+    for label in CURATED_LABELS:
         n = counts[label]
         msg = f"class {label!r} has {n} traces, expected >= {MIN_PER_CLASS}"
         assert n >= MIN_PER_CLASS, msg

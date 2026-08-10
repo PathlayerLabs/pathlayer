@@ -12,6 +12,7 @@ from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
 from pathlayer.policies import Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation import (
+    UNKNOWN_LABEL,
     Report,
     Trace,
     load_trace,
@@ -91,6 +92,21 @@ def test_score_aggregates_confusion_matrix() -> None:
     assert report.fp_rate == 0.5
     assert report.fn_rate == 0.5
     assert report.mean_detection_latency == 4.0
+
+
+def test_unknown_trace_is_reported_but_excluded_from_confusion_metrics() -> None:
+    report = score([Trace(label=UNKNOWN_LABEL), _loop(), _healthy()])
+
+    assert len(report.results) == 3
+    assert report.healthy_total == 1
+    assert report.pathological_total == 1
+    assert report.unscored_total == 1
+    assert report.true_positives == 1
+    assert report.true_negatives == 1
+    assert report.false_positives == 0
+    assert report.false_negatives == 0
+    assert report.to_dict()["unscored"] == 1
+    assert "unscored=1" in report.format()
 
 
 def test_report_per_class_and_to_dict() -> None:

@@ -35,9 +35,7 @@ from pathlayer.detectors.progress import ProgressAnchor, coding_anchors, loop_su
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
 from pathlayer.policies import Action, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
-from pathlayer.validation.traces import Trace, load_trace
-
-HEALTHY_LABEL = "healthy"
+from pathlayer.validation.traces import CURATED_LABELS, HEALTHY_LABEL, Trace, load_trace
 
 
 def _default_detectors() -> list[Detector]:
@@ -136,7 +134,9 @@ class Report:
         return sum(
             1
             for r in self.results
-            if (r.label == HEALTHY_LABEL) is healthy and r.intervened is intervened
+            if r.label in CURATED_LABELS
+            and (r.label == HEALTHY_LABEL) is healthy
+            and r.intervened is intervened
         )
 
     @property
@@ -145,7 +145,16 @@ class Report:
 
     @property
     def pathological_total(self) -> int:
-        return len(self.results) - self.healthy_total
+        return sum(
+            1
+            for result in self.results
+            if result.label in CURATED_LABELS and result.label != HEALTHY_LABEL
+        )
+
+    @property
+    def unscored_total(self) -> int:
+        """Results without a curated ground-truth label."""
+        return sum(1 for result in self.results if result.label not in CURATED_LABELS)
 
     @property
     def false_positives(self) -> int:
@@ -177,7 +186,9 @@ class Report:
         latencies = [
             r.detected_at_index
             for r in self.results
-            if r.label != HEALTHY_LABEL and r.detected_at_index is not None
+            if r.label in CURATED_LABELS
+            and r.label != HEALTHY_LABEL
+            and r.detected_at_index is not None
         ]
         return sum(latencies) / len(latencies) if latencies else 0.0
 
@@ -205,6 +216,7 @@ class Report:
     def to_dict(self) -> dict[str, Any]:
         return {
             "traces": len(self.results),
+            "unscored": self.unscored_total,
             "false_positives": self.false_positives,
             "false_negatives": self.false_negatives,
             "true_positives": self.true_positives,
@@ -220,7 +232,8 @@ class Report:
     def format(self) -> str:
         lines = [
             f"traces: {len(self.results)} "
-            f"(healthy={self.healthy_total}, pathological={self.pathological_total})",
+            f"(healthy={self.healthy_total}, pathological={self.pathological_total}, "
+            f"unscored={self.unscored_total})",
             f"FP={self.false_positives} (rate {self.fp_rate:.2f})  "
             f"FN={self.false_negatives} (rate {self.fn_rate:.2f})  "
             f"TP={self.true_positives}  TN={self.true_negatives}",

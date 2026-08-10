@@ -1,126 +1,211 @@
-# Runbook Xavier -- tester l'adapter OpenClaw (ADP-1)
+# OpenClaw integration (ADP-1) + per-run recording
 
-Ce guide ne demande aucune lecture de code : copie-colle les commandes dans
-l'ordre. Tout se passe **sur la VM Lightsail qui fait tourner OpenClaw**, pas
-sur ton Mac -- ouvre une deuxieme session SSH navigateur Lightsail (en plus de
-celle qui fait deja tourner OpenClaw) pour Pathlayer.
+Pathlayer observes OpenClaw through a **loopback HTTP bridge** (not a sidecar
+daemon, not in-process Python inside the Node gateway). A small JavaScript
+plugin forwards hook payloads; Python translates them and runs detectors.
 
-Si une etape ne se passe pas comme prevu, arrete-toi et renvoie-nous
-exactement le texte affiche dans le terminal -- pas besoin de comprendre ce
-que ca veut dire.
+## Architecture
 
-## Etape 0 -- deux infos avant de commencer
-
-Dans le terminal SSH d'OpenClaw :
-
-```bash
-openclaw --version
-free -h
+```
+OpenClaw Gateway (Node)
+  └── pathlayer-plugin (before_agent_run, after_tool_call, agent_end)
+        └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
+              └── record.py  OR  listen.py (demo)
+                    └── OpenClawRunRecorder  OR  print ToolEvents
 ```
 
-Renvoie-nous ces deux resultats avant de continuer (ca evite un aller-retour
-si l'installation du plugin coince a l'etape 3).
+- **`listen.py`** — print-only demo listener (unchanged behaviour).
+- **`record.py`** — production per-run recorder (durable directories).
+- **`pathlayer/adapters/openclaw.py`** — translates `after_tool_call` → `ToolEvent`.
+- **`pathlayer/adapters/openclaw_recorder.py`** — one pipeline per `ctx.runId`.
 
-## Etape 1 -- recuperer le code Pathlayer sur la VM
+Run identity: **`ctx.runId`** (fallback: `event.runId`). `event.toolCallId` is
+stored in metadata only and is **never** used as `ToolEvent.run_id`.
 
-Dans la deuxieme session SSH (celle dediee a Pathlayer) :
+## Required OpenClaw configuration
+
+Conversation hooks (`before_agent_run`, `agent_end`) require explicit opt-in:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "pathlayer-plugin": {
+        "hooks": {
+          "allowConversationAccess": true
+        }
+      }
+    }
+  }
+}
+```
+
+## Installation (Lightsail / same host as OpenClaw)
 
 ```bash
-# Verifie que l'acces au depot fonctionne AVANT d'aller plus loin -- si cette
-# ligne demande un mot de passe ou reste bloquee, arrete-toi et dis-le nous
-# plutot que d'attendre :
-git ls-remote git@github.com:Kropemann/Pathlayer.git >/dev/null && echo "acces OK" || echo "ACCES A CONFIGURER D'ABORD"
-
-# Si pathlayer n'est pas encore present sur la VM :
-git clone git@github.com:Kropemann/Pathlayer.git pathlayer
-cd pathlayer
-# Si le dossier existe deja (tu l'avais peut-etre deja clone la semaine
-# derniere) :
-cd pathlayer && git fetch origin
-
-git checkout feat/40-openclaw-http-adapter
-git pull
-
-# Environnement Python isole (evite une erreur "externally-managed-environment"
-# frequente sur les images Ubuntu recentes) :
+# Pathlayer release layout (example)
+sudo mkdir -p /opt/pathlayer/releases /opt/pathlayer/shared
+cd /opt/pathlayer/releases
+git clone git@github.com:Kropemann/Pathlayer.git "$(date +%Y%m%d%H%M%S)"
+cd "$(ls -1t | head -1)"
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+.venv/bin/pip install -e ".[yaml]"
+sudo ln -sfn "$PWD" /opt/pathlayer/current
+
+# Recording storage (outside the git checkout)
+sudo mkdir -p /var/lib/pathlayer/runs
+sudo chown "$USER":"$USER" /var/lib/pathlayer/runs
+export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
 ```
 
-## Etape 2 -- lancer l'ecouteur Pathlayer
-
-Toujours dans cette meme session SSH (celle de Pathlayer) :
+Install the OpenClaw plugin:
 
 ```bash
-nohup python examples/openclaw_plugin/listen.py > pathlayer.log 2>&1 &
-tail -f pathlayer.log
-```
-
-Tu dois voir un message du genre `En ecoute sur : http://127.0.0.1:8787/ingest`.
-
-Laisse tourner. `Ctrl+C` n'arrete que l'affichage (`tail`), pas l'ecouteur --
-il continue meme si la session SSH se coupe. Pour l'arreter pour de vrai plus
-tard : `pkill -f listen.py`.
-
-## Etape 3 -- installer le plugin dans OpenClaw
-
-Dans le terminal SSH d'OpenClaw cette fois, copie le dossier du plugin (celui
-qui est arrive avec le code a l'etape 1) dans le dossier des extensions
-d'OpenClaw, puis redemarre le gateway :
-
-```bash
-cp -r ~/pathlayer/examples/openclaw_plugin/pathlayer-plugin ~/.openclaw/extensions/pathlayer-plugin
+cp -r /opt/pathlayer/current/examples/openclaw_plugin/pathlayer-plugin \
+  ~/.openclaw/extensions/pathlayer-plugin
 openclaw gateway restart
-openclaw gateway status
 ```
 
-(Adapte `~/pathlayer` si tu as clone ailleurs, et `~/.openclaw/extensions` si
-ton install utilise un autre chemin -- `openclaw --version` a l'etape 0 nous
-dira si le chemin est different sur ta version.)
+## Start the recording listener
 
-## Etape 4 -- comment revenir en arriere si besoin
+```bash
+cd /opt/pathlayer/current
+source .venv/bin/activate
+export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
+nohup python examples/openclaw_plugin/record.py > /opt/pathlayer/shared/record.log 2>&1 &
+tail -f /opt/pathlayer/shared/record.log
+```
 
-Avant de tester quoi que ce soit, garde cette commande sous la main : elle
-retire le plugin et redemarre le gateway proprement, sans toucher a ta
-configuration OpenClaw existante (celle que tu as mis du temps a onboarder) :
+Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`.
+
+### Detector configuration
+
+The listener uses the standard Pathlayer config (INF-4) -- no listener-specific
+format. In priority order: `--config <path>`, `$PATHLAYER_CONFIG`, then
+discovery of `.pathlayer/config.{yaml,yml,json}` in the working directory. With
+no config file the built-in defaults apply.
+
+```bash
+python examples/openclaw_plugin/record.py --config /opt/pathlayer/shared/config.yaml
+```
+
+An unreadable, malformed or out-of-range config **fails at startup** with a
+`invalid Pathlayer config: ...` message and a non-zero exit -- it never falls
+back to defaults silently.
+
+For a quick smoke test without persistence, use the print-only demo:
+
+```bash
+python examples/openclaw_plugin/listen.py
+```
+
+## Run one test task
+
+1. Open the OpenClaw dashboard and send a harmless task (e.g. “read README.md
+   and report the line count”).
+2. Confirm OpenClaw logs show `[pathlayer] forwarded before_agent_run` (etc.).
+3. Confirm a run directory appears under `$PATHLAYER_RUNS_DIR/<runId>/`.
+
+## Inspect a recorded run
+
+Each run directory contains:
+
+```
+<run_id>/
+├── manifest.json      # schema version, execution status, observed outcome, metadata
+├── request.json       # before_agent_run snapshot (prompt, raw payload)
+├── events.raw.jsonl   # every hook payload (verbatim)
+├── trace.json         # replayable ToolEvent trace (VAL-1)
+├── decisions.jsonl    # Pathlayer actions per tool event
+└── final.json         # agent_end snapshot
+```
+
+Summary JSON files are written atomically (temp file, `fsync`, `os.replace`),
+while the JSONL journals are appended and synced after each record. Run files
+are protected by their owner-only directory; exported files are explicitly
+created as `0600`.
+
+**Execution status vs health.** `manifest.json` separates the two:
+
+| field           | meaning                                                       |
+| --------------- | ------------------------------------------------------------- |
+| `status`        | `started` / `orphan` / `completed` / `interrupted`             |
+| `stopped`       | whether Pathlayer emitted a STOP during the run               |
+| `health`        | curated verdict; live recordings remain `unknown`             |
+| `health_reason` | observed OpenClaw/Pathlayer outcome awaiting human curation   |
+
+A run reaching `agent_end` is `completed`, which says nothing about whether it
+was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
+decision in `health_reason`, but always keeps `health` and the VAL-1 trace label
+at `unknown` until an explicit human curation step assigns ground truth. An
+absence of intervention is not evidence that the run was healthy, and a STOP
+is a detector outcome rather than a curated failure class.
+
+**A STOP does not end recording.** Pathlayer is a passive observer in V1: after
+a STOP the detectors and arbitration stop running, but events keep being
+normalized, kept in order and appended to `trace.json`. Those events appear in
+`decisions.jsonl` with `"analyzed": false`.
+
+Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
+`agent_end` or a late tool call for such a run is logged and dropped, never
+replayed onto the run directory.
+
+```bash
+RUN=run-abc123   # original ctx.runId from manifest.json
+cat "/var/lib/pathlayer/runs/$RUN/manifest.json"
+cat "/var/lib/pathlayer/runs/$RUN/trace.json"
+```
+
+## Export one run
+
+```bash
+pathlayer-export-run "$RUN" --output "/tmp/$RUN.tar.gz"
+cat "/tmp/$RUN.tar.gz.sha256.json"
+```
+
+Refuses unknown or ambiguous run IDs. The archive and its checksum manifest are
+created owner-only (`0600`) whatever the umask, and moved into place only once
+complete -- an exported run carries the same prompts and tool results as the run
+directory it comes from.
+
+## Replay `trace.json`
+
+```bash
+python - <<'PY'
+from pathlayer.validation.replay import replay_trace
+from pathlayer.validation.traces import load_trace
+report = replay_trace(load_trace("/var/lib/pathlayer/runs/RUN_ID/trace.json"))
+print(report)
+PY
+```
+
+Or use the offline replay CLI documented in `traces/README.md`.
+
+## Privacy warning
+
+Recorded runs contain **prompts, tool arguments, and tool results** as sent by
+OpenClaw. Treat `$PATHLAYER_RUNS_DIR` as sensitive data. Restrict filesystem
+permissions (owner-only). Do not commit run directories into git.
+
+## Limitations (V1)
+
+- Passive observer only — Pathlayer does **not** block OpenClaw tool calls yet,
+  so a STOP is recorded and stops analysis without ending the OpenClaw run.
+- No retention: run directories accumulate until you archive or delete them.
+- Only the three forwarded hooks are recorded; LLM cost hooks are not wired.
+- Hook payload shapes follow the public OpenClaw docs and may differ slightly
+  on your gateway version — inspect `events.raw.jsonl` when in doubt.
+- `ts` on ToolEvents reflects HTTP arrival order, not wall-clock time.
+
+## Rollback
 
 ```bash
 rm -rf ~/.openclaw/extensions/pathlayer-plugin && openclaw gateway restart
+pkill -f "examples/openclaw_plugin/record.py" || true
 ```
 
-## Etape 5 -- tester
+## Demo listener runbook (legacy)
 
-1. Depuis ton Mac, ouvre le dashboard OpenClaw comme d'habitude (via le tunnel
-   VPN).
-2. Demande-lui une tache **anodine** (par exemple "lis le fichier README.md
-   et dis-moi combien de lignes il fait") -- evite un fichier sensible,
-   puisque tu vas nous coller la sortie telle quelle.
-3. Retourne voir `pathlayer.log` sur la VM (`tail -f pathlayer.log` si tu ne
-   l'as plus sous les yeux) : un evenement doit apparaitre pour chaque outil
-   utilise par OpenClaw.
-4. Renvoie-nous :
-   - le contenu de `pathlayer.log` (meme si vide -- ca veut dire quelque
-     chose aussi) ;
-   - les logs d'OpenClaw autour du moment du test (le plugin y ecrit une
-     ligne `[pathlayer] ...` a chaque tentative d'envoi, succes ou echec --
-     ca nous dit ou ca coince si ca ne marche pas).
-
-Si `pathlayer.log` reste vide **et** qu'aucune ligne `[pathlayer] plugin
-registered...` n'apparait dans les logs d'OpenClaw juste apres le redemarrage
-du gateway (etape 3), c'est probablement que la methode d'enregistrement du
-hook (`api.on` dans `index.js`) ne correspond pas a l'API de ta version
-d'OpenClaw -- dis-le nous, c'est un point precis a ajuster cote plugin, pas la
-peine de chercher plus loin de ton cote. (Valide sur OpenClaw `2026.6.11` :
-`api.registerHook(...)` echouait au runtime avec `hook registration missing
-name`, remplace par `api.on(...)`.)
-
-## Notes
-
-- Le plugin (`pathlayer-plugin/index.js`) est ecrit contre la documentation
-  publique d'OpenClaw, jamais teste contre un vrai gateway depuis ce depot --
-  attends-toi a devoir l'ajuster une fois ton retour recu, ce n'est pas
-  grave.
-- Rien ici ne bloque ou ne ralentit l'agent : si Pathlayer est eteint ou lent,
-  le plugin abandonne l'envoi au bout de 300 ms et OpenClaw continue
-  normalement.
+The step-by-step French runbook for first-time manual validation with
+`listen.py` remains valid for smoke testing; prefer `record.py` for production
+recording on `/var/lib/pathlayer/runs`.
