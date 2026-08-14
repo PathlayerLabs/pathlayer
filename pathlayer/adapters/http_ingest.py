@@ -76,6 +76,23 @@ _MAX_BODY_BYTES = 1_000_000
 # the body-size cap above.
 _SOCKET_TIMEOUT_S = 5.0
 
+# Depth of the kernel's accept queue. ``socketserver`` defaults it to 5, which
+# is below the burst an out-of-process forwarder produces: sends are
+# fire-and-forget and concurrent, so a handful of hooks are routinely in flight
+# at once while this process' single accept loop competes for the GIL with the
+# request threads it just spawned. A connection that does not fit the queue is
+# dropped by the kernel *before* the server accepts it, so the request is never
+# read and its event never exists -- and the forwarder, which does not retry,
+# only logs a warning. 128 is deeper than any plausible local burst, costs
+# nothing while idle, and is clamped by the OS (``net.core.somaxconn``) anyway.
+_LISTEN_BACKLOG = 128
+
+
+class _IngestHTTPServer(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` with an accept queue sized for concurrent posts."""
+
+    request_queue_size = _LISTEN_BACKLOG
+
 
 class HttpIngestAdapter(Adapter):
     """Loopback HTTP server that turns POSTed framework events into ``ToolEvent``s.
@@ -135,7 +152,7 @@ class HttpIngestAdapter(Adapter):
             raise RuntimeError("adapter is already attached")
         with self._lock:
             self._ts = 0
-        self._server = ThreadingHTTPServer((self._host, self._requested_port), _make_handler(self))
+        self._server = _IngestHTTPServer((self._host, self._requested_port), _make_handler(self))
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 

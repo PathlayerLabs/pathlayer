@@ -53,6 +53,10 @@ def _echo_translator(payload: Any) -> list[ToolEvent]:
     return [ToolEvent(tool=str(payload["tool"]), args=payload.get("args", {}))]
 
 
+# Size of the simultaneous-post burst the concurrency test below fires.
+_CONCURRENT_BURST = 32
+
+
 def test_translators_must_not_be_empty() -> None:
     with pytest.raises(ValueError, match="translators"):
         HttpIngestAdapter(lambda _e: None, translators={})
@@ -334,6 +338,22 @@ def test_binds_to_loopback_only_by_default() -> None:
         adapter.detach()
 
 
+def test_listen_backlog_absorbs_a_concurrent_burst() -> None:
+    # The kernel drops any connection that does not fit the accept queue before
+    # the server ever sees it, so the request is never read and its event never
+    # exists -- and the forwarder is fire-and-forget, so nothing replays it.
+    # socketserver's default of 5 is below the burst below; assert the depth
+    # directly, because the test below can only observe the shortfall as
+    # load-dependent flakiness on a busy machine.
+    adapter = HttpIngestAdapter(lambda _e: None, translators={"demo": _echo_translator})
+    adapter.attach()
+    try:
+        assert adapter._server is not None
+        assert adapter._server.request_queue_size >= _CONCURRENT_BURST
+    finally:
+        adapter.detach()
+
+
 def test_concurrent_posts_lose_no_events_and_ts_stays_contiguous() -> None:
     events: list[ToolEvent] = []
     bookkeeping = threading.Lock()
@@ -345,7 +365,7 @@ def test_concurrent_posts_lose_no_events_and_ts_stays_contiguous() -> None:
     adapter = HttpIngestAdapter(sink, translators={"demo": _echo_translator})
     adapter.attach()
 
-    n = 32
+    n = _CONCURRENT_BURST
     errors: list[BaseException] = []
 
     def worker(i: int) -> None:
