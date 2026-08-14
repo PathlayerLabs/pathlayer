@@ -163,6 +163,26 @@ SUMMARIZE additionally requires `summary_tool()`, `summary_gate_node(sink)` and
 the conditional route returned by `summary_route()`. The complete runnable
 wiring lives in [`examples/demo_no_progress.py`](examples/demo_no_progress.py).
 
+## Development
+
+Install a source checkout with its development dependencies in a virtual
+environment using Python 3.10 or later:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+On Python 3.12+, an opt-in line-coverage profile speeds up the local edit-run
+loop by using `sys.monitoring`:
+
+```bash
+COVERAGE_CORE=sysmon pytest --cov-config=.coveragerc.fast --cov-fail-under=0
+```
+
+This fast profile does not measure branch coverage and is not the project gate.
+Before submitting or merging a change, run plain `pytest` and the complete
+validation gate documented in [`AGENTS.md`](AGENTS.md#validation).
+
 ## Demos
 
 - [`examples/demo_loop.py`](examples/demo_loop.py): a repeated loop stopped

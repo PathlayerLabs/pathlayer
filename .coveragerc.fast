@@ -1,0 +1,27 @@
+# Line-coverage profile for the LOCAL iteration loop only. NOT the project gate.
+#
+# Why it exists: `branch = true` in pyproject.toml makes coverage refuse
+# sys.monitoring (PEP 669) -- "sys.monitoring can't measure branches in this
+# version" -- and fall back to its slow C tracer. Measured on the hot path
+# (tests/test_perf2_incremental.py), running this profile with
+# COVERAGE_CORE=sysmon spends 3.5x less CPU than the default branch gate. See
+# the AGENTS.md "Fast local iteration loop" section for the exact numbers.
+#
+# What running with this profile does NOT prove: it measures lines, not
+# branches, so the 85% branch-coverage floor is never verified. The full gate
+# in AGENTS.md stays mandatory before a PR. `pytest` with no arguments and the
+# CI `test` job never read this file; it applies only when --cov-config points
+# at it explicitly.
+[run]
+branch = false
+source = pathlayer
+
+[report]
+# Mirrors [tool.coverage.report] in pyproject.toml, because naming a config
+# file makes coverage stop reading pyproject.toml entirely. Keep both in sync
+# so the local term-missing output points at the same gaps as the gate.
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if TYPE_CHECKING:
+    @(abc\.)?abstractmethod
