@@ -34,19 +34,26 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pathlayer.detectors.base import Detector
-from pathlayer.detectors.budget import BudgetDetector
+from pathlayer.detectors.budget import BudgetDetector, BudgetState, budget_delta
 from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
 from pathlayer.detectors.resource import ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
+from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
 from pathlayer.policies import Action, OverrideRule, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
+from pathlayer.store import (
+    PersistentPipeline,
+    SQLiteStateStore,
+    StateStore,
+    configuration_fingerprint,
+)
 
 __all__ = [
     "ConfigError",
@@ -316,8 +323,7 @@ class PipelineSection:
 
 @dataclass(slots=True)
 class StoreSection:
-    # Carried for INF-1 (cross-run SQLite state); inert today -- nothing reads or
-    # creates it yet.
+    # SQLite state used when build_pipeline receives an explicit state_key.
     path: str = f"{CONFIG_DIR}/state.db"
 
 
@@ -620,6 +626,8 @@ def build_pipeline(
     config: PathlayerConfig | None = None,
     *,
     logger: logging.Logger | None = None,
+    state_key: str | None = None,
+    store: StateStore | None = None,
 ) -> Pipeline:
     """Construct a :class:`~pathlayer.pipeline.Pipeline` from a config.
 
@@ -842,11 +850,51 @@ def build_pipeline(
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
     progress_anchors = loop_suppression_anchors() if suppressions else None
-    return Pipeline(
+    pipeline = Pipeline(
         detectors,
         policy,
         recent_history=config.pipeline.recent_history,
         logger=logger,
         dry_run=config.pipeline.dry_run,
         progress_anchors=progress_anchors,
+    )
+    if state_key is None:
+        if store is not None:
+            raise ValueError("store requires a state_key")
+        return pipeline
+
+    initial_pipeline: Pipeline | None = pipeline
+
+    def pipeline_factory() -> Pipeline:
+        nonlocal initial_pipeline
+        if initial_pipeline is not None:
+            resolved = initial_pipeline
+            initial_pipeline = None
+            return resolved
+        return build_pipeline(config, logger=logger)
+
+    state_store = store or SQLiteStateStore(config.store.path)
+    owns_store = store is None
+
+    def resolve_cost(event: ToolEvent) -> BudgetState:
+        return budget_delta(
+            event,
+            tool_costs_usd=spec.budget.tool_costs_usd if spec.budget.enabled else None,
+            default_cost_usd=spec.budget.default_cost_usd if spec.budget.enabled else 0.0,
+        )
+
+    # PersistentPipeline intentionally mirrors Pipeline's public surface. Keep
+    # the historical return annotation so existing typed callers do not need a
+    # migration merely to opt into persistence.
+    return cast(
+        Pipeline,
+        PersistentPipeline(
+            pipeline_factory,
+            state_store,
+            state_key,
+            configuration_fingerprint(config),
+            cost_resolver=resolve_cost,
+            owns_store=owns_store,
+            logger=resolved_logger,
+        ),
     )

@@ -25,7 +25,7 @@ import subprocess
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -49,10 +49,20 @@ from pathlayer.adapters.openclaw_run_store import (
     atomic_write_json,
     utc_now_iso,
 )
-from pathlayer.config import PathlayerConfig, build_pipeline
+from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
+from pathlayer.store import (
+    PersistentPipeline,
+    SQLiteStateStore,
+    StateClosedError,
+    StateCompatibilityError,
+    StateConcurrencyError,
+    StateCorruptionError,
+    StateIncompleteError,
+    StateStoreError,
+)
 from pathlayer.validation.traces import UNKNOWN_LABEL, Trace, trace_to_dict
 
 logger = logging.getLogger(__name__)
@@ -71,6 +81,7 @@ class _ActiveRun:
     # recorded after a passive STOP, which the pipeline's own ``history``
     # deliberately excludes (it stops accumulating once halted).
     events: list[ToolEvent] = field(default_factory=list)
+    persistence_reported: bool = False
 
 
 def _hook_part(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -104,9 +115,30 @@ class OpenClawRunRecorder:
         if config is not None and pipeline_factory is not None:
             raise ValueError("pass either config or pipeline_factory, not both")
         self._store = RunStore(runs_root)
-        self._pipeline_factory = pipeline_factory or (lambda: build_pipeline(config))
-        if config is not None:
-            self._pipeline_factory()
+        self._pipeline_factory = pipeline_factory
+        self._config: PathlayerConfig | None = None
+        self._state_store: SQLiteStateStore | None = None
+        self._state_init_error: StateStoreError | None = None
+        if pipeline_factory is None:
+            # A recorder without an explicit config keeps all of its durable
+            # artifacts together under runs_root. Explicit store paths retain
+            # their normal cwd-relative configuration semantics.
+            effective_config = config or PathlayerConfig()
+            if effective_config.store.path == StoreSection().path:
+                effective_config = replace(
+                    effective_config,
+                    store=StoreSection(path=str(runs_root / "state.db")),
+                )
+            build_pipeline(effective_config)  # fail fast before hooks are swallowed
+            self._config = effective_config
+            try:
+                self._state_store = SQLiteStateStore(effective_config.store.path)
+            except StateStoreError as error:
+                self._state_init_error = error
+                logger.exception(
+                    "OpenClaw SQLite state is unavailable; raw recording and "
+                    "memory-only analysis remain active"
+                )
         self._pathlayer_commit = pathlayer_commit or _detect_commit_sha()
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
@@ -118,7 +150,92 @@ class OpenClawRunRecorder:
 
     def startup(self) -> None:
         """Mark unfinished runs as interrupted; never overwrite completed runs."""
-        self._store.mark_unfinished_as_interrupted()
+        try:
+            if self._state_init_error is not None:
+                for run in self._store.list_runs():
+                    if run.read_manifest().get("status") not in TERMINAL_STATUSES:
+                        self._record_persistence_error(run, self._state_init_error)
+            elif self._state_store is not None:
+                for run in self._store.list_runs():
+                    manifest = run.read_manifest()
+                    if (
+                        manifest.get("status") in TERMINAL_STATUSES
+                        or manifest.get("state_durable") is False
+                    ):
+                        continue
+                    try:
+                        try:
+                            pipeline = self._new_pipeline(run.original_run_id)
+                            self._restore_recorded_events(run, pipeline)
+                            assert isinstance(pipeline, PersistentPipeline)
+                            pipeline.close("interrupted")
+                            self._record_pipeline_durability(run, pipeline)
+                        except StateClosedError:
+                            snapshot = self._state_store.read_scope(run.original_run_id)
+                            if snapshot.status in {"completed", "interrupted"}:
+                                run.update_manifest(
+                                    status=snapshot.status,
+                                    ended_at=run.read_manifest().get("ended_at") or utc_now_iso(),
+                                )
+                    except StateStoreError as error:
+                        logger.exception(
+                            "could not restore durable state for OpenClaw run %r",
+                            run.original_run_id,
+                        )
+                        self._record_persistence_error(run, error)
+        finally:
+            self._store.mark_unfinished_as_interrupted()
+
+    def _new_pipeline(self, run_id: str) -> Pipeline:
+        if self._pipeline_factory is not None:
+            return self._pipeline_factory()
+        assert self._config is not None
+        if self._state_store is None:
+            return build_pipeline(self._config)
+        return build_pipeline(self._config, state_key=run_id, store=self._state_store)
+
+    def _memory_pipeline(self) -> Pipeline:
+        if self._pipeline_factory is not None:
+            return self._pipeline_factory()
+        assert self._config is not None
+        return build_pipeline(self._config)
+
+    @staticmethod
+    def _error_category(error: StateStoreError) -> str:
+        return type(error).__name__
+
+    def _record_persistence_error(self, directory: RunDirectory, error: StateStoreError) -> None:
+        directory.update_manifest(
+            state_durable=False,
+            persistence_error=self._error_category(error),
+        )
+
+    def _record_pipeline_durability(self, directory: RunDirectory, pipeline: Pipeline) -> None:
+        if not isinstance(pipeline, PersistentPipeline) or pipeline.durable:
+            return
+        error = pipeline.persistence_error
+        directory.update_manifest(
+            state_durable=False,
+            persistence_error=self._error_category(error)
+            if error is not None
+            else "StateStoreError",
+        )
+
+    def _interrupt_active_run(self, active: _ActiveRun, error: StateStoreError) -> None:
+        """Contain an incompatible live history without losing its raw journal."""
+        if isinstance(active.pipeline, PersistentPipeline):
+            active.pipeline.abandon_persistence(error)
+        self._record_persistence_error(active.directory, error)
+        active.directory.update_manifest(
+            status="interrupted",
+            ended_at=utc_now_iso(),
+            event_count=active.sequence,
+            stopped=active.pipeline.stopped,
+        )
+        active.persistence_reported = True
+        active.completed = True
+        with self._lock:
+            self._runs.pop(active.directory.original_run_id, None)
 
     def process_payload(self, payload: Any) -> None:
         """Record one forwarded hook payload.
@@ -182,6 +299,10 @@ class OpenClawRunRecorder:
         with self._lock:
             active = self._runs.get(run_id)
             if active is not None:
+                status = active.directory.read_manifest().get("status")
+                if status in TERMINAL_STATUSES:
+                    self._runs.pop(run_id, None)
+                    return None
                 return active
             existing = self._store.resolve_run(run_id)
             if existing is not None:
@@ -213,10 +334,33 @@ class OpenClawRunRecorder:
                 "openclaw_provider": _extract_provider(payload),
                 "workspace": _extract_workspace(payload),
             }
+            if self._pipeline_factory is None:
+                manifest["state_durable"] = self._state_store is not None
+                manifest["persistence_error"] = (
+                    self._error_category(self._state_init_error)
+                    if self._state_init_error is not None
+                    else None
+                )
             directory = self._store.open_or_create(run_id, manifest=manifest)
             manifest["dir_name"] = directory.dir_name
             atomic_write_json(directory.manifest_path, manifest)
-            active = _ActiveRun(directory=directory, pipeline=self._pipeline_factory())
+            try:
+                pipeline = self._new_pipeline(run_id)
+            except (
+                StateCompatibilityError,
+                StateCorruptionError,
+                StateIncompleteError,
+                StateClosedError,
+            ) as error:
+                logger.exception("incompatible durable state for OpenClaw run %r", run_id)
+                self._record_persistence_error(directory, error)
+                directory.update_manifest(status="interrupted", ended_at=utc_now_iso())
+                return None
+            except StateStoreError as error:
+                logger.exception("durable state unavailable for OpenClaw run %r", run_id)
+                self._record_persistence_error(directory, error)
+                pipeline = self._memory_pipeline()
+            active = _ActiveRun(directory=directory, pipeline=pipeline)
             self._runs[run_id] = active
             return active
 
@@ -245,8 +389,54 @@ class OpenClawRunRecorder:
             )
             return None
         logger.debug("re-attaching to unfinished run %r (status=%s)", run_id, status)
-        pipeline = self._pipeline_factory()
-        sequence, events = self._restore_recorded_events(existing, pipeline)
+        persistence_reported = manifest.get("state_durable") is False
+        if persistence_reported:
+            logger.warning(
+                "interrupting OpenClaw run %r: its SQLite journal is only a prefix",
+                run_id,
+            )
+            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            return None
+        try:
+            pipeline = self._new_pipeline(run_id)
+        except (
+            StateCompatibilityError,
+            StateCorruptionError,
+            StateIncompleteError,
+            StateClosedError,
+        ) as error:
+            logger.exception("incompatible durable state for OpenClaw run %r", run_id)
+            self._record_persistence_error(existing, error)
+            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            return None
+        except StateStoreError as error:
+            logger.exception("durable state unavailable for OpenClaw run %r", run_id)
+            self._record_persistence_error(existing, error)
+            pipeline = self._memory_pipeline()
+            persistence_reported = True
+        if self._state_init_error is not None and not persistence_reported:
+            self._record_persistence_error(existing, self._state_init_error)
+            persistence_reported = True
+        try:
+            sequence, events = self._restore_recorded_events(existing, pipeline)
+        except (StateConcurrencyError, StateCompatibilityError, StateCorruptionError) as error:
+            logger.exception("durable/raw journal divergence for OpenClaw run %r", run_id)
+            if isinstance(pipeline, PersistentPipeline):
+                pipeline.abandon_persistence(error)
+            self._record_persistence_error(existing, error)
+            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            return None
+        except StateStoreError as error:
+            logger.exception("durable state failed while reattaching OpenClaw run %r", run_id)
+            self._record_persistence_error(existing, error)
+            persistence_reported = True
+            pipeline = self._memory_pipeline()
+            sequence, events = self._restore_recorded_events(existing, pipeline)
+        if isinstance(pipeline, PersistentPipeline) and not pipeline.durable:
+            self._record_pipeline_durability(existing, pipeline)
+            persistence_reported = True
+            pipeline = self._memory_pipeline()
+            sequence, events = self._restore_recorded_events(existing, pipeline)
         sequence = max(sequence, _as_int(manifest.get("event_count")))
         active = _ActiveRun(
             directory=existing,
@@ -254,6 +444,7 @@ class OpenClawRunRecorder:
             sequence=sequence,
             started=existing.request_path.is_file(),
             events=events,
+            persistence_reported=persistence_reported,
         )
         self._runs[run_id] = active
         return active
@@ -286,11 +477,15 @@ class OpenClawRunRecorder:
                     f"invalid record in {directory.raw_events_path} at line {line_number}"
                 )
             sequence = max(sequence, _as_int(record.get("sequence")))
-            for event in translate_openclaw_event(record["payload"]):
+            for offset, event in enumerate(translate_openclaw_event(record["payload"])):
                 event.ts = float(len(events))
                 events.append(event)
                 if not pipeline.stopped:
-                    pipeline.process(event)
+                    _process_pipeline(
+                        pipeline,
+                        event,
+                        _openclaw_event_id(_as_int(record.get("sequence")), offset),
+                    )
         return sequence, events
 
     def _append_raw(self, active: _ActiveRun, payload: dict[str, Any]) -> dict[str, Any]:
@@ -350,7 +545,7 @@ class OpenClawRunRecorder:
         """
         if payload.get("hook") != AFTER_TOOL_CALL:
             return
-        for event in translate_openclaw_event(payload):
+        for offset, event in enumerate(translate_openclaw_event(payload)):
             event.ts = float(len(active.events))
             active.events.append(event)
             index = len(active.events) - 1
@@ -359,7 +554,26 @@ class OpenClawRunRecorder:
                     active, record, event, Action.STOP, index=index, analyzed=False
                 )
                 continue
-            action = active.pipeline.process(event)
+            try:
+                action = _process_pipeline(
+                    active.pipeline,
+                    event,
+                    _openclaw_event_id(_as_int(record.get("sequence")), offset),
+                )
+            except StateStoreError as error:
+                logger.exception(
+                    "interrupting OpenClaw run %r after a durable identity conflict",
+                    active.directory.original_run_id,
+                )
+                self._interrupt_active_run(active, error)
+                return
+            if (
+                isinstance(active.pipeline, PersistentPipeline)
+                and not active.pipeline.durable
+                and not active.persistence_reported
+            ):
+                self._record_pipeline_durability(active.directory, active.pipeline)
+                active.persistence_reported = True
             self._record_decision(active, record, event, action, index=index)
         active.directory.update_manifest(event_count=active.sequence)
 
@@ -368,7 +582,6 @@ class OpenClawRunRecorder:
     ) -> None:
         if active.completed:
             return
-        active.completed = True
         hook_event: dict[str, Any] = _hook_part(payload, "event")
         hook_ctx: dict[str, Any] = _hook_part(payload, "ctx")
         duration_ms = hook_event.get("durationMs")
@@ -407,6 +620,18 @@ class OpenClawRunRecorder:
         # (``dump_trace`` writes in place -- fine for offline corpus tooling,
         # not for a live listener).
         atomic_write_json(active.directory.trace_path, trace_to_dict(trace))
+        if isinstance(active.pipeline, PersistentPipeline):
+            try:
+                active.pipeline.close("completed")
+            except StateStoreError as error:
+                logger.exception(
+                    "OpenClaw run %r completed after durable close failed",
+                    active.directory.original_run_id,
+                )
+                active.pipeline.abandon_persistence(error)
+                self._record_persistence_error(active.directory, error)
+                active.persistence_reported = True
+            self._record_pipeline_durability(active.directory, active.pipeline)
         active.directory.update_manifest(
             status="completed",
             ended_at=utc_now_iso(),
@@ -415,6 +640,7 @@ class OpenClawRunRecorder:
             health_reason=health_reason,
             stopped=active.pipeline.stopped,
         )
+        active.completed = True
         with self._lock:
             self._runs.pop(active.directory.original_run_id, None)
 
@@ -485,6 +711,18 @@ def _as_int(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(0, value)
+
+
+def _openclaw_event_id(sequence: int, offset: int) -> str:
+    """Stable id for one normalized event produced by a raw hook record."""
+    return f"openclaw:{sequence}:{offset}"
+
+
+def _process_pipeline(pipeline: Pipeline, event: ToolEvent, event_id: str) -> Action:
+    """Persist built-in recorder pipelines without widening custom factories."""
+    if isinstance(pipeline, PersistentPipeline):
+        return pipeline.process(event, event_id=event_id)
+    return pipeline.process(event)
 
 
 def _detect_commit_sha() -> str | None:

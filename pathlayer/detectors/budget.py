@@ -7,11 +7,10 @@ tool/model call: a configured per-tool USD estimate is used only when a
 ``TOOL_CALL`` or ``LLM_CALL`` has no positive captured cost. A captured positive
 cost always wins, so model pricing is never charged twice.
 
-Cross-run spend (the crash-resume / multi-run case) is supported via
-``baseline_usd``: the cumulative cost already recorded for this run id before
-the current process started. Wiring that baseline from the local SQLite store
-is INF-1's job -- this detector never touches storage itself, it just adds the
-seed it is given. Until then ``baseline_usd`` defaults to 0.0 (single run).
+``baseline_usd`` is an explicit external seed for spend that is not present in
+the replayed event journal. SQLite restoration replays every durable event, so
+its counters must never be fed back as a baseline or the same cost would be
+charged twice.
 
 With the default arbitration (stop_threshold 0.9) a run is stopped once it has
 burned ~90% of the budget -- an early brake rather than a post-mortem once the
@@ -41,10 +40,55 @@ def _validated_cost(value: float, name: str) -> float:
 
 
 @dataclass(frozen=True, slots=True)
-class _BudgetState:
+class BudgetState:
+    """Public, immutable cost fold shared by BUD and persisted reports.
+
+    ``priced_events`` counts valid, strictly positive captured costs. Under the
+    normalized event contract, zero means no captured price rather than a
+    measured zero; configured estimates remain a separate component.
+    """
+
     captured_usd: float = 0.0
     estimated_usd: float = 0.0
     invalid_costs: int = 0
+    priced_events: int = 0
+
+    @property
+    def effective_usd(self) -> float:
+        return self.captured_usd + self.estimated_usd
+
+
+def budget_delta(
+    event: ToolEvent,
+    *,
+    tool_costs_usd: Mapping[str, float] | None = None,
+    default_cost_usd: float = 0.0,
+) -> BudgetState:
+    """Return the deterministic cost contribution of one event.
+
+    Passing no estimates still records captured and invalid costs. This is the
+    mode persistence uses when the budget detector is disabled.
+    """
+    raw = event.cost_usd
+    valid = isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+    if valid and raw > 0.0:
+        return BudgetState(captured_usd=float(raw), priced_events=1)
+
+    invalid = not valid or raw < 0.0
+    estimate = 0.0
+    if event.kind in _ESTIMABLE_KINDS:
+        estimate = (tool_costs_usd or {}).get(event.tool, default_cost_usd)
+    return BudgetState(estimated_usd=estimate, invalid_costs=int(invalid))
+
+
+def advance_budget_state(state: BudgetState, delta: BudgetState) -> BudgetState:
+    """Add one event contribution to an accumulated cost state."""
+    return BudgetState(
+        captured_usd=state.captured_usd + delta.captured_usd,
+        priced_events=state.priced_events + delta.priced_events,
+        estimated_usd=state.estimated_usd + delta.estimated_usd,
+        invalid_costs=state.invalid_costs + delta.invalid_costs,
+    )
 
 
 class BudgetDetector(Detector):
@@ -82,34 +126,24 @@ class BudgetDetector(Detector):
             state = self._advance(state, event)
         return self._signal(state)
 
-    def create_state(self) -> _BudgetState:
-        return _BudgetState()
+    def create_state(self) -> BudgetState:
+        return BudgetState()
 
-    def step(self, state: _BudgetState, event: ToolEvent) -> tuple[_BudgetState, Signal]:
+    def step(self, state: BudgetState, event: ToolEvent) -> tuple[BudgetState, Signal]:
         next_state = self._advance(state, event)
         return next_state, self._signal(next_state)
 
-    def _advance(self, state: _BudgetState, event: ToolEvent) -> _BudgetState:
-        raw = event.cost_usd
-        valid = isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
-        if valid and raw > 0.0:
-            return _BudgetState(
-                captured_usd=state.captured_usd + float(raw),
-                estimated_usd=state.estimated_usd,
-                invalid_costs=state.invalid_costs,
-            )
-
-        invalid = not valid or raw < 0.0
-        estimate = 0.0
-        if event.kind in _ESTIMABLE_KINDS:
-            estimate = self._tool_costs_usd.get(event.tool, self._default_cost_usd)
-        return _BudgetState(
-            captured_usd=state.captured_usd,
-            estimated_usd=state.estimated_usd + estimate,
-            invalid_costs=state.invalid_costs + int(invalid),
+    def _advance(self, state: BudgetState, event: ToolEvent) -> BudgetState:
+        return advance_budget_state(
+            state,
+            budget_delta(
+                event,
+                tool_costs_usd=self._tool_costs_usd,
+                default_cost_usd=self._default_cost_usd,
+            ),
         )
 
-    def _signal(self, state: _BudgetState) -> Signal:
+    def _signal(self, state: BudgetState) -> Signal:
         spend = self._baseline_usd + state.captured_usd + state.estimated_usd
         confidence = min(1.0, spend / self._max_cost_usd)
         diagnostics = (

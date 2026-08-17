@@ -55,8 +55,8 @@ detectors:
   budget:
     enabled: false
     max_cost_usd: 5.0
-    # Effective cross-run spend already recorded under the same estimate config
-    # (persistence and config migration are wired by INF-1 later).
+    # Optional external spend seed. SQLite replay already restores persisted
+    # events and never adds its own total here, avoiding double counting.
     baseline_usd: 0.0
     # BUD-3: fallback estimates for TOOL_CALL / LLM_CALL events whose adapter
     # supplied no positive cost_usd. A captured positive cost always wins, so
@@ -183,5 +183,6 @@ pipeline:
   dry_run: false          # true = detect/log only; never apply or halt (OBS-3)
 
 store:
-  # Cross-run SQLite state path (INF-1). Inert today: not read or created yet.
+  # Used only when build_pipeline(..., state_key="stable-run-id") opts into
+  # crash-safe state. Relative paths resolve from the current working directory.
   path: ".pathlayer/state.db"

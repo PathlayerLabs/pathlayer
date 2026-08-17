@@ -16,6 +16,7 @@ Deferred to V2: Markov spectral-gap analysis, TF-IDF/ROUGE coverage signal.
 """
 
 from pathlayer.detectors.base import Detector, Signal
+from pathlayer.detectors.budget import BudgetState, advance_budget_state, budget_delta
 from pathlayer.detectors.progress import (
     ExitCodeProgressAnchor,
     GitProgressAnchor,
@@ -25,11 +26,14 @@ from pathlayer.detectors.progress import (
 )
 
 __all__ = [
+    "BudgetState",
     "Detector",
     "ExitCodeProgressAnchor",
     "GitProgressAnchor",
     "ProgressAnchor",
     "Signal",
     "TestProgressAnchor",
+    "advance_budget_state",
+    "budget_delta",
     "coding_anchors",
 ]

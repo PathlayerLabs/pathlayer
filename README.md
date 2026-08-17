@@ -123,7 +123,98 @@ detectors:
       train_model: 2.5
 ```
 
-Captured positive costs always win over fallback estimates.
+Captured positive costs always win over fallback estimates. Cost accounting
+uses the same convention throughout Pathlayer: `cost_usd > 0` is a captured,
+priced event; `cost_usd == 0` means that no captured price is available and may
+therefore use a configured estimate when BUD is enabled.
+
+### Crash-safe run state
+
+Pass a stable logical run identity to resume detectors, policy hysteresis and
+budget accounting after a process restart:
+
+```python
+from pathlayer import build_pipeline, load_config
+from pathlayer.events import ToolEvent
+
+config = load_config()
+pipeline = build_pipeline(config, state_key="task-2026-08-10-001")
+
+event = ToolEvent("read_file", {"path": "src/main.py"})
+pipeline.process(event, event_id="framework-event-42")
+pipeline.close("completed")
+```
+
+The default database is `.pathlayer/state.db`; change it with `store.path`.
+Relative paths resolve from the current working directory. Without
+`state_key`, `build_pipeline()` remains purely in-memory and does not create a
+database. Durable operation requires SQLite WAL mode; construction fails
+explicitly if the platform or filesystem cannot activate WAL, allowing an
+integration to choose its documented memory-only fallback. `event_id` is
+optional, but a stable framework identifier makes
+retransmission idempotent: a duplicate returns the action already committed
+for that event (including `WARN` or `STOP`) without advancing history or
+emitting a new decision, provided the encoded event also matches. Reusing a
+stable `event_id` for a different event is an identity conflict: the core raises
+`StateConcurrencyError`, returns no action and does not silently degrade the
+scope. OpenClaw contains that conflict by marking the run non-durable and
+interrupted. Repeated calls without a stable identifier are intentionally
+treated as distinct agent actions; Pathlayer never deduplicates from event
+content alone.
+
+Persistence continues only the same logical run. A completed, interrupted or
+stopped run is terminal, and a new run key starts from empty state. Reopening a
+key with decision-affecting configuration changes fails rather than silently
+reinterpreting its history.
+
+Runtime availability, write, serialization and decoding failures are
+fail-open: the action already calculated is returned, `pipeline.durable`
+becomes `False`, and that pipeline instance stays memory-only.
+`pipeline.persistence_error` exposes the first failure. SQLite is then only a
+durable prefix and the same `state_key` must not be resumed automatically,
+because its in-memory suffix is absent. Identity conflicts are deliberately
+excluded from this guarantee. Construction and replay also remain strict:
+incompatible configuration, corruption, and newer database schemas raise
+explicitly. Integrations can inspect an immutable,
+transactionally consistent history through `SQLiteStateStore.read_scope()`;
+the returned snapshot includes complete ticks, signals, event IDs, decisions,
+and cost counters. `snapshot.durable` reports whether SQLite knows of a missing
+tail; `snapshot.complete` is true only when that durable journal is also
+terminal. An active scope is never complete. `snapshot.costs` covers only ticks
+that Pathlayer analyzed and committed, so a STOP makes it a prefix rather than
+the total spend of a session that continued running. Reporting integrations
+must fold the complete raw event stream separately when they need actual
+session spend, including events observed after STOP.
+
+Pathlayer makes one best-effort SQLite write to poison a scope at the first
+runtime persistence failure. If the store is unavailable enough that it cannot
+record its own outage, the database can only show its last active prefix; the
+live pipeline's `durable` flag remains authoritative. OpenClaw additionally
+persists the loss in `manifest.json`, so it never automatically resumes that
+prefix. Generic integrations must likewise retain the failure outside the
+unavailable store or choose a new `state_key`.
+
+Each stored tick carries the event timestamp separately from its encoded event,
+so reporting can read chronology without decoding arguments, results or
+metadata. A `NONE` decision has an empty action reason; detector observations
+remain available in its signals. Replay compares the full stored decision, not
+only the action. Maintainers must bump the dedicated state-semantics version
+when unchanged configuration can change future decisions in a way an existing
+prefix cannot reveal; ordinary package or observability changes do not
+invalidate run state.
+
+The v2-to-v3 migration backfills timestamps and priced-event counters one scope
+at a time inside the serialized migration transaction. If one scope contains
+an event payload that cannot be decoded losslessly, that scope is quarantined
+as non-durable and cannot be resumed; other healthy scopes still migrate. A
+detailed read of the quarantined scope continues to report corruption rather
+than inventing replacement values.
+
+The database stores normalized event arguments/results, signal reasons and
+diagnostics. These can contain prompts, tool output or other sensitive data:
+keep the local database private and exclude it from backups or exports that do
+not have the same access controls. State is retained without automatic pruning
+in this release so replay remains exact.
 
 ## LangGraph integration
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import stat
 import sys
 import tarfile
@@ -15,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import pathlayer.adapters.openclaw_recorder as recorder_module
 from pathlayer.adapters.openclaw import translate_openclaw_event
 from pathlayer.adapters.openclaw_export import export_run
 from pathlayer.adapters.openclaw_lifecycle import (
@@ -33,6 +35,8 @@ from pathlayer.config import (
 )
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
+from pathlayer.policies import Action
+from pathlayer.store import SQLiteStateStore, StateWriteError, configuration_fingerprint
 from pathlayer.validation.replay import replay_trace
 from pathlayer.validation.traces import (
     UNKNOWN_LABEL,
@@ -613,6 +617,360 @@ def test_unfinished_run_is_resumed_without_restarting_its_sequence(tmp_path: Pat
     assert [event.tool for event in trace.events] == ["read", "edit"]
     assert [event.ts for event in trace.events] == [0.0, 1.0]
     assert [decision["event_index"] for decision in _decisions(run)] == [0, 1]
+
+
+def test_unfinished_run_resumes_sqlite_without_double_counting_raw_replay(
+    tmp_path: Path,
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-sqlite-resume"))
+    first.process_payload(_tool("read", run_id="run-sqlite-resume", tool_call_id="first"))
+
+    resumed = OpenClawRunRecorder(tmp_path)
+    resumed.process_payload(_tool("edit", run_id="run-sqlite-resume", tool_call_id="second"))
+
+    connection = sqlite3.connect(tmp_path / "state.db")
+    rows = connection.execute(
+        "SELECT event_index, event_id FROM events WHERE state_key=? ORDER BY event_index",
+        ("run-sqlite-resume",),
+    ).fetchall()
+    connection.close()
+
+    assert rows == [(0, "openclaw:2:0"), (1, "openclaw:3:0")]
+
+
+def test_reattach_store_failure_rebuilds_a_fresh_memory_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-replay-memory"))
+    first.process_payload(_tool("read", run_id="run-replay-memory", tool_call_id="first"))
+    first.process_payload(_tool("edit", run_id="run-replay-memory", tool_call_id="second"))
+
+    restarted = OpenClawRunRecorder(tmp_path)
+    assert restarted._state_store is not None
+    original_lookup = restarted._state_store.lookup_event
+    calls = 0
+
+    def fail_second_lookup(state_key: str, event_id: str) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise StateWriteError("SQLite unavailable during raw replay")
+        return original_lookup(state_key, event_id)
+
+    monkeypatch.setattr(restarted._state_store, "lookup_event", fail_second_lookup)
+    restarted.process_payload(_tool("test", run_id="run-replay-memory", tool_call_id="third"))
+
+    active = restarted._runs["run-replay-memory"]
+    assert not isinstance(active.pipeline, recorder_module.PersistentPipeline)
+    assert [event.tool for event in active.pipeline.history] == ["read", "edit", "test"]
+    manifest = active.directory.read_manifest()
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+
+
+def test_reattach_translation_divergence_interrupts_and_poisons_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-translation-drift"))
+    first.process_payload(_tool("read", run_id="run-translation-drift", tool_call_id="first"))
+    run = RunStore(tmp_path).resolve_run("run-translation-drift")
+    assert run is not None
+    raw_before = run.raw_events_path.read_text(encoding="utf-8")
+    original_translate = recorder_module.translate_openclaw_event
+
+    def changed_translation(payload: dict[str, Any]) -> list[ToolEvent]:
+        events = original_translate(payload)
+        for event in events:
+            event.tool = f"changed-{event.tool}"
+        return events
+
+    monkeypatch.setattr(recorder_module, "translate_openclaw_event", changed_translation)
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.process_payload(_tool("edit", run_id="run-translation-drift", tool_call_id="second"))
+
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateConcurrencyError"
+    assert run.raw_events_path.read_text(encoding="utf-8") == raw_before
+    assert restarted._state_store is not None
+    snapshot = restarted._state_store.read_scope("run-translation-drift")
+    assert not snapshot.durable
+
+
+def test_reattach_corrupt_state_interrupts_instead_of_falling_back_to_memory(
+    tmp_path: Path,
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-corrupt-state"))
+    first.process_payload(_tool("read", run_id="run-corrupt-state", tool_call_id="first"))
+    run = RunStore(tmp_path).resolve_run("run-corrupt-state")
+    assert run is not None
+    raw_before = run.raw_events_path.read_text(encoding="utf-8")
+
+    connection = sqlite3.connect(tmp_path / "state.db")
+    connection.execute(
+        "UPDATE ticks SET fused = 2 WHERE state_key = ?",
+        ("run-corrupt-state",),
+    )
+    connection.commit()
+    connection.close()
+
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.process_payload(_tool("edit", run_id="run-corrupt-state", tool_call_id="second"))
+
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateCorruptionError"
+    assert run.raw_events_path.read_text(encoding="utf-8") == raw_before
+    assert "run-corrupt-state" not in restarted._runs
+
+
+def test_new_raw_directory_does_not_reopen_a_nondurable_sqlite_scope(tmp_path: Path) -> None:
+    store = SQLiteStateStore(tmp_path / "state.db")
+    fingerprint = configuration_fingerprint(PathlayerConfig())
+    store.load_or_create("orphan-scope", fingerprint)
+    store.mark_nondurable("orphan-scope", fingerprint)
+    store.close()
+
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("orphan-scope"))
+
+    run = RunStore(tmp_path).resolve_run("orphan-scope")
+    assert run is not None
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateIncompleteError"
+    assert "orphan-scope" not in recorder._runs
+
+
+def test_sqlite_unavailable_at_startup_keeps_raw_recording_and_memory_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise StateWriteError("read-only filesystem")
+
+    monkeypatch.setattr(recorder_module, "SQLiteStateStore", unavailable)
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("run-memory"))
+    recorder.process_payload(_tool("read", run_id="run-memory"))
+    recorder.process_payload(_end("run-memory"))
+
+    run = RunStore(tmp_path).resolve_run("run-memory")
+    assert run is not None
+    manifest = run.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+    assert run.raw_events_path.is_file()
+    assert len(load_trace(run.trace_path).events) == 1
+    assert not (tmp_path / "state.db").exists()
+
+
+def test_sqlite_unavailable_during_startup_marks_existing_run_non_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-startup-memory"))
+    first.process_payload(_tool("read", run_id="run-startup-memory"))
+
+    def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise StateWriteError("read-only filesystem")
+
+    monkeypatch.setattr(recorder_module, "SQLiteStateStore", unavailable)
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.startup()
+
+    run = RunStore(tmp_path).resolve_run("run-startup-memory")
+    assert run is not None
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+
+
+def test_runtime_sqlite_failure_marks_manifest_and_keeps_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("run-degraded"))
+    assert recorder._state_store is not None
+
+    def fail_append(*args: Any, **kwargs: Any) -> Any:
+        raise StateWriteError("disk full")
+
+    monkeypatch.setattr(recorder._state_store, "append_tick", fail_append)
+    recorder.process_payload(_tool("read", run_id="run-degraded"))
+
+    run = RunStore(tmp_path).resolve_run("run-degraded")
+    assert run is not None
+    manifest = run.read_manifest()
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+    assert len(_decisions(run)) == 1
+    raw_before_restart = run.raw_events_path.read_text(encoding="utf-8")
+
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.process_payload(_tool("edit", run_id="run-degraded", tool_call_id="second"))
+    connection = sqlite3.connect(tmp_path / "state.db")
+    durable_events = connection.execute(
+        "SELECT count(*) FROM events WHERE state_key=?", ("run-degraded",)
+    ).fetchone()[0]
+    connection.close()
+    assert durable_events == 0
+    assert run.read_manifest()["status"] == "interrupted"
+    assert len(_decisions(run)) == 1
+    assert run.raw_events_path.read_text(encoding="utf-8") == raw_before_restart
+
+
+def test_live_event_identity_collision_interrupts_both_listeners(tmp_path: Path) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    second = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-collision"))
+    second.process_payload(_before("run-collision"))
+    # Model two live listeners that both allocated the next sequence before
+    # either observed the other's raw append.
+    second._runs["run-collision"].sequence = 1
+    first.process_payload(_tool("read", run_id="run-collision", tool_call_id="first"))
+    second.process_payload(_tool("edit", run_id="run-collision", tool_call_id="second"))
+
+    run = RunStore(tmp_path).resolve_run("run-collision")
+    assert run is not None
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateConcurrencyError"
+    raw_after_collision = run.raw_events_path.read_text(encoding="utf-8")
+    assert len(raw_after_collision.splitlines()) == 4
+    assert "run-collision" not in second._runs
+
+    second.process_payload(_tool("later", run_id="run-collision"))
+    first.process_payload(_tool("later", run_id="run-collision"))
+    assert run.raw_events_path.read_text(encoding="utf-8") == raw_after_collision
+    assert "run-collision" not in first._runs
+
+
+def test_agent_end_close_failure_still_completes_non_durable_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("run-close-failure"))
+    recorder.process_payload(_tool("read", run_id="run-close-failure"))
+    active = recorder._runs["run-close-failure"]
+    assert isinstance(active.pipeline, recorder_module.PersistentPipeline)
+
+    def fail_close(_status: str) -> None:
+        raise StateWriteError("scope was closed concurrently")
+
+    monkeypatch.setattr(active.pipeline, "close", fail_close)
+    recorder.process_payload(_end("run-close-failure"))
+
+    manifest = active.directory.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+    assert active.directory.final_path.is_file()
+    assert active.directory.trace_path.is_file()
+    assert "run-close-failure" not in recorder._runs
+
+
+def test_incompatible_config_interrupts_existing_run_without_reusing_scope(
+    tmp_path: Path,
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-incompatible"))
+    first.process_payload(_tool("read", run_id="run-incompatible"))
+    run = RunStore(tmp_path).resolve_run("run-incompatible")
+    assert run is not None
+    lines_before = run.raw_events_path.read_text(encoding="utf-8").splitlines()
+
+    changed = PathlayerConfig(policy=PolicySection(stop_threshold=0.5))
+    restarted = OpenClawRunRecorder(tmp_path, config=changed)
+    restarted.process_payload(_tool("edit", run_id="run-incompatible"))
+
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateCompatibilityError"
+    assert run.raw_events_path.read_text(encoding="utf-8").splitlines() == lines_before
+
+
+def test_startup_interrupt_sweep_runs_even_if_raw_replay_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-broken-replay"))
+    first.process_payload(_tool("read", run_id="run-broken-replay"))
+    run = RunStore(tmp_path).resolve_run("run-broken-replay")
+    assert run is not None
+
+    restarted = OpenClawRunRecorder(tmp_path)
+
+    def fail_replay(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("bad raw journal")
+
+    monkeypatch.setattr(restarted, "_restore_recorded_events", fail_replay)
+    with pytest.raises(ValueError, match="bad raw journal"):
+        restarted.startup()
+    assert run.read_manifest()["status"] == "interrupted"
+
+
+def test_startup_marks_sqlite_scope_interrupted(tmp_path: Path) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("run-sqlite-interrupted"))
+    first.process_payload(_tool("read", run_id="run-sqlite-interrupted"))
+
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.startup()
+
+    connection = sqlite3.connect(tmp_path / "state.db")
+    status = connection.execute(
+        "SELECT status FROM scopes WHERE state_key=?", ("run-sqlite-interrupted",)
+    ).fetchone()[0]
+    connection.close()
+    assert status == "interrupted"
+
+
+def test_startup_reconciles_manifest_when_sqlite_was_closed_first(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("run-close-crash"))
+    recorder.process_payload(_tool("read", run_id="run-close-crash"))
+    recorder.process_payload(_end("run-close-crash"))
+    run = RunStore(tmp_path).resolve_run("run-close-crash")
+    assert run is not None
+    run.update_manifest(status="started", ended_at=None)
+
+    OpenClawRunRecorder(tmp_path).startup()
+
+    assert run.read_manifest()["status"] == "completed"
+    assert run.read_manifest()["ended_at"] is not None
+
+
+def test_custom_pipeline_factory_keeps_sqlite_opt_out(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, pipeline_factory=lambda: Pipeline([]))
+    recorder.process_payload(_before("custom-no-sqlite"))
+    recorder.process_payload(_tool("read", run_id="custom-no-sqlite"))
+
+    assert not (tmp_path / "state.db").exists()
+
+
+def test_custom_pipeline_factory_can_keep_legacy_process_signature(tmp_path: Path) -> None:
+    class _LegacyPipeline(Pipeline):
+        def process(self, event: ToolEvent) -> Action:
+            return super().process(event)
+
+    recorder = OpenClawRunRecorder(tmp_path, pipeline_factory=lambda: _LegacyPipeline([]))
+    recorder.process_payload(_before("custom-legacy"))
+    recorder.process_payload(_tool("read", run_id="custom-legacy"))
+
+    run = RunStore(tmp_path).resolve_run("custom-legacy")
+    assert run is not None
+    assert len(_decisions(run)) == 1
 
 
 def test_tool_event_timestamps_follow_per_run_arrival_order(tmp_path: Path) -> None:

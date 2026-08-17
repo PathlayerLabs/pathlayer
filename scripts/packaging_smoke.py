@@ -91,8 +91,12 @@ def _exercise_core() -> None:
     expected_api = {
         "ConfigError",
         "PathlayerConfig",
+        "PersistentPipeline",
         "Pipeline",
+        "PipelineDecision",
         "PostMortem",
+        "SQLiteStateStore",
+        "StateStoreError",
         "WouldBeAction",
         "__version__",
         "build_pipeline",

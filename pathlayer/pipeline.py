@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from pathlayer.detectors.base import Detector, Signal
@@ -132,6 +133,39 @@ class WouldBeAction:
     reason: str
 
 
+@dataclass(slots=True, frozen=True)
+class PipelineDecision:
+    """Canonical immutable record of one successfully evaluated pipeline tick.
+
+    Reporting types such as OBS-2's ``TickRecord`` project this record instead
+    of recomputing policy state. ``ts`` is event-sourced, and ``reason`` is empty
+    when arbitration chose ``NONE``.
+    """
+
+    index: int
+    ts: float
+    signals: tuple[Signal, ...]
+    evidence: Mapping[str, float]
+    fused: float
+    reason: str
+    arbitrated_action: Action
+    emitted_action: Action
+    dry_run: bool
+
+
+@dataclass(slots=True, frozen=True)
+class _DecisionInputs:
+    """Inputs retained until a consumer asks for the last decision."""
+
+    index: int
+    ts: float
+    signals: tuple[Signal, ...]
+    evidence: Mapping[str, float]
+    arbitrated_action: Action
+    emitted_action: Action
+    dry_run: bool
+
+
 class Pipeline:
     """Drives events through detectors and the arbitration policy.
 
@@ -169,6 +203,8 @@ class Pipeline:
         # wire() to drive an Actuator. None until the first non-NONE action, and
         # always None in dry-run (nothing is emitted there).
         self._last_context: ActuationContext | None = None
+        self._last_decision_inputs: _DecisionInputs | None = None
+        self._last_decision: PipelineDecision | None = None
         self._would_be_actions: list[WouldBeAction] = []
         # Last arbitrated action, to record would-be actions only on transition.
         self._last_would_be: Action = Action.NONE
@@ -242,7 +278,26 @@ class Pipeline:
         """
         return self._last_context
 
-    def process(self, event: ToolEvent) -> Action:
+    @property
+    def last_decision(self) -> PipelineDecision | None:
+        """Decision snapshot for the most recent successfully processed event."""
+        inputs = self._last_decision_inputs
+        if inputs is not None and self._last_decision is None:
+            action = inputs.arbitrated_action
+            self._last_decision = PipelineDecision(
+                index=inputs.index,
+                ts=inputs.ts,
+                signals=inputs.signals,
+                evidence=inputs.evidence,
+                fused=self._policy.fuse(inputs.signals, inputs.evidence),
+                reason=self._action_reason(action, inputs.signals, inputs.evidence),
+                arbitrated_action=action,
+                emitted_action=inputs.emitted_action,
+                dry_run=inputs.dry_run,
+            )
+        return self._last_decision
+
+    def process(self, event: ToolEvent, *, event_id: str | None = None) -> Action:
         """Process one event and return the arbitrated action.
 
         Detectors receive an immutable snapshot of the history so a buggy
@@ -266,6 +321,9 @@ class Pipeline:
         raising detector/policy leaves every prior state untouched, exactly
         like the existing ``self._history.pop()`` rollback below.
         """
+        # ``event_id`` belongs to persistence/integration boundaries. The pure
+        # pipeline accepts it for API compatibility but deliberately ignores it.
+        _ = event_id
         if self._stopped:
             return Action.STOP
         self._history.append(event)
@@ -303,7 +361,18 @@ class Pipeline:
         self._evidence_state = next_evidence_state
         self._hysteresis = next_state
         if self._dry_run:
-            return self._observe(event, signals, action, evidence)
+            emitted = self._observe(event, signals, action, evidence)
+            self._last_decision_inputs = _DecisionInputs(
+                index=len(self._history) - 1,
+                ts=event.ts,
+                signals=tuple(signals),
+                evidence=MappingProxyType(dict(evidence)),
+                arbitrated_action=action,
+                emitted_action=emitted,
+                dry_run=True,
+            )
+            self._last_decision = None
+            return emitted
         self._actions.append(action)
         self._log(event, signals, action, evidence)
         if action is Action.STOP:
@@ -314,6 +383,16 @@ class Pipeline:
             # by identity (None for every non-STOP tier). Only for an emitted
             # non-NONE action -- the transition wire() acts on.
             self._last_context = self._build_context(event, signals, action, evidence)
+        self._last_decision_inputs = _DecisionInputs(
+            index=len(self._history) - 1,
+            ts=event.ts,
+            signals=tuple(signals),
+            evidence=MappingProxyType(dict(evidence)),
+            arbitrated_action=action,
+            emitted_action=action,
+            dry_run=False,
+        )
+        self._last_decision = None
         return action
 
     def _observe(
@@ -362,9 +441,45 @@ class Pipeline:
                 break
         return actions
 
+    def restore(self, events: Iterable[ToolEvent]) -> list[Action]:
+        """Replay durable events without emitting duplicate observability logs.
+
+        Restoration is only valid on a fresh pipeline. It uses the ordinary
+        deterministic processing path, so detector, evidence and hysteresis
+        state are rebuilt from their public event-sourced specification.
+        """
+        if self._history:
+            raise ValueError("restore requires a fresh pipeline")
+        return [decision.emitted_action for decision in self.restore_decisions(events)]
+
+    def restore_decisions(self, events: Iterable[ToolEvent]) -> list[PipelineDecision]:
+        """Replay a fresh pipeline and return every reconstructed decision."""
+        if self._history:
+            raise ValueError("restore requires a fresh pipeline")
+        logger = self._logger
+        self._logger = None
+        try:
+            decisions: list[PipelineDecision] = []
+            for event in events:
+                self.process(event)
+                decision = self.last_decision
+                if decision is None:
+                    break
+                decisions.append(decision)
+                if self.stopped:
+                    break
+            return decisions
+        finally:
+            self._logger = logger
+
     def sink(self, event: ToolEvent) -> None:
         """Adapter-compatible sink (see :data:`pathlayer.adapters.base.EventSink`)."""
         self.process(event)
+
+    def close(self, status: str = "completed") -> None:
+        """Close a logical run; a pure in-memory pipeline has nothing to flush."""
+        if status not in {"completed", "interrupted", "stopped"}:
+            raise ValueError(f"invalid terminal status {status!r}")
 
     def _log(
         self, event: ToolEvent, signals: list[Signal], action: Action, evidence: Mapping[str, float]
@@ -417,6 +532,8 @@ class Pipeline:
         detectors), so the reason matches the arbitrated action -- e.g. "warn"
         for a would-be WARN.
         """
+        if action is Action.NONE:
+            return ""
         driver: Signal | None = None
         if self._policy.override_action(signals, evidence) == action:
             driver = self._policy.override_signal(signals, evidence)

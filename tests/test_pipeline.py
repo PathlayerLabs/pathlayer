@@ -8,7 +8,7 @@ the loop -> STOP behavior is added in ARB-2/ACT-5.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import pytest
 
@@ -18,7 +18,7 @@ from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
-from pathlayer.policies import Action
+from pathlayer.policies import Action, Policy
 
 
 def _events() -> list[ToolEvent]:
@@ -36,6 +36,43 @@ def _pipeline() -> Pipeline:
 def test_process_returns_action() -> None:
     action = _pipeline().process(ToolEvent(tool="read"))
     assert action is Action.NONE
+
+
+class _CountingPolicy(Policy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fuse_calls = 0
+
+    def fuse(self, signals: Sequence[Signal], evidence: Mapping[str, float] | None = None) -> float:
+        self.fuse_calls += 1
+        return super().fuse(signals, evidence or {})
+
+
+def test_last_decision_is_lazy_cached_and_carries_event_timestamp() -> None:
+    policy = _CountingPolicy()
+    pipeline = Pipeline([LoopDetector()], policy)
+
+    assert pipeline.process(ToolEvent(tool="read", ts=12.5)) is Action.NONE
+    calls_after_process = policy.fuse_calls
+
+    decision = pipeline.last_decision
+    assert decision is not None
+    assert decision.ts == 12.5
+    assert decision.reason == ""
+    assert policy.fuse_calls == calls_after_process + 1
+    assert pipeline.last_decision is decision
+    assert policy.fuse_calls == calls_after_process + 1
+
+
+def test_restore_decisions_returns_every_replayed_tick_without_logs() -> None:
+    events = _events()
+    pipeline = _pipeline()
+
+    decisions = pipeline.restore_decisions(events)
+
+    assert [decision.index for decision in decisions] == [0, 1, 2]
+    assert [decision.ts for decision in decisions] == [0.0, 1.0, 2.0]
+    assert [decision.emitted_action for decision in decisions] == list(pipeline.actions)
 
 
 def test_history_is_preserved_in_order() -> None:

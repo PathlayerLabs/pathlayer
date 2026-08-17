@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from pathlayer.detectors.budget import BudgetDetector
+from pathlayer.detectors.budget import (
+    BudgetDetector,
+    BudgetState,
+    advance_budget_state,
+    budget_delta,
+)
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, Policy
@@ -22,6 +27,35 @@ def _events(*costs: float) -> list[ToolEvent]:
 
 def test_empty_history_is_silent() -> None:
     assert BudgetDetector(max_cost_usd=5.0).evaluate([]).confidence == 0.0
+
+
+def test_budget_fold_counts_only_positive_captured_costs_as_priced() -> None:
+    state = BudgetState()
+    for event in _events(1.25, 0.0, 2.75):
+        state = advance_budget_state(state, budget_delta(event))
+
+    assert state == BudgetState(captured_usd=4.0, priced_events=2)
+
+
+def test_budget_state_preserves_historical_positional_construction() -> None:
+    assert BudgetState(1.0, 2.0, 3) == BudgetState(
+        captured_usd=1.0,
+        estimated_usd=2.0,
+        invalid_costs=3,
+        priced_events=0,
+    )
+
+
+def test_invalid_and_estimated_costs_are_not_priced_events() -> None:
+    state = advance_budget_state(
+        BudgetState(),
+        budget_delta(
+            ToolEvent(tool="call", cost_usd=float("nan")),
+            default_cost_usd=0.5,
+        ),
+    )
+
+    assert state == BudgetState(estimated_usd=0.5, invalid_costs=1)
 
 
 def test_under_budget_is_proportional() -> None:

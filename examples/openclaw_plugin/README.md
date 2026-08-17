@@ -120,19 +120,55 @@ Each run directory contains:
 └── final.json         # agent_end snapshot
 ```
 
+The recorder also keeps `state.db` at the runs root by default. It journals
+normalized events, detector signals, actions and cumulative costs under the
+OpenClaw `runId`, allowing an unfinished run to rebuild its exact pipeline
+state after a listener restart. The raw JSONL journal and SQLite use the same
+stable sequence-derived event IDs, so reattachment does not double-count old
+events. A configured non-default `store.path` is honored instead.
+
+SQLite cost counters describe only the analyzed and committed prefix, ending
+at Pathlayer's STOP. `events.raw.jsonl` remains the source for the separate
+recorder/reporting fold over every event, including the post-STOP suffix; OBS-2
+must use that fold when reporting the real session spend rather than presenting
+the SQLite snapshot as a total.
+
+If SQLite becomes unavailable, OpenClaw keeps the raw JSONL recording and
+continues analysis in memory. The manifest then records
+`state_durable: false` and a `persistence_error` category. In that state the
+SQLite journal is only a prefix and is never treated as a complete resumable
+run; the raw journal remains the recovery source. A decision-affecting config
+change similarly interrupts the old run instead of silently opening another
+scope under the same `runId`. During reattachment, a store outage rebuilds a
+fresh memory pipeline from the complete raw journal; a disagreement between a
+stable event ID and its translated payload instead interrupts and poisons the
+scope rather than mixing two histories.
+
+Persistent state requires SQLite WAL mode. If WAL cannot be activated, the
+recorder keeps operating from a fresh memory pipeline and records the loss of
+durability in the manifest. During a v2-to-v3 migration, an undecodable event
+quarantines only its own scope as non-durable; healthy scopes remain available.
+
 Summary JSON files are written atomically (temp file, `fsync`, `os.replace`),
 while the JSONL journals are appended and synced after each record. Run files
-are protected by their owner-only directory; exported files are explicitly
-created as `0600`.
+and SQLite contain raw or normalized tool data and may therefore contain
+secrets. On POSIX, Pathlayer applies owner-only permissions (`0600`) to the
+database, WAL and SHM files on a best-effort basis without changing an existing
+parent directory; exported files are explicitly created as `0600`. Other
+platforms and pre-existing directory permissions remain the operator's
+responsibility. No automatic retention or compaction is performed in this
+release.
 
 **Execution status vs health.** `manifest.json` separates the two:
 
-| field           | meaning                                                       |
-| --------------- | ------------------------------------------------------------- |
-| `status`        | `started` / `orphan` / `completed` / `interrupted`             |
-| `stopped`       | whether Pathlayer emitted a STOP during the run               |
-| `health`        | curated verdict; live recordings remain `unknown`             |
-| `health_reason` | observed OpenClaw/Pathlayer outcome awaiting human curation   |
+| field               | meaning                                                       |
+| ------------------- | ------------------------------------------------------------- |
+| `status`            | `started` / `orphan` / `completed` / `interrupted`             |
+| `stopped`           | whether Pathlayer emitted a STOP during the run               |
+| `state_durable`     | whether SQLite contains every analyzed tick recorded so far   |
+| `persistence_error` | storage error category after fail-open, otherwise `null`      |
+| `health`            | curated verdict; live recordings remain `unknown`             |
+| `health_reason`     | observed OpenClaw/Pathlayer outcome awaiting human curation   |
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
 was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
@@ -185,7 +221,8 @@ Or use the offline replay CLI documented in `traces/README.md`.
 
 Recorded runs contain **prompts, tool arguments, and tool results** as sent by
 OpenClaw. Treat `$PATHLAYER_RUNS_DIR` as sensitive data. Restrict filesystem
-permissions (owner-only). Do not commit run directories into git.
+permissions (owner-only; Pathlayer's SQLite chmod is POSIX best-effort). Do not
+commit run directories into git.
 
 ## Limitations (V1)
 
