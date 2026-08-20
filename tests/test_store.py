@@ -23,6 +23,7 @@ from pathlayer.config import (
     PathlayerConfig,
     PipelineSection,
     PolicySection,
+    ResourceConfig,
     StoreSection,
     build_pipeline,
 )
@@ -611,7 +612,7 @@ def test_fingerprint_ignores_future_non_decision_sections(tmp_path: Path) -> Non
         pricing={"source": "remote"},
     )
 
-    expected = "81b3b1085ab82446cb624210698a8be06007137cd9064405a4d37dcc73592881"
+    expected = "b15037528988ec774f889c83bcf27254ea2f69f23bdfc4b33177b3c9471c8a3b"
     assert configuration_fingerprint(config) == expected
     assert configuration_fingerprint(projected) == expected
     changed = SimpleNamespace(**vars(projected))
@@ -962,6 +963,38 @@ def test_retry_and_budget_cross_restart_without_double_counting(tmp_path: Path) 
     retry = next(signal for signal in resumed.last_decision.signals if signal.name == "retry")
     assert "$4.00 effective" in budget.reason
     assert retry.confidence == 1.0
+
+
+def test_resource_counters_survive_cross_restart_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.db"
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(
+            resource=ResourceConfig(enabled=True, max_spawn_count=4, max_delegation_depth=10)
+        ),
+        store=StoreSection(path=str(database)),
+    )
+    spawn = ToolEvent("spawn", kind=EventKind.SUBAGENT_SPAWN)
+    depth = ToolEvent("delegate", metadata={"depth": 3})
+
+    split = build_pipeline(config, state_key="run")
+    split.process(spawn, event_id="1")
+    split.process(depth, event_id="2")
+
+    resumed = build_pipeline(config, state_key="run")
+    resumed.process(spawn, event_id="3")
+
+    reference = build_pipeline(config)
+    reference.run([spawn, depth, spawn])
+
+    resumed_signal = next(
+        signal for signal in resumed.last_decision.signals if signal.name == "resource"
+    )
+    reference_signal = next(
+        signal for signal in reference.last_decision.signals if signal.name == "resource"
+    )
+    assert resumed_signal.confidence == reference_signal.confidence == pytest.approx(0.5)
 
 
 def test_hysteresis_counter_survives_restart(tmp_path: Path) -> None:

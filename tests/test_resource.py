@@ -1,0 +1,294 @@
+"""RES-1: tests for the ResourceDetector."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from pathlayer.detectors.resource import (
+    ResourceDetector,
+    ResourceState,
+    advance_resource_state,
+    resource_delta,
+)
+from pathlayer.events import EventKind, ToolEvent
+from pathlayer.pipeline import Pipeline
+from pathlayer.policies import Action, Policy
+from pathlayer.validation import Trace, inject_resource_spike, load_trace
+
+_TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
+
+
+def _spawn(depth: int | None = None) -> ToolEvent:
+    metadata = {} if depth is None else {"depth": depth}
+    return ToolEvent(tool="spawn", kind=EventKind.SUBAGENT_SPAWN, metadata=metadata)
+
+
+def _restart(depth: int | None = None) -> ToolEvent:
+    metadata = {} if depth is None else {"depth": depth}
+    return ToolEvent(tool="restart", kind=EventKind.RUN_RESTART, metadata=metadata)
+
+
+def _tool(depth: int | None = None) -> ToolEvent:
+    metadata = {} if depth is None else {"depth": depth}
+    return ToolEvent(tool="call", metadata=metadata)
+
+
+def test_empty_history_is_silent() -> None:
+    assert ResourceDetector().evaluate([]).confidence == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# pure-fold unit tests
+# --------------------------------------------------------------------------- #
+
+
+def test_resource_delta_counts_spawn_and_restart_by_kind() -> None:
+    assert resource_delta(_spawn()) == ResourceState(spawn_count=1)
+    assert resource_delta(_restart()) == ResourceState(restart_count=1)
+    assert resource_delta(_tool()) == ResourceState()
+
+
+def test_resource_delta_reads_depth_from_any_event_kind() -> None:
+    assert resource_delta(_tool(depth=2)) == ResourceState(max_depth=2)
+    assert resource_delta(_spawn(depth=2)) == ResourceState(spawn_count=1, max_depth=2)
+
+
+def test_resource_delta_missing_depth_is_zero_without_diagnostic() -> None:
+    assert resource_delta(_tool()) == ResourceState()
+
+
+@pytest.mark.parametrize("bad_depth", [-1, 1.5, True, "3", None])
+def test_resource_delta_invalid_depth_is_ignored_and_flagged(bad_depth: object) -> None:
+    event = ToolEvent(tool="call", metadata={"depth": bad_depth})
+    assert resource_delta(event) == ResourceState(max_depth=0, invalid_depths=1)
+
+
+def test_advance_resource_state_sums_counts_and_maxes_depth() -> None:
+    state = ResourceState()
+    state = advance_resource_state(state, ResourceState(spawn_count=1, max_depth=1))
+    state = advance_resource_state(state, ResourceState(spawn_count=1, max_depth=3))
+    state = advance_resource_state(state, ResourceState(spawn_count=1, max_depth=1))
+
+    assert state == ResourceState(spawn_count=3, max_depth=3)
+
+
+# --------------------------------------------------------------------------- #
+# per-counter proportional / saturating behaviour
+# --------------------------------------------------------------------------- #
+
+
+def test_spawn_heavy_is_proportional_then_saturates() -> None:
+    detector = ResourceDetector(max_spawn_count=4)
+    below = detector.evaluate([_spawn(), _spawn()])
+    assert below.confidence == pytest.approx(0.5)
+
+    at = detector.evaluate([_spawn()] * 4)
+    assert at.confidence == 1.0
+    assert "spawn" in at.reason
+
+    over = detector.evaluate([_spawn()] * 6)
+    assert over.confidence == 1.0
+
+
+def test_deep_delegation_is_proportional_then_saturates_and_tracks_high_water_mark() -> None:
+    detector = ResourceDetector(max_delegation_depth=4)
+    below = detector.evaluate([_tool(depth=2)])
+    assert below.confidence == pytest.approx(0.5)
+
+    at = detector.evaluate([_tool(depth=4)])
+    assert at.confidence == 1.0
+    assert "depth" in at.reason
+
+    # 1 -> 3 -> 1: the high-water mark of 3 must still be reported, not the
+    # most recent reading of 1.
+    sequence = detector.evaluate([_tool(depth=1), _tool(depth=3), _tool(depth=1)])
+    assert sequence.confidence == pytest.approx(0.75)
+
+
+def test_restart_heavy_is_proportional_then_saturates() -> None:
+    detector = ResourceDetector(max_restart_count=4)
+    below = detector.evaluate([_restart(), _restart()])
+    assert below.confidence == pytest.approx(0.5)
+
+    at = detector.evaluate([_restart()] * 4)
+    assert at.confidence == 1.0
+    assert "restart" in at.reason
+
+
+# --------------------------------------------------------------------------- #
+# independence + reason naming
+# --------------------------------------------------------------------------- #
+
+
+def test_each_counter_fires_independently_of_the_others() -> None:
+    detector = ResourceDetector(max_spawn_count=2, max_delegation_depth=2, max_restart_count=2)
+
+    spawn_only = detector.evaluate([_spawn(), _spawn()])
+    assert spawn_only.confidence == 1.0
+    assert "spawn" in spawn_only.reason
+
+    depth_only = detector.evaluate([_tool(depth=2)])
+    assert depth_only.confidence == 1.0
+    assert "depth" in depth_only.reason
+
+    restart_only = detector.evaluate([_restart(), _restart()])
+    assert restart_only.confidence == 1.0
+    assert "restart" in restart_only.reason
+
+
+def test_mixed_case_names_the_dominant_counter_in_the_reason() -> None:
+    detector = ResourceDetector(max_spawn_count=10, max_delegation_depth=10, max_restart_count=2)
+    signal = detector.evaluate([_spawn(), _tool(depth=1), _restart(), _restart()])
+
+    assert signal.confidence == 1.0
+    assert "restart" in signal.reason
+
+
+def test_co_occurring_breach_is_visible_in_diagnostics() -> None:
+    detector = ResourceDetector(max_spawn_count=2, max_delegation_depth=10, max_restart_count=2)
+    events = [_spawn(), _spawn(), _restart(), _restart()]
+    signal = detector.evaluate(events)
+
+    assert signal.confidence == 1.0
+    # spawn wins the tie-break (fixed order spawn, depth, restart).
+    assert "spawn" in signal.reason
+    assert signal.diagnostics == ("restart also at threshold (2/2)",)
+
+
+def test_invalid_depths_diagnostic() -> None:
+    detector = ResourceDetector()
+    signal = detector.evaluate([ToolEvent(tool="call", metadata={"depth": -1})])
+    assert signal.diagnostics == ("1 invalid depth value(s) ignored",)
+
+
+# --------------------------------------------------------------------------- #
+# PERF-2 contract
+# --------------------------------------------------------------------------- #
+
+
+def test_incremental_step_matches_batch_for_every_prefix() -> None:
+    detector = ResourceDetector(max_spawn_count=3, max_delegation_depth=5, max_restart_count=3)
+    events = [
+        _spawn(),
+        _tool(depth=1),
+        _restart(),
+        _tool(depth=3),
+        _spawn(),
+        _tool(depth=1),
+        ToolEvent(tool="call", metadata={"depth": -1}),
+        _restart(),
+    ]
+    state = detector.create_state()
+    for index, event in enumerate(events):
+        state, incremental = detector.step(state, event)
+        assert incremental == detector.evaluate(events[: index + 1])
+
+
+def test_shared_detector_keeps_pipeline_states_isolated() -> None:
+    detector = ResourceDetector(max_spawn_count=2)
+    spawny_pipeline = Pipeline([detector], Policy())
+    quiet_pipeline = Pipeline([detector], Policy())
+
+    spawny_pipeline.run([_spawn(), _spawn()])
+    quiet_pipeline.run([_tool()])
+
+    assert spawny_pipeline.stopped
+    assert not quiet_pipeline.stopped
+
+
+# --------------------------------------------------------------------------- #
+# cross-run continuity (in-process, no store)
+# --------------------------------------------------------------------------- #
+
+
+def test_split_stream_fold_equals_full_stream_evaluate() -> None:
+    detector = ResourceDetector(max_spawn_count=5, max_delegation_depth=5, max_restart_count=5)
+    events = [_spawn(), _tool(depth=3), _restart(), _spawn(), _tool(depth=1)]
+
+    full = detector.evaluate(events)
+
+    state = detector.create_state()
+    for event in events[:2]:
+        state, _ = detector.step(state, event)
+    for event in events[2:]:
+        state, split_signal = detector.step(state, event)
+
+    assert split_signal == full
+
+
+# --------------------------------------------------------------------------- #
+# reason-string content
+# --------------------------------------------------------------------------- #
+
+
+def test_reason_names_counter_value_and_threshold() -> None:
+    detector = ResourceDetector(max_spawn_count=5)
+    signal = detector.evaluate([_spawn(), _spawn(), _spawn()])
+    assert signal.reason == "3 sub-agent spawn(s) / 5 threshold"
+
+
+# --------------------------------------------------------------------------- #
+# config validation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+@pytest.mark.parametrize("field", ["max_spawn_count", "max_delegation_depth", "max_restart_count"])
+def test_invalid_config_raises(field: str, bad: object) -> None:
+    with pytest.raises(ValueError):
+        ResourceDetector(**{field: bad})  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline/Policy integration
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_stops_when_a_counter_crosses_stop_threshold_independently() -> None:
+    policy = Policy()
+    assert Pipeline([ResourceDetector(max_spawn_count=2)], policy).run([_spawn(), _spawn()]) == [
+        Action.NONE,
+        Action.STOP,
+    ]
+    assert Pipeline([ResourceDetector(max_delegation_depth=2)], policy).run([_tool(depth=2)]) == [
+        Action.STOP
+    ]
+    assert Pipeline([ResourceDetector(max_restart_count=2)], policy).run(
+        [_restart(), _restart()]
+    ) == [Action.NONE, Action.STOP]
+
+
+def test_healthy_trace_stays_silent() -> None:
+    trace = load_trace(_TRACES_DIR / "healthy" / "varied_long_run.json")
+    assert ResourceDetector().evaluate(trace.events).confidence == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# VAL-4 mutation fixtures
+# --------------------------------------------------------------------------- #
+
+
+def test_fires_on_spawn_spike_mutation() -> None:
+    base = Trace(label="healthy", events=[ToolEvent(tool="call")])
+    mutated = inject_resource_spike(base, kind="spawn", start_idx=1, count=5)
+    signal = ResourceDetector(max_spawn_count=5).evaluate(mutated.events)
+    assert signal.confidence == 1.0
+    assert Policy().decide([signal]) is Action.STOP
+
+
+def test_fires_on_depth_spike_mutation() -> None:
+    base = Trace(label="healthy", events=[ToolEvent(tool="call")])
+    mutated = inject_resource_spike(base, kind="depth", start_idx=1, count=3)
+    signal = ResourceDetector(max_delegation_depth=3).evaluate(mutated.events)
+    assert signal.confidence == 1.0
+    assert Policy().decide([signal]) is Action.STOP
+
+
+def test_fires_on_restart_spike_mutation() -> None:
+    base = Trace(label="healthy", events=[ToolEvent(tool="call")])
+    mutated = inject_resource_spike(base, kind="restart", start_idx=1, count=3)
+    signal = ResourceDetector(max_restart_count=3).evaluate(mutated.events)
+    assert signal.confidence == 1.0
+    assert Policy().decide([signal]) is Action.STOP

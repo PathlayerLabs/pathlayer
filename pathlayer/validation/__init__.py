@@ -10,6 +10,7 @@ from pathlayer.validation.mutations import (
     inject_cost_spike,
     inject_loop,
     inject_no_progress,
+    inject_resource_spike,
     inject_retry_storm,
 )
 from pathlayer.validation.replay import (
@@ -49,6 +50,7 @@ __all__ = [
     "inject_cost_spike",
     "inject_loop",
     "inject_no_progress",
+    "inject_resource_spike",
     "inject_retry_storm",
     "load_trace",
     "load_traces",

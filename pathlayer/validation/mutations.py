@@ -34,9 +34,9 @@ three, and become checkable once the detectors land.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, Literal
 
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.validation.traces import Trace
 
 # Events after the injection point before the targeted detector can reasonably
@@ -190,3 +190,38 @@ def inject_cost_spike(trace: Trace, event_idx: int, multiplier: float) -> Trace:
     note = f"inflated cost x{multiplier} at index {event_idx}"
     # A cost spike does not change the behavioural class -> keep the base label.
     return _build(trace, events, trace.label, mutation, [_expectation("budget", event_idx)], note)
+
+
+def inject_resource_spike(
+    trace: Trace, kind: Literal["spawn", "depth", "restart"], start_idx: int, count: int
+) -> Trace:
+    """Push one of ResourceDetector's three counters past a caller-chosen value.
+
+    ``spawn``/``restart`` insert ``count`` ``SUBAGENT_SPAWN``/``RUN_RESTART``
+    events at ``start_idx``. ``depth`` inserts a single ``TOOL_CALL`` at
+    ``start_idx`` carrying ``metadata["depth"] = count``, since depth is a
+    high-water mark rather than a count of events.
+    """
+    if count < 1:
+        raise ValueError("count must be >= 1")
+    if start_idx < 0 or start_idx > len(trace.events):
+        raise ValueError("start_idx is out of range")
+
+    events = _clone_events(list(trace.events))
+    if kind == "spawn":
+        extra = [ToolEvent(tool="subagent", kind=EventKind.SUBAGENT_SPAWN) for _ in range(count)]
+    elif kind == "restart":
+        extra = [ToolEvent(tool="run", kind=EventKind.RUN_RESTART) for _ in range(count)]
+    elif kind == "depth":
+        extra = [ToolEvent(tool="delegate", metadata={"depth": count})]
+    else:
+        raise ValueError(f"unknown resource spike kind: {kind!r}")
+    new_events = events[:start_idx] + extra + events[start_idx:]
+
+    earliest = start_idx + DETECTION_MARGIN
+    mutation = {"type": "resource_spike", "kind": kind, "start_idx": start_idx, "count": count}
+    note = f"injected {kind} resource spike ({count}) at {start_idx}"
+    # A resource spike does not change the behavioural class -> keep the base label.
+    return _build(
+        trace, new_events, trace.label, mutation, [_expectation("resource", earliest)], note
+    )

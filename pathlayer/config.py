@@ -283,11 +283,26 @@ class NoProgressConfig:
 
 
 @dataclass(slots=True)
+class ResourceConfig:
+    # Disabled by default: no adapter emits SUBAGENT_SPAWN/RUN_RESTART yet, and
+    # the detector module's own docstring says "V1 is DETECT-ONLY". The three
+    # thresholds below are not calibrated against any corpus or real trace --
+    # they're placeholder guesses, chosen only to be self-consistent round
+    # numbers. Low risk while disabled by default; revisit once real traces
+    # with spawn/restart/depth data exist (post-adapter-wiring).
+    enabled: bool = False
+    max_spawn_count: int = 5
+    max_delegation_depth: int = 3
+    max_restart_count: int = 3
+
+
+@dataclass(slots=True)
 class DetectorsConfig:
     loop: LoopConfig = field(default_factory=LoopConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     no_progress: NoProgressConfig = field(default_factory=NoProgressConfig)
+    resource: ResourceConfig = field(default_factory=ResourceConfig)
 
 
 @dataclass(slots=True)
@@ -397,6 +412,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     retry_raw = _as_mapping(section._pop("retry", {}), "detectors.retry")
     budget_raw = _as_mapping(section._pop("budget", {}), "detectors.budget")
     nop_raw = _as_mapping(section._pop("no_progress", {}), "detectors.no_progress")
+    resource_raw = _as_mapping(section._pop("resource", {}), "detectors.resource")
     section.finish()
 
     loop_s = _Section(loop_raw, "detectors.loop")
@@ -442,7 +458,18 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     )
     nop_s.finish()
 
-    return DetectorsConfig(loop=loop, retry=retry, budget=budget, no_progress=no_progress)
+    resource_s = _Section(resource_raw, "detectors.resource")
+    resource = ResourceConfig(
+        enabled=resource_s.bool_("enabled", False),
+        max_spawn_count=resource_s.int_("max_spawn_count", 5),
+        max_delegation_depth=resource_s.int_("max_delegation_depth", 3),
+        max_restart_count=resource_s.int_("max_restart_count", 3),
+    )
+    resource_s.finish()
+
+    return DetectorsConfig(
+        loop=loop, retry=retry, budget=budget, no_progress=no_progress, resource=resource
+    )
 
 
 def _parse_canonicalization(data: Mapping[str, Any]) -> CanonicalizationConfig:
@@ -761,6 +788,14 @@ def build_pipeline(
                     target_rate=spec.no_progress.target_rate,
                     threshold=spec.no_progress.threshold,
                     window=spec.no_progress.window,
+                )
+            )
+        if spec.resource.enabled:
+            detectors.append(
+                ResourceDetector(
+                    max_spawn_count=spec.resource.max_spawn_count,
+                    max_delegation_depth=spec.resource.max_delegation_depth,
+                    max_restart_count=spec.resource.max_restart_count,
                 )
             )
         tier_thresholds = {

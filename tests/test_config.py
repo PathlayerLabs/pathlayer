@@ -26,6 +26,7 @@ from pathlayer.config import (
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
+from pathlayer.detectors.resource import ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
@@ -312,13 +313,11 @@ def test_known_advisory_signal_accepted() -> None:
     assert config.policy.advisory_signals == frozenset({"no_progress"})
 
 
-def test_resource_signal_accepted_despite_stub_detector() -> None:
-    # Audit issue #104 F-2: ResourceDetector exists (as a detect-only stub, see
-    # pathlayer/detectors/resource.py) but was missing from _KNOWN_SIGNALS, so
-    # any config referencing "resource" raised a spurious "unknown signal"
-    # ConfigError. Registering it here does not wire ResourceDetector into the
-    # default pipeline (still RES-1..3, Sprint 4) -- it only lets an
-    # integrator's config mention the name without a typo-check false alarm.
+def test_resource_signal_accepted_when_detector_disabled_by_default() -> None:
+    # ResourceDetector (RES-1) is registered in _KNOWN_SIGNALS so a config can
+    # reference "resource" (e.g. in advisory_signals) without a spurious
+    # "unknown signal" ConfigError. detectors.resource.enabled defaults to
+    # False, so this alone does not wire ResourceDetector into the pipeline.
     config = PathlayerConfig.from_mapping({"policy": {"advisory_signals": ["resource"]}})
     assert config.policy.advisory_signals == frozenset({"resource"})
 
@@ -785,6 +784,46 @@ def test_build_pipeline_wraps_no_progress_range_error_as_config_error() -> None:
         {"detectors": {"no_progress": {"window": 2, "threshold": 2.0, "target_rate": 0.2}}}
     )
     with pytest.raises(ConfigError, match=r"invalid configuration value.*window must be"):
+        build_pipeline(config)
+
+
+def test_build_pipeline_all_enabled_includes_resource() -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"resource": {"enabled": True}}})
+    pipeline = build_pipeline(config)
+    assert ResourceDetector in [type(d) for d in pipeline._detectors]
+
+
+def test_build_pipeline_threads_resource_thresholds() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "resource": {
+                    "enabled": True,
+                    "max_spawn_count": 10,
+                    "max_delegation_depth": 4,
+                    "max_restart_count": 6,
+                }
+            }
+        }
+    )
+    pipeline = build_pipeline(config)
+    resource = next(d for d in pipeline._detectors if isinstance(d, ResourceDetector))
+
+    assert resource._max_spawn_count == 10
+    assert resource._max_delegation_depth == 4
+    assert resource._max_restart_count == 6
+
+
+def test_resource_unknown_key_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"detectors.resource.*'max_spawn'"):
+        PathlayerConfig.from_mapping({"detectors": {"resource": {"max_spawn": 10}}})
+
+
+def test_build_pipeline_wraps_resource_range_error_as_config_error() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"detectors": {"resource": {"enabled": True, "max_spawn_count": 0}}}
+    )
+    with pytest.raises(ConfigError, match=r"invalid configuration value.*max_spawn_count"):
         build_pipeline(config)
 
 
