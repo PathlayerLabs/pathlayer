@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 import tempfile
 from importlib.metadata import version
@@ -35,7 +36,14 @@ def _deny_network(event: str, args: tuple[object, ...]) -> None:
 sys.addaudithook(_deny_network)
 
 import pathlayer  # noqa: E402
-from pathlayer import ConfigError, build_pipeline, load_config  # noqa: E402
+from pathlayer import (  # noqa: E402
+    ConfigError,
+    SessionOutcome,
+    TickRecord,
+    build_pipeline,
+    build_session_report,
+    load_config,
+)
 from pathlayer.adapters import InMemoryAdapter  # noqa: E402
 from pathlayer.events import ToolEvent  # noqa: E402
 from pathlayer.policies import Action, Actuator, wire  # noqa: E402
@@ -96,10 +104,14 @@ def _exercise_core() -> None:
         "PipelineDecision",
         "PostMortem",
         "SQLiteStateStore",
+        "SessionOutcome",
+        "SessionReport",
         "StateStoreError",
+        "TickRecord",
         "WouldBeAction",
         "__version__",
         "build_pipeline",
+        "build_session_report",
         "load_config",
     }
     assert set(pathlayer.__all__) == expected_api
@@ -123,6 +135,80 @@ def _exercise_core() -> None:
     action, post_mortem = loop_actuator.applied[-1]
     assert action is Action.STOP
     assert post_mortem is loop_pipeline.post_mortem
+    assert Path.cwd().joinpath(".pathlayer").exists() is False
+
+
+_JOURNAL: tuple[dict[str, object], ...] = (
+    {"index": 0, "ts": 0.0, "signals": [{"name": "loop", "confidence": 0.0}], "fused": 0.0},
+    {"index": 1, "ts": 1.0, "signals": [{"name": "loop", "confidence": 0.45}], "fused": 0.45},
+    {
+        "index": 2,
+        "ts": 2.0,
+        "signals": [{"name": "loop", "confidence": 0.95, "reason": "same call 20x"}],
+        "fused": 0.95,
+        "action": "STOP",
+        "reason": "loop: same call 20x",
+    },
+)
+
+
+def _exercise_session_report() -> None:
+    """Rebuild a session report from a journal, as a user would after a run.
+
+    The whole point of OBS-2 is that a report is reconstructible from a durable
+    journal alone, so the journal is written to disk and read back rather than
+    passed in memory. It goes into a temporary directory: nothing here may
+    create ``.pathlayer`` in the caller's working directory.
+    """
+    assert Path.cwd().joinpath(".pathlayer").exists() is False
+    with tempfile.TemporaryDirectory() as directory:
+        run_dir = Path(directory) / "run-smoke"
+        run_dir.mkdir()
+        journal = run_dir / "decisions.jsonl"
+        journal.write_text(
+            "".join(json.dumps(TickRecord.from_dict(row).to_dict()) + "\n" for row in _JOURNAL),
+            encoding="utf-8",
+        )
+        ticks = [
+            TickRecord.from_dict(json.loads(line))
+            for line in journal.read_text(encoding="utf-8").splitlines()
+        ]
+
+        report = build_session_report(
+            run_id="run-smoke",
+            status="completed",
+            ticks=ticks,
+            events_recorded=4,
+            started_at="2026-01-01T00:00:00+00:00",
+        )
+        assert isinstance(report, pathlayer.SessionReport)
+        # A STOP was emitted, so the run is stopped even though the manifest
+        # status says the process reached its documented end.
+        assert report.outcome is SessionOutcome.STOPPED
+        assert report.stop_reason == "loop: same call 20x"
+        assert (report.events_recorded, report.events_analyzed) == (4, 3)
+
+        # The chronology: which detector peaked where, and what was emitted when.
+        activity = report.detectors[0]
+        assert (activity.name, activity.peak_confidence, activity.peak_index) == ("loop", 0.95, 2)
+        assert [(a.action, a.index, a.emitted) for a in report.actions] == [(Action.STOP, 2, True)]
+        assert (report.peak_fused, report.peak_fused_index) == (0.95, 2)
+        rendered = report.format()
+        assert "outcome: stopped" in rendered
+        assert "event 2" in rendered
+
+        # Nothing priced this run: the report must say so instead of billing $0.
+        assert report.cost.measured is False
+        assert report.cost.total_usd is None
+        assert "not measured" in report.cost.describe()
+        assert "$0.0000" not in rendered
+
+        # The report survives the JSON round trip a user persists it through.
+        serialized = run_dir / "report.json"
+        serialized.write_text(json.dumps(report.to_dict()), encoding="utf-8")
+        restored = json.loads(serialized.read_text(encoding="utf-8"))
+        assert restored["outcome"] == SessionOutcome.STOPPED.value
+        assert restored["cost"]["total_usd"] is None
     assert Path.cwd().joinpath(".pathlayer").exists() is False
 
 
@@ -184,6 +270,7 @@ def main() -> None:
 
     _assert_network_blocked()
     _exercise_core()
+    _exercise_session_report()
     if args.readme is not None:
         _exercise_readme(args.readme)
     if args.extras == "core":

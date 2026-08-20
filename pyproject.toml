@@ -28,6 +28,7 @@ Issues = "https://github.com/Kropemann/Pathlayer/issues"
 
 [project.scripts]
 pathlayer-export-run = "pathlayer.adapters.openclaw_export:main"
+pathlayer-report = "pathlayer.adapters.openclaw_report:main"
 
 [project.optional-dependencies]
 # Optional framework integration: the LangGraph/LangChain capture adapter

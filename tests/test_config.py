@@ -30,6 +30,7 @@ from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
 from pathlayer.policies import Action, OverrideRule
+from pathlayer.pricing import DEFAULT_PRICES, ModelPrice, cost_of
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "examples" / "pathlayer.config.yaml"
 
@@ -1071,6 +1072,124 @@ def test_keep_preserves_distinguishing_id() -> None:
         )
     )
     assert Action.STOP not in kept.run(events)
+
+
+# --------------------------------------------------------------------------- #
+# pricing: the token price table (OBS-2)
+# --------------------------------------------------------------------------- #
+
+
+def test_pricing_defaults_change_nothing() -> None:
+    config = PathlayerConfig()
+    assert config.pricing.models == {}
+    assert config.pricing.replace_defaults is False
+    # Configuring nothing must leave the built-in table exactly as it is.
+    assert config.pricing.effective_prices() == DEFAULT_PRICES
+    assert PathlayerConfig.from_mapping({}).pricing == config.pricing
+
+
+def test_pricing_extends_the_builtin_table_by_default() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "pricing": {
+                "models": {
+                    "house-model": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+                    "gpt-4o": {"input_usd_per_mtok": 9.0, "output_usd_per_mtok": 9.0},
+                }
+            }
+        }
+    )
+    prices = config.pricing.effective_prices()
+
+    assert prices["house-model"] == ModelPrice(1.0, 2.0)
+    # An entry for a known model overrides it; every other default survives.
+    assert prices["gpt-4o"] == ModelPrice(9.0, 9.0)
+    assert prices["claude-3-opus"] == DEFAULT_PRICES["claude-3-opus"]
+    # The configured table is what cost_of multiplies the token counts by.
+    assert cost_of("house-model", 1_000_000, 1_000_000, prices=prices) == pytest.approx(3.0)
+
+
+def test_pricing_can_replace_the_builtin_table_entirely() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "pricing": {
+                "replace_defaults": True,
+                "models": {"house-model": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0}},
+            }
+        }
+    )
+    prices = config.pricing.effective_prices()
+
+    assert set(prices) == {"house-model"}
+    # Everything unlisted is now invisible to the budget detector -- an explicit
+    # opt-in, which is why it is not the default.
+    assert cost_of("gpt-4o", 1_000_000, 0, prices=prices) == 0.0
+
+
+def test_pricing_zero_rate_is_a_valid_free_model() -> None:
+    config = PathlayerConfig.from_mapping(
+        {"pricing": {"models": {"local": {"input_usd_per_mtok": 0.0, "output_usd_per_mtok": 0.0}}}}
+    )
+    assert config.pricing.models["local"] == ModelPrice(0.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    ("section", "message"),
+    [
+        ({"models": {"m": {"input_usd_per_mtok": 1.0}}}, "output_usd_per_mtok"),
+        ({"models": {"m": {"output_usd_per_mtok": 1.0}}}, "input_usd_per_mtok"),
+        ({"models": {"m": {}}}, "missing required key"),
+        ({"models": {"m": None}}, "missing required key"),
+        (
+            {"models": {"m": {"input_usd_per_mtok": -1.0, "output_usd_per_mtok": 1.0}}},
+            r">= 0",
+        ),
+        (
+            {"models": {"m": {"input_usd_per_mtok": "free", "output_usd_per_mtok": 1.0}}},
+            "expected number",
+        ),
+        (
+            {
+                "models": {
+                    "m": {
+                        "input_usd_per_mtok": 1.0,
+                        "output_usd_per_mtok": 1.0,
+                        "currency": "EUR",
+                    }
+                }
+            },
+            r"unknown key\(s\) in section 'pricing.models.m'",
+        ),
+        ({"models": {"m": 2.5}}, "must be a mapping"),
+        ({"models": 2.5}, "must be a mapping"),
+        ({"replace_defaults": "yes"}, "expected bool"),
+        ({"model": {}}, r"unknown key\(s\) in section 'pricing'"),
+        (
+            {"models": {"": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 1.0}}},
+            "empty id can never match",
+        ),
+    ],
+)
+def test_invalid_pricing_fails_fast(section: dict[str, Any], message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        PathlayerConfig.from_mapping({"pricing": section})
+
+
+def test_pricing_is_not_a_cost_source_by_itself(tmp_path: Path) -> None:
+    # A price table only becomes a cost when something reports token counts.
+    # Nothing in the config can conjure them, so an infinite rate still prices
+    # a call with no reported usage at $0 -- which is why an OBS-2 report says
+    # the cost is unmeasured on the OpenClaw path instead of printing $0.00.
+    config = PathlayerConfig.from_mapping(
+        {
+            "pricing": {
+                "models": {"m": {"input_usd_per_mtok": 1000.0, "output_usd_per_mtok": 1000.0}}
+            }
+        }
+    )
+    prices = config.pricing.effective_prices()
+    assert cost_of("m", 0, 0, prices=prices) == 0.0
+    assert cost_of(None, 1_000_000, 1_000_000, prices=prices) == 0.0
 
 
 # --------------------------------------------------------------------------- #

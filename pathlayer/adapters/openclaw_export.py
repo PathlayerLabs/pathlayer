@@ -18,9 +18,15 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from pathlayer.adapters.openclaw_run_store import RunStore, atomic_write_json, restrict_file
+from pathlayer.adapters.openclaw_run_store import (
+    DEFAULT_RUNS_ROOT,
+    RunStore,
+    atomic_write_json,
+    restrict_file,
+    runs_root_from_env,
+)
 
-DEFAULT_RUNS_ROOT = Path("/var/lib/pathlayer/runs")
+__all__ = ["DEFAULT_RUNS_ROOT", "export_run", "main"]
 
 
 def export_run(
@@ -30,7 +36,7 @@ def export_run(
     runs_root: Path | None = None,
 ) -> Path:
     """Package exactly one run directory plus a SHA-256 checksum manifest."""
-    store = RunStore(runs_root or _runs_root_from_env())
+    store = RunStore(runs_root or runs_root_from_env())
     matches = list(store.iter_matching(run_id))
     if not matches:
         raise LookupError(f"no recorded run found for run_id={run_id!r}")
@@ -81,10 +87,6 @@ def _write_restricted_archive(root: Path, arc_root: str, output: Path) -> dict[s
     finally:
         tmp_path.unlink(missing_ok=True)
     return checksums
-
-
-def _runs_root_from_env() -> Path:
-    return Path(os.environ.get("PATHLAYER_RUNS_DIR", DEFAULT_RUNS_ROOT))
 
 
 def _sha256_file(path: Path) -> str:

@@ -13,6 +13,15 @@ brief spike does not flip the action. Only ``STOP`` halts the run; a compatible
 actuator may enforce intermediate tiers (LangGraph implements WARN/SUMMARIZE),
 while FALLBACK/ESCALATE remain unimplemented in V1.
 
+:attr:`Pipeline.last_decision` is the one read-only window on the detection loop:
+what the *last* processed event produced (each detector's raw confidence, the
+fused score, the arbitrated action and its reason) as an immutable
+:class:`PipelineDecision`. It is deliberately a single slot, not a timeline --
+constant memory whatever the run length -- and building the durable chronology is
+the consumer's job: INF-1 journals it, and OBS-2 projects it onto a
+:class:`~pathlayer.postmortem.TickRecord` for the OpenClaw recorder's
+``decisions.jsonl``. Both read the same arbitration rather than recomputing it.
+
 PERF-2: each detector's incremental state (:meth:`Detector.create_state` /
 :meth:`Detector.step`) lives here, one slot per detector instance, **never** on
 the shared ``Detector`` object itself -- the same ``Detector`` instance can

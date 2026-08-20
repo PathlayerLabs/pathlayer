@@ -17,6 +17,12 @@ from pathlayer.adapters.openclaw_lifecycle import sanitize_run_id_for_path
 SCHEMA_VERSION = 1
 LISTENER_VERSION = "1"
 
+# Where recorded runs live, and the environment variable that overrides it. Kept
+# here (not in one CLI) so every entry point -- the recorder, the export CLI, the
+# report CLI -- resolves the same root from the same single definition.
+RUNS_DIR_ENV = "PATHLAYER_RUNS_DIR"
+DEFAULT_RUNS_ROOT = Path("/var/lib/pathlayer/runs")
+
 # Manifest statuses a run never leaves: it has an ``ended_at`` and its files are
 # final. Reopening such a run would restart the sequence counter at 1 and
 # overwrite ``trace.json`` / ``final.json`` with the state of an empty run, so
@@ -26,6 +32,11 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "interrupted"})
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def runs_root_from_env() -> Path:
+    """Recorded-runs root: ``$PATHLAYER_RUNS_DIR``, else :data:`DEFAULT_RUNS_ROOT`."""
+    return Path(os.environ.get(RUNS_DIR_ENV, DEFAULT_RUNS_ROOT))
 
 
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -110,6 +121,11 @@ class RunDirectory:
     @property
     def final_path(self) -> Path:
         return self.root / "final.json"
+
+    @property
+    def report_path(self) -> Path:
+        """End-of-session report (OBS-2), written once the run is finalized."""
+        return self.root / "report.json"
 
     def read_manifest(self) -> dict[str, Any]:
         raw: Any = json.loads(self.manifest_path.read_text(encoding="utf-8"))
@@ -208,14 +224,22 @@ class RunStore:
             atomic_write_json(run.manifest_path, manifest)
             return run
 
-    def mark_unfinished_as_interrupted(self) -> None:
-        """On listener startup, preserve unfinished runs and mark them interrupted."""
+    def mark_unfinished_as_interrupted(self) -> list[RunDirectory]:
+        """On listener startup, preserve unfinished runs and mark them interrupted.
+
+        Returns the runs it just marked, so a caller can finish them off -- the
+        recorder writes their ``report.json`` there, since a run whose process is
+        gone will never reach ``agent_end`` to write it itself.
+        """
+        interrupted: list[RunDirectory] = []
         for run in self.list_runs():
             manifest = run.read_manifest()
             status = manifest.get("status")
             if status in TERMINAL_STATUSES:
                 continue
             run.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            interrupted.append(run)
+        return interrupted
 
     def iter_matching(self, run_id: str) -> Iterator[RunDirectory]:
         matches = [run for run in self.list_runs() if run.original_run_id == run_id]

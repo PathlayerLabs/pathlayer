@@ -48,6 +48,7 @@ from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
 from pathlayer.policies import Action, OverrideRule, Policy, SuppressionRule
 from pathlayer.policies.base import PolicyConfig
+from pathlayer.pricing import DEFAULT_PRICES, ModelPrice
 from pathlayer.store import (
     PersistentPipeline,
     SQLiteStateStore,
@@ -58,6 +59,7 @@ from pathlayer.store import (
 __all__ = [
     "ConfigError",
     "PathlayerConfig",
+    "PricingSection",
     "build_pipeline",
     "load_config",
 ]
@@ -328,11 +330,42 @@ class StoreSection:
 
 
 @dataclass(slots=True)
+class PricingSection:
+    """Token prices feeding :func:`~pathlayer.pricing.cost_of` (USD per 1M tokens).
+
+    Empty by default, in which case :meth:`effective_prices` returns exactly
+    :data:`~pathlayer.pricing.DEFAULT_PRICES` -- configuring nothing changes
+    nothing. ``models`` normally *extends* that table (add a model it does not
+    list, or pin a sub-version whose price dropped); ``replace_defaults: true``
+    makes it the whole table instead, for a deployment that wants to price only
+    the models it has vetted and bill everything else at $0.
+
+    Configuration only: nothing in Pathlayer reads this section today. A price
+    table turns *reported token counts* into a cost, and the only adapter that
+    reports them takes its table as a constructor argument, so the caller must
+    pass it explicitly -- ``LangGraphAdapter(sink,
+    prices=config.pricing.effective_prices())``. Until it does, this section
+    changes no cost and no decision. The OpenClaw hooks report no tokens at all,
+    so on that path it can produce no figure whatever the wiring.
+    """
+
+    models: dict[str, ModelPrice] = field(default_factory=dict)
+    replace_defaults: bool = False
+
+    def effective_prices(self) -> dict[str, ModelPrice]:
+        """The full table to hand to ``cost_of(..., prices=...)``."""
+        if self.replace_defaults:
+            return dict(self.models)
+        return {**DEFAULT_PRICES, **self.models}
+
+
+@dataclass(slots=True)
 class PathlayerConfig:
     detectors: DetectorsConfig = field(default_factory=DetectorsConfig)
     canonicalization: CanonicalizationConfig = field(default_factory=CanonicalizationConfig)
     policy: PolicySection = field(default_factory=PolicySection)
     pipeline: PipelineSection = field(default_factory=PipelineSection)
+    pricing: PricingSection = field(default_factory=PricingSection)
     store: StoreSection = field(default_factory=StoreSection)
 
     @classmethod
@@ -345,6 +378,7 @@ class PathlayerConfig:
         )
         policy = _parse_policy(_as_mapping(root._pop("policy", {}), "policy"))
         pipeline = _parse_pipeline(_as_mapping(root._pop("pipeline", {}), "pipeline"))
+        pricing = _parse_pricing(_as_mapping(root._pop("pricing", {}), "pricing"))
         store = _parse_store(_as_mapping(root._pop("store", {}), "store"))
         root.finish()
         return cls(
@@ -352,6 +386,7 @@ class PathlayerConfig:
             canonicalization=canonicalization,
             policy=policy,
             pipeline=pipeline,
+            pricing=pricing,
             store=store,
         )
 
@@ -534,6 +569,44 @@ def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSection:
     dry_run = section.bool_("dry_run", False)
     section.finish()
     return PipelineSection(recent_history=recent_history, dry_run=dry_run)
+
+
+def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
+    """Parse ``pricing``: per-model USD-per-1M-token rates (fail fast).
+
+    Both rates are required per model: a table entry that silently defaulted the
+    output rate to 0 would under-charge every completion and quietly weaken the
+    budget brake. An empty model id is rejected too -- ``cost_of`` can never
+    match it, so it would be a typo that prices nothing.
+    """
+    section = _Section(data, "pricing")
+    replace_defaults = section.bool_("replace_defaults", False)
+    models_raw = _as_mapping(section._pop("models", {}), "pricing.models")
+    section.finish()
+
+    models: dict[str, ModelPrice] = {}
+    for model, spec in models_raw.items():
+        where = f"pricing.models.{model}"
+        if not model:
+            raise ConfigError(
+                "invalid model id in 'pricing.models': an empty id can never match a "
+                "model, so it would price nothing"
+            )
+        spec_map = _as_mapping(spec, where)
+        for key in ("input_usd_per_mtok", "output_usd_per_mtok"):
+            if key not in spec_map:
+                raise ConfigError(
+                    f"missing required key '{where}.{key}': both the input and the output "
+                    "rate must be given, in USD per 1M tokens"
+                )
+        spec_s = _Section(spec_map, where)
+        input_rate = spec_s.nonnegative_float("input_usd_per_mtok", 0.0)
+        output_rate = spec_s.nonnegative_float("output_usd_per_mtok", 0.0)
+        spec_s.finish()
+        models[str(model)] = ModelPrice(
+            input_usd_per_mtok=input_rate, output_usd_per_mtok=output_rate
+        )
+    return PricingSection(models=models, replace_defaults=replace_defaults)
 
 
 def _parse_store(data: Mapping[str, Any]) -> StoreSection:

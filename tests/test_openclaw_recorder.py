@@ -24,8 +24,9 @@ from pathlayer.adapters.openclaw_lifecycle import (
     sanitize_run_id_for_path,
 )
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
-from pathlayer.adapters.openclaw_run_store import RunStore, atomic_write_json
+from pathlayer.adapters.openclaw_run_store import RunDirectory, RunStore, atomic_write_json
 from pathlayer.config import (
+    BudgetConfig,
     ConfigError,
     DetectorsConfig,
     LoopConfig,
@@ -36,7 +37,12 @@ from pathlayer.config import (
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action
-from pathlayer.store import SQLiteStateStore, StateWriteError, configuration_fingerprint
+from pathlayer.store import (
+    SQLiteStateStore,
+    StateConcurrencyError,
+    StateWriteError,
+    configuration_fingerprint,
+)
 from pathlayer.validation.replay import replay_trace
 from pathlayer.validation.traces import (
     UNKNOWN_LABEL,
@@ -699,6 +705,7 @@ def test_reattach_translation_divergence_interrupts_and_poisons_scope(
     assert restarted._state_store is not None
     snapshot = restarted._state_store.read_scope("run-translation-drift")
     assert not snapshot.durable
+    assert run.report_path.is_file()
 
 
 def test_reattach_corrupt_state_interrupts_instead_of_falling_back_to_memory(
@@ -728,6 +735,7 @@ def test_reattach_corrupt_state_interrupts_instead_of_falling_back_to_memory(
     assert manifest["persistence_error"] == "StateCorruptionError"
     assert run.raw_events_path.read_text(encoding="utf-8") == raw_before
     assert "run-corrupt-state" not in restarted._runs
+    assert run.report_path.is_file()
 
 
 def test_new_raw_directory_does_not_reopen_a_nondurable_sqlite_scope(tmp_path: Path) -> None:
@@ -747,6 +755,7 @@ def test_new_raw_directory_does_not_reopen_a_nondurable_sqlite_scope(tmp_path: P
     assert manifest["state_durable"] is False
     assert manifest["persistence_error"] == "StateIncompleteError"
     assert "orphan-scope" not in recorder._runs
+    assert run.report_path.is_file()
 
 
 def test_sqlite_unavailable_at_startup_keeps_raw_recording_and_memory_pipeline(
@@ -826,6 +835,7 @@ def test_runtime_sqlite_failure_marks_manifest_and_keeps_decision(
     assert run.read_manifest()["status"] == "interrupted"
     assert len(_decisions(run)) == 1
     assert run.raw_events_path.read_text(encoding="utf-8") == raw_before_restart
+    assert run.report_path.is_file()
 
 
 def test_live_event_identity_collision_interrupts_both_listeners(tmp_path: Path) -> None:
@@ -848,6 +858,7 @@ def test_live_event_identity_collision_interrupts_both_listeners(tmp_path: Path)
     raw_after_collision = run.raw_events_path.read_text(encoding="utf-8")
     assert len(raw_after_collision.splitlines()) == 4
     assert "run-collision" not in second._runs
+    assert run.report_path.is_file()
 
     second.process_payload(_tool("later", run_id="run-collision"))
     first.process_payload(_tool("later", run_id="run-collision"))
@@ -898,6 +909,63 @@ def test_incompatible_config_interrupts_existing_run_without_reusing_scope(
     assert manifest["state_durable"] is False
     assert manifest["persistence_error"] == "StateCompatibilityError"
     assert run.raw_events_path.read_text(encoding="utf-8").splitlines() == lines_before
+    assert run.report_path.is_file()
+
+
+def test_controlled_interruption_persists_the_failing_events_last_known_cost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(
+            budget=BudgetConfig(enabled=True, max_cost_usd=10.0, default_cost_usd=0.25)
+        )
+    )
+    recorder = OpenClawRunRecorder(tmp_path, config=config)
+    recorder.process_payload(_before("run-cost-interrupted"))
+    active = recorder._runs["run-cost-interrupted"]
+
+    def conflict(*args: Any, **kwargs: Any) -> Action:
+        raise StateConcurrencyError("conflicting event identity")
+
+    monkeypatch.setattr(active.pipeline, "process", conflict)
+    recorder.process_payload(_tool("read", run_id="run-cost-interrupted"))
+
+    manifest = active.directory.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["cost_estimated_usd"] == pytest.approx(0.25)
+    stored_report = json.loads(active.directory.report_path.read_text(encoding="utf-8"))
+    assert stored_report["cost"]["estimated_usd"] == pytest.approx(0.25)
+
+
+def test_finalize_interrupted_run_writes_terminal_manifest_before_popping_active_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent hook must never see the run gone from ``_runs`` while its
+    on-disk manifest is still non-terminal -- that window is what would let a
+    re-attach reopen a run that is mid-finalization."""
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_before("run-finalize-order"))
+    active = recorder._runs["run-finalize-order"]
+
+    def conflict(*args: Any, **kwargs: Any) -> Action:
+        raise StateConcurrencyError("conflicting event identity")
+
+    monkeypatch.setattr(active.pipeline, "process", conflict)
+
+    original_update_manifest = RunDirectory.update_manifest
+
+    def spying_update_manifest(self: RunDirectory, **fields: Any) -> dict[str, Any]:
+        # The manifest write must happen while the run is still tracked as
+        # active: popping first would let a concurrent hook re-attach to a
+        # run whose on-disk status is not yet terminal.
+        assert "run-finalize-order" in recorder._runs
+        return original_update_manifest(self, **fields)
+
+    monkeypatch.setattr(RunDirectory, "update_manifest", spying_update_manifest)
+    recorder.process_payload(_tool("read", run_id="run-finalize-order"))
+
+    assert "run-finalize-order" not in recorder._runs
+    assert active.directory.read_manifest()["status"] == "interrupted"
 
 
 def test_startup_interrupt_sweep_runs_even_if_raw_replay_fails(

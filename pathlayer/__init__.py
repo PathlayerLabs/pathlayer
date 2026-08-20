@@ -9,7 +9,13 @@ Detection is deterministic/statistical: no LLM in the detection loop.
 
 from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline, load_config
 from pathlayer.pipeline import Pipeline, PipelineDecision, WouldBeAction
-from pathlayer.postmortem import PostMortem
+from pathlayer.postmortem import (
+    PostMortem,
+    SessionOutcome,
+    SessionReport,
+    TickRecord,
+    build_session_report,
+)
 from pathlayer.store import PersistentPipeline, SQLiteStateStore, StateStoreError
 
 __version__ = "0.1.0"
@@ -22,9 +28,13 @@ __all__ = [
     "PipelineDecision",
     "PostMortem",
     "SQLiteStateStore",
+    "SessionOutcome",
+    "SessionReport",
     "StateStoreError",
+    "TickRecord",
     "WouldBeAction",
     "__version__",
     "build_pipeline",
+    "build_session_report",
     "load_config",
 ]

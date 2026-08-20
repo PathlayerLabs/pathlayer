@@ -15,6 +15,13 @@ Three properties this module owes its callers, all of them load-bearing:
   receiving a Pathlayer decision describes the observed outcome, not whether
   the run was truly healthy or pathological. The trace therefore stays at the
   neutral :data:`~pathlayer.validation.traces.UNKNOWN_LABEL` until curation.
+
+OBS-2 adds a fourth: **every finalized run ends with a report**, written from the
+run directory itself (``report.json``) -- at ``agent_end`` for a run that ends
+normally, and during the startup sweep for one that was cut short, since nothing
+else will ever speak for it. Every analyzed line of ``decisions.jsonl`` now
+carries the tick that produced it, so the detector chronology a report needs is
+durable rather than reconstructed from a live pipeline.
 """
 
 from __future__ import annotations
@@ -39,6 +46,15 @@ from pathlayer.adapters.openclaw_lifecycle import (
     extract_openclaw_context,
     extract_openclaw_run_id,
 )
+from pathlayer.adapters.openclaw_report import (
+    COST_BUDGET_DISABLED,
+    COST_BUDGET_ENABLED,
+    COST_BUDGET_STATUS_KEY,
+    COST_BUDGET_UNKNOWN,
+    cost_manifest_fields,
+    tick_columns,
+    write_run_report,
+)
 from pathlayer.adapters.openclaw_run_store import (
     LISTENER_VERSION,
     SCHEMA_VERSION,
@@ -50,9 +66,11 @@ from pathlayer.adapters.openclaw_run_store import (
     utc_now_iso,
 )
 from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
+from pathlayer.detectors.budget import BudgetDetector, BudgetState
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
+from pathlayer.postmortem import TickRecord
 from pathlayer.store import (
     PersistentPipeline,
     SQLiteStateStore,
@@ -82,11 +100,59 @@ class _ActiveRun:
     # deliberately excludes (it stops accumulating once halted).
     events: list[ToolEvent] = field(default_factory=list)
     persistence_reported: bool = False
+    # OBS-2 cost attribution only, and only when a budget detector is configured.
+    # Advanced event by event so the estimate is already durable in the manifest
+    # if the process dies before ``agent_end``; equal by construction to folding
+    # ``events`` in one batch (``BudgetDetector.accumulate``).
+    cost_state: BudgetState | None = None
 
 
 def _hook_part(payload: dict[str, Any], key: str) -> dict[str, Any]:
     value = payload.get(key)
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _write_report(directory: RunDirectory) -> None:
+    """Write a run's OBS-2 report, never letting a failure escape the hook.
+
+    The report is a summary of data that is already durable, so failing to write
+    it must not take down the listener -- one unreadable journal would otherwise
+    abort the whole startup sweep, or turn a completed run's ``agent_end`` into a
+    raised exception. The failure is logged rather than swallowed silently.
+    """
+    try:
+        write_run_report(directory)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "could not write the session report for run %r: %s",
+            directory.original_run_id,
+            exc,
+        )
+
+
+def _budget_detector_for(config: PathlayerConfig | None) -> BudgetDetector | None:
+    """A detector mirroring the run's budget config, for cost attribution only.
+
+    ``None`` when there is no config or the budget detector is disabled: no
+    per-tool estimate was ever computed for such a run, and the report states
+    that instead of printing ``$0.00`` as though it had measured something.
+
+    The detector is stateless -- each run carries its own accumulator, which is
+    passed in and returned (see
+    :meth:`~pathlayer.detectors.budget.BudgetDetector.step`) -- so one instance
+    shared across concurrent runs cannot leak one run's spend into another's
+    report. Values are already validated: the constructor builds a pipeline from
+    the same config first, which rejects an out-of-range ceiling.
+    """
+    if config is None or not config.detectors.budget.enabled:
+        return None
+    spec = config.detectors.budget
+    return BudgetDetector(
+        max_cost_usd=spec.max_cost_usd,
+        baseline_usd=spec.baseline_usd,
+        default_cost_usd=spec.default_cost_usd,
+        tool_costs_usd=spec.tool_costs_usd,
+    )
 
 
 class OpenClawRunRecorder:
@@ -139,6 +205,12 @@ class OpenClawRunRecorder:
                     "OpenClaw SQLite state is unavailable; raw recording and "
                     "memory-only analysis remain active"
                 )
+        # Kept for the OBS-2 cost section only: the BUD-3 estimate and the
+        # cross-run baseline depend on this config and cannot be recomputed from
+        # the run directory later. A recorder wired with a bare
+        # ``pipeline_factory`` (tests, custom wiring) has none, and the report
+        # says the estimate is unavailable rather than inventing a zero.
+        self._budget_detector = _budget_detector_for(config)
         self._pathlayer_commit = pathlayer_commit or _detect_commit_sha()
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
@@ -149,7 +221,21 @@ class OpenClawRunRecorder:
         return self._store.root
 
     def startup(self) -> None:
-        """Mark unfinished runs as interrupted; never overwrite completed runs."""
+        """Mark unfinished runs as interrupted; never overwrite completed runs.
+
+        An interrupted run gets its OBS-2 ``report.json`` written here, at the
+        only moment anything can: its process is gone, so it will never reach
+        ``agent_end``. The report is rebuilt from the run directory, so it
+        describes what was actually recorded before the cut -- and its outcome is
+        ``interrupted``, never ``completed``.
+
+        This sweep adds no cost figure of its own, and must not: the recording
+        process is the only thing that knew the run's budget configuration. It
+        persisted the estimate as it went (see :meth:`_cost_fields`), so the
+        report reads the last durable value. When even that is missing, the cost
+        section reports the estimate as indeterminate rather than blaming a
+        detector that may well have been enabled.
+        """
         try:
             if self._state_init_error is not None:
                 for run in self._store.list_runs():
@@ -177,6 +263,9 @@ class OpenClawRunRecorder:
                                     status=snapshot.status,
                                     ended_at=run.read_manifest().get("ended_at") or utc_now_iso(),
                                 )
+                                # Terminal here means the sweep below will not
+                                # see this run, so its report is written now.
+                                _write_report(run)
                     except StateStoreError as error:
                         logger.exception(
                             "could not restore durable state for OpenClaw run %r",
@@ -184,7 +273,8 @@ class OpenClawRunRecorder:
                         )
                         self._record_persistence_error(run, error)
         finally:
-            self._store.mark_unfinished_as_interrupted()
+            for run in self._store.mark_unfinished_as_interrupted():
+                _write_report(run)
 
     def _new_pipeline(self, run_id: str) -> Pipeline:
         if self._pipeline_factory is not None:
@@ -225,17 +315,43 @@ class OpenClawRunRecorder:
         """Contain an incompatible live history without losing its raw journal."""
         if isinstance(active.pipeline, PersistentPipeline):
             active.pipeline.abandon_persistence(error)
-        self._record_persistence_error(active.directory, error)
-        active.directory.update_manifest(
-            status="interrupted",
-            ended_at=utc_now_iso(),
-            event_count=active.sequence,
-            stopped=active.pipeline.stopped,
-        )
-        active.persistence_reported = True
-        active.completed = True
-        with self._lock:
-            self._runs.pop(active.directory.original_run_id, None)
+        self._finalize_interrupted_run(active.directory, error=error, active=active)
+
+    def _finalize_interrupted_run(
+        self,
+        directory: RunDirectory,
+        *,
+        error: StateStoreError | None = None,
+        active: _ActiveRun | None = None,
+    ) -> None:
+        """Make one interrupted run terminal and leave its report behind.
+
+        Every caller that discovers an unrecoverable persistence state goes
+        through this seam. Otherwise setting the terminal manifest status and
+        returning would make the startup sweep skip the run forever, leaving no
+        ``report.json``. For a live run, persist the cost accumulator *after* the
+        failing event was folded so the controlled interruption does not lose
+        its final known spend.
+        """
+        if error is not None:
+            self._record_persistence_error(directory, error)
+        fields: dict[str, Any] = {
+            "status": "interrupted",
+            "ended_at": utc_now_iso(),
+        }
+        if active is not None:
+            fields.update(
+                event_count=active.sequence,
+                stopped=active.pipeline.stopped,
+                **self._cost_fields(active),
+            )
+            active.persistence_reported = True
+            active.completed = True
+        directory.update_manifest(**fields)
+        _write_report(directory)
+        if active is not None:
+            with self._lock:
+                self._runs.pop(directory.original_run_id, None)
 
     def process_payload(self, payload: Any) -> None:
         """Record one forwarded hook payload.
@@ -333,6 +449,15 @@ class OpenClawRunRecorder:
                 "openclaw_model": _extract_model(payload),
                 "openclaw_provider": _extract_provider(payload),
                 "workspace": _extract_workspace(payload),
+                COST_BUDGET_STATUS_KEY: (
+                    COST_BUDGET_UNKNOWN
+                    if self._pipeline_factory is not None
+                    else (
+                        COST_BUDGET_DISABLED
+                        if self._budget_detector is None
+                        else COST_BUDGET_ENABLED
+                    )
+                ),
             }
             if self._pipeline_factory is None:
                 manifest["state_durable"] = self._state_store is not None
@@ -353,14 +478,17 @@ class OpenClawRunRecorder:
                 StateClosedError,
             ) as error:
                 logger.exception("incompatible durable state for OpenClaw run %r", run_id)
-                self._record_persistence_error(directory, error)
-                directory.update_manifest(status="interrupted", ended_at=utc_now_iso())
+                self._finalize_interrupted_run(directory, error=error)
                 return None
             except StateStoreError as error:
                 logger.exception("durable state unavailable for OpenClaw run %r", run_id)
                 self._record_persistence_error(directory, error)
                 pipeline = self._memory_pipeline()
-            active = _ActiveRun(directory=directory, pipeline=pipeline)
+            active = _ActiveRun(
+                directory=directory,
+                pipeline=pipeline,
+                cost_state=self._initial_cost_state(),
+            )
             self._runs[run_id] = active
             return active
 
@@ -395,7 +523,7 @@ class OpenClawRunRecorder:
                 "interrupting OpenClaw run %r: its SQLite journal is only a prefix",
                 run_id,
             )
-            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            self._finalize_interrupted_run(existing)
             return None
         try:
             pipeline = self._new_pipeline(run_id)
@@ -406,8 +534,7 @@ class OpenClawRunRecorder:
             StateClosedError,
         ) as error:
             logger.exception("incompatible durable state for OpenClaw run %r", run_id)
-            self._record_persistence_error(existing, error)
-            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            self._finalize_interrupted_run(existing, error=error)
             return None
         except StateStoreError as error:
             logger.exception("durable state unavailable for OpenClaw run %r", run_id)
@@ -423,8 +550,7 @@ class OpenClawRunRecorder:
             logger.exception("durable/raw journal divergence for OpenClaw run %r", run_id)
             if isinstance(pipeline, PersistentPipeline):
                 pipeline.abandon_persistence(error)
-            self._record_persistence_error(existing, error)
-            existing.update_manifest(status="interrupted", ended_at=utc_now_iso())
+            self._finalize_interrupted_run(existing, error=error)
             return None
         except StateStoreError as error:
             logger.exception("durable state failed while reattaching OpenClaw run %r", run_id)
@@ -445,9 +571,18 @@ class OpenClawRunRecorder:
             started=existing.request_path.is_file(),
             events=events,
             persistence_reported=persistence_reported,
+            # The replayed events are part of this run's spend: fold them in one
+            # batch so the resumed accumulator matches an uninterrupted one.
+            cost_state=(
+                None if self._budget_detector is None else self._budget_detector.accumulate(events)
+            ),
         )
         self._runs[run_id] = active
         return active
+
+    def _initial_cost_state(self) -> BudgetState | None:
+        """A fresh cost accumulator, or ``None`` when no budget detector is wired."""
+        return None if self._budget_detector is None else self._budget_detector.create_state()
 
     def _restore_recorded_events(
         self, directory: RunDirectory, pipeline: Pipeline
@@ -548,6 +683,7 @@ class OpenClawRunRecorder:
         for offset, event in enumerate(translate_openclaw_event(payload)):
             event.ts = float(len(active.events))
             active.events.append(event)
+            self._advance_cost(active, event)
             index = len(active.events) - 1
             if active.pipeline.stopped:
                 self._record_decision(
@@ -575,7 +711,7 @@ class OpenClawRunRecorder:
                 self._record_pipeline_durability(active.directory, active.pipeline)
                 active.persistence_reported = True
             self._record_decision(active, record, event, action, index=index)
-        active.directory.update_manifest(event_count=active.sequence)
+        active.directory.update_manifest(event_count=active.sequence, **self._cost_fields(active))
 
     def _handle_run_end(
         self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]
@@ -639,10 +775,41 @@ class OpenClawRunRecorder:
             health=health,
             health_reason=health_reason,
             stopped=active.pipeline.stopped,
+            **self._cost_fields(active),
         )
         active.completed = True
+        # OBS-2: written last, from the finalized directory, so the report is
+        # exactly what a later ``pathlayer-report`` rebuilds from the same files.
+        _write_report(active.directory)
         with self._lock:
             self._runs.pop(active.directory.original_run_id, None)
+
+    def _advance_cost(self, active: _ActiveRun, event: ToolEvent) -> None:
+        """Fold one event into the run's cost accumulator (OBS-2), if any.
+
+        Every recorded event counts, analyzed or not: a call made after a passive
+        STOP still spent money. The arbitration side of
+        :meth:`~pathlayer.detectors.budget.BudgetDetector.step` is discarded --
+        this accumulator only attributes cost in the report, it never influences
+        detection, which the pipeline's own budget detector owns.
+        """
+        detector = self._budget_detector
+        if detector is None or active.cost_state is None:
+            return
+        active.cost_state, _ = detector.step(active.cost_state, event)
+
+    def _cost_fields(self, active: _ActiveRun) -> dict[str, Any]:
+        """Manifest cost fields for this run, empty when nothing computes them.
+
+        Written on every manifest update rather than only at ``agent_end``, so a
+        run whose process disappears keeps the estimate for what it had already
+        spent. Without that, its report could not tell "the budget detector was
+        off" from "the run was cut before anything was persisted", and it used to
+        assert the first.
+        """
+        if self._budget_detector is None or active.cost_state is None:
+            return {}
+        return cost_manifest_fields(self._budget_detector, active.cost_state)
 
     def _record_decision(
         self,
@@ -658,8 +825,20 @@ class OpenClawRunRecorder:
 
         ``index`` is the event's position in ``trace.json``, so the two files
         line up event for event -- including past a passive STOP, where
-        ``analyzed`` is ``False`` and no signals are attached because no
-        detector ran for that event.
+        ``analyzed`` is ``False``.
+
+        OBS-2: every *analyzed* line also carries the tick Pathlayer just
+        computed (every detector's confidence, the fused score, the arbitrated
+        action and its reason -- see
+        :func:`~pathlayer.adapters.openclaw_report.tick_columns`). This journal is
+        therefore the run's durable detector chronology, and an end-of-session
+        report needs nothing else. Before OBS-2 those columns only appeared once
+        a post-mortem existed, i.e. from the STOP onward, so a run that never
+        stopped left no detector evidence at all.
+
+        A line past a passive STOP still carries none: no detector ran for that
+        event, and repeating the STOP tick's confidences next to it would assert
+        a reading that was never taken.
         """
         decision: dict[str, Any] = {
             "sequence": record["sequence"],
@@ -671,13 +850,9 @@ class OpenClawRunRecorder:
             "stopped": active.pipeline.stopped,
             "analyzed": analyzed,
         }
-        post_mortem = active.pipeline.post_mortem
-        if analyzed and post_mortem is not None:
-            decision["signals"] = [
-                {"name": signal.name, "confidence": signal.confidence, "reason": signal.reason}
-                for signal in post_mortem.signals
-            ]
-            decision["reason"] = post_mortem.reason
+        last_decision = active.pipeline.last_decision
+        if analyzed and last_decision is not None:
+            decision.update(tick_columns(TickRecord.from_decision(last_decision)))
         append_jsonl(active.directory.decisions_path, decision)
 
 

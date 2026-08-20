@@ -15,6 +15,10 @@ charged twice.
 With the default arbitration (stop_threshold 0.9) a run is stopped once it has
 burned ~90% of the budget -- an early brake rather than a post-mortem once the
 money is already gone.
+
+The accumulator itself is public (:class:`BudgetState`, :meth:`accumulate`) so an
+end-of-run report (OBS-2) can attribute a cost figure to its source instead of
+printing one total and leaving the reader to assume it was measured.
 """
 
 from __future__ import annotations
@@ -46,6 +50,12 @@ class BudgetState:
     ``priced_events`` counts valid, strictly positive captured costs. Under the
     normalized event contract, zero means no captured price rather than a
     measured zero; configured estimates remain a separate component.
+    ``invalid_costs`` counts events whose ``cost_usd`` was unusable (non-finite
+    or negative) and was therefore ignored.
+
+    The configured cross-run seed is *not* part of the accumulator: it is a
+    property of the detector (:attr:`BudgetDetector.baseline_usd`), not something
+    the events produced.
     """
 
     captured_usd: float = 0.0
@@ -120,11 +130,40 @@ class BudgetDetector(Detector):
             costs[tool] = _validated_cost(value, f"tool_costs_usd[{tool!r}]")
         self._tool_costs_usd: Mapping[str, float] = MappingProxyType(costs)
 
-    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+    @property
+    def max_cost_usd(self) -> float:
+        """The configured ceiling this detector measures spend against."""
+        return self._max_cost_usd
+
+    @property
+    def baseline_usd(self) -> float:
+        """Cross-run spend seeded into every accumulation (0.0 for a single run).
+
+        An explicit external seed for spend that is *not* present in the event
+        history this detector folds. Public alongside :class:`BudgetState`
+        (OBS-2) so a report can show the third component of the effective spend
+        instead of implying the run started from zero. A store that restores a
+        run by replaying its journal must never feed its own counters back here:
+        the replay already recounts them.
+        """
+        return self._baseline_usd
+
+    def accumulate(self, history: Sequence[ToolEvent]) -> BudgetState:
+        """Fold ``history`` into a :class:`BudgetState` without arbitrating.
+
+        The same pure fold :meth:`evaluate` runs, but returning the accumulator
+        instead of the :class:`Signal`, so a session report can state how much
+        of the spend was captured and how much was a BUD-3 estimate. Pure and
+        deterministic: no clock, no I/O, no shared state -- calling it again on
+        the same events yields the same state.
+        """
         state = self.create_state()
         for event in history:
             state = self._advance(state, event)
-        return self._signal(state)
+        return state
+
+    def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+        return self._signal(self.accumulate(history))
 
     def create_state(self) -> BudgetState:
         return BudgetState()

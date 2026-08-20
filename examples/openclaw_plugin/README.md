@@ -116,8 +116,9 @@ Each run directory contains:
 ├── request.json       # before_agent_run snapshot (prompt, raw payload)
 ├── events.raw.jsonl   # every hook payload (verbatim)
 ├── trace.json         # replayable ToolEvent trace (VAL-1)
-├── decisions.jsonl    # Pathlayer actions per tool event
-└── final.json         # agent_end snapshot
+├── decisions.jsonl    # Pathlayer's per-tool-event tick: signals, score, action
+├── final.json         # agent_end snapshot
+└── report.json        # end-of-session report (OBS-2)
 ```
 
 The recorder also keeps `state.db` at the runs root by default. It journals
@@ -182,6 +183,30 @@ a STOP the detectors and arbitration stop running, but events keep being
 normalized, kept in order and appended to `trace.json`. Those events appear in
 `decisions.jsonl` with `"analyzed": false`.
 
+**Every analyzed decision carries the tick that produced it.** Each
+`"analyzed": true` line of `decisions.jsonl` records what Pathlayer computed for
+that event, so the run's detector history is durable rather than derived from a
+live process:
+
+| column              | meaning                                                            |
+| ------------------- | ------------------------------------------------------------------ |
+| `signals`           | every detector that ran, at its raw confidence, with its reason    |
+| `fused`             | the arbitration score actually compared to the thresholds          |
+| `arbitrated_action` | the action arbitration decided (`action` stays the *emitted* one)   |
+| `dry_run`           | true when that decision was observed only and never applied        |
+| `reason`            | why the action was taken; empty when nothing was decided           |
+
+Silent detectors are kept in `signals` on purpose: "wired and reported 0.00" and
+"not wired at all" are different facts, and a report has to tell them apart. A
+line with `"analyzed": false` carries none of these columns — no detector ran for
+that event, so asserting a confidence for it would be an invention.
+
+`fused` and `arbitrated_action` arrived with OBS-2, which makes them the marker
+of the journal's format. A run recorded by an earlier listener is still read back:
+its `action` column gives the action Pathlayer emitted, so a STOP and its reason
+survive, while the fused score it never recorded is reported as unknown rather
+than as `0.00`. The report names how many lines are in that older format.
+
 Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
 `agent_end` or a late tool call for such a run is logged and dropped, never
 replayed onto the run directory.
@@ -190,7 +215,90 @@ replayed onto the run directory.
 RUN=run-abc123   # original ctx.runId from manifest.json
 cat "/var/lib/pathlayer/runs/$RUN/manifest.json"
 cat "/var/lib/pathlayer/runs/$RUN/trace.json"
+cat "/var/lib/pathlayer/runs/$RUN/report.json"
 ```
+
+## Read the post-session report (OBS-2)
+
+A finalized run normally carries a `report.json`: what it cost, which detectors
+reacted and how strongly, what Pathlayer did, and how the run ended. It is
+written at `agent_end`, and for a run that was cut short during the next
+listener startup — nothing else will ever speak for it. That startup sweep only
+reads the directory; it invents no cost figure, because the process that knew the
+run's budget configuration is the one that disappeared. A run whose journal was
+killed mid-line is still reported, with a note saying the truncated line was
+dropped; a journal corrupted elsewhere is refused instead of summarised, and that
+run keeps no `report.json` (the failure is logged and the sweep continues).
+
+`pathlayer-report` prints it back, rebuilding it from the run directory
+(`manifest.json`, `decisions.jsonl`, `trace.json`, `final.json`) rather than from
+any live state, so an `interrupted` run is reportable too:
+
+```bash
+pathlayer-report "$RUN"     # one named run, in full
+pathlayer-report --last     # the most recently started run, in full
+pathlayer-report --today    # one line per run started today (UTC)
+pathlayer-report --all      # one line per recorded run
+pathlayer-report --last --json   # the structured report instead of the summary
+```
+
+Runs are listed in chronological order of their recorded start, ties broken by
+run id, so the output is deterministic. Add `--runs-root` to point at another
+recordings root (default: `$PATHLAYER_RUNS_DIR`, else `/var/lib/pathlayer/runs`).
+An unknown or ambiguous run id, and `--last` with nothing recorded, fail with a
+message on stderr and a non-zero exit; `--today` or `--all` matching nothing is
+not an error.
+
+```
+run run-abc123 (session sess-1, agent agent-1)
+outcome: stopped -- Pathlayer halted the run
+status: completed   2026-08-10T12:30:58+00:00 -> 2026-08-10T12:30:59+00:00, 4.2s
+events: 8 recorded, 5 analyzed
+cost: not measured -- no recorded event carried a cost: the OpenClaw hooks report
+  no tokens and no price, so nothing on this path measures spend
+detectors: 3 wired, 1 reacted over 5 recorded tick(s)
+  loop         peak 0.94 on event 4 (t=4.0), non-zero on 4 of 5 tick(s) -- 5x repeat
+  no_progress  silent on all 5 tick(s)
+  retry        silent on all 5 tick(s)
+fused score: peaked at 0.94 on event 4 (t=4.0)
+actions: 1 arbitrated
+  event 4 (t=4.0): STOP -- loop: 5x repeat of 1-action block
+stop reason: loop: 5x repeat of 1-action block
+```
+
+The four outcomes are `completed` (reached its end without being halted — the
+actions section says what was emitted), `stopped`, `escalated` (reached the
+ESCALATE tier without stopping) and `interrupted` (never reached its end). A run
+nobody saw finish is never filed as `completed`.
+
+**What the report will not claim.** A figure nothing computed is reported as
+absent rather than as zero — and, symmetrically, a figure that *was* computed is
+reported even when it comes out at zero:
+
+- **Cost.** The OpenClaw hooks carry no token counts and no price
+  (`after_tool_call` gives `toolName`, `params`, `result`, `error`,
+  `durationMs`), so nothing on this path measures spend and the report says so.
+  Configuring the `pricing` section changes nothing here — a price table needs
+  token counts to multiply. The one substitute available today is
+  `detectors.budget.tool_costs_usd` (BUD-3): a known price per tool times the
+  number of calls, reported as an *estimate*, separately from captured cost. That
+  estimate is persisted on every tool call, not only at `agent_end`, so a run
+  killed mid-flight keeps what it had already spent. A BUD-3 estimate of `$0.00`
+  is a measured zero and is reported as such; only a run that recorded no estimate
+  at all is reported as unmeasured, and if that run never reached its end the
+  report calls the figure indeterminate rather than blaming a disabled detector.
+- **Cross-run spend.** `detectors.budget.baseline_usd` is the seed this run's
+  detection actually started from. The cumulative total across runs belongs to
+  INF-1's state store, which this report does not read: it is the engine's
+  inter-run state, while a run directory is the adapter's own auditable capture.
+  The report keeps one distinct, still-empty field as the seam between the two.
+- **Detector activity.** A run recorded before OBS-2 has no per-tick confidence
+  and no fused score in its journal. The report says both are unknown, not that
+  no detector reacted and not that the score was zero.
+
+The most actionable line is often the fused score: a run that peaked at 0.85 and
+never reached the stop threshold is reported as exactly that, which is the signal
+you need to retune a threshold.
 
 ## Export one run
 
