@@ -26,9 +26,9 @@ from pathlayer.config import (
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.resource import ResourceDetector
+from pathlayer.detectors.resource import DURATION_REASON_PREFIX, ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY
 from pathlayer.policies import Action, OverrideRule
 from pathlayer.pricing import DEFAULT_PRICES, ModelPrice, cost_of
@@ -802,6 +802,7 @@ def test_build_pipeline_threads_resource_thresholds() -> None:
                     "max_spawn_count": 10,
                     "max_delegation_depth": 4,
                     "max_restart_count": 6,
+                    "max_duration_seconds": 120,
                 }
             }
         }
@@ -812,6 +813,7 @@ def test_build_pipeline_threads_resource_thresholds() -> None:
     assert resource._max_spawn_count == 10
     assert resource._max_delegation_depth == 4
     assert resource._max_restart_count == 6
+    assert resource.max_duration_seconds == 120
 
 
 def test_resource_unknown_key_rejected() -> None:
@@ -824,6 +826,15 @@ def test_build_pipeline_wraps_resource_range_error_as_config_error() -> None:
         {"detectors": {"resource": {"enabled": True, "max_spawn_count": 0}}}
     )
     with pytest.raises(ConfigError, match=r"invalid configuration value.*max_spawn_count"):
+        build_pipeline(config)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+def test_resource_duration_requires_a_positive_integer(bad: object) -> None:
+    with pytest.raises(ConfigError, match="max_duration_seconds"):
+        config = PathlayerConfig.from_mapping(
+            {"detectors": {"resource": {"enabled": True, "max_duration_seconds": bad}}}
+        )
         build_pipeline(config)
 
 
@@ -983,6 +994,89 @@ def test_no_budget_override_when_budget_advisory() -> None:
     )
     pipeline = build_pipeline(config)
     assert pipeline._policy.config.overrides == {}
+
+
+def test_resource_override_auto_wired_when_enabled() -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"resource": {"enabled": True}}})
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides == {}
+    assert pipeline._policy.config.conditional_overrides == {
+        "resource": (DURATION_REASON_PREFIX, OverrideRule(1.0, Action.STOP))
+    }
+
+
+def test_user_resource_override_wins_over_auto() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {"resource": {"enabled": True}},
+            "policy": {"overrides": {"resource": {"threshold": 1.0, "action": "escalate"}}},
+        }
+    )
+    pipeline = build_pipeline(config)
+    assert pipeline._policy.config.overrides["resource"] == OverrideRule(1.0, Action.ESCALATE)
+    assert pipeline._policy.config.conditional_overrides == {}
+
+
+def test_no_resource_override_when_resource_advisory() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {"resource": {"enabled": True}},
+            "policy": {"advisory_signals": ["resource"]},
+        }
+    )
+    pipeline = build_pipeline(config)
+    assert "resource" not in pipeline._policy.config.overrides
+    assert pipeline._policy.config.conditional_overrides == {}
+
+
+def test_resource_counter_ceiling_keeps_normal_hysteresis() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {"resource": {"enabled": True, "max_spawn_count": 1}},
+            "policy": {"escalate_ticks": 3},
+        }
+    )
+    pipeline = build_pipeline(config)
+
+    assert pipeline.process(ToolEvent("spawn", kind=EventKind.SUBAGENT_SPAWN)) is Action.NONE
+
+
+def test_resource_timeout_override_wins_with_saturated_counter_and_hysteresis() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "resource": {
+                    "enabled": True,
+                    "max_spawn_count": 1,
+                    "max_duration_seconds": 10,
+                }
+            },
+            "policy": {"escalate_ticks": 3, "weights": {"resource": 0.01}},
+        }
+    )
+    pipeline = build_pipeline(config)
+
+    assert (
+        pipeline.process(
+            ToolEvent(
+                "pathlayer_run_start",
+                kind=EventKind.RUN_START,
+                metadata={"started_at_unix": 100.0, "max_duration_seconds": 10},
+            )
+        )
+        is Action.NONE
+    )
+    assert pipeline.process(ToolEvent("spawn", kind=EventKind.SUBAGENT_SPAWN)) is Action.NONE
+    assert (
+        pipeline.process(
+            ToolEvent(
+                "pathlayer_run_timeout",
+                kind=EventKind.RUN_TIMEOUT,
+                metadata={"started_at_unix": 100.0, "max_duration_seconds": 10},
+            )
+        )
+        is Action.STOP
+    )
 
 
 # --------------------------------------------------------------------------- #

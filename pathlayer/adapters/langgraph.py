@@ -47,7 +47,7 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.messages import ToolMessage
 from langchain_core.outputs import LLMResult
 
-from pathlayer.adapters.base import Adapter, EventSink
+from pathlayer.adapters.base import Adapter, EventSink, RunAwareEventSink
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
 
@@ -226,14 +226,22 @@ class LangGraphAdapter(Adapter):
         with self._lock:
             self._pending.clear()
             self._pending_llm.clear()
+        if isinstance(self._sink, RunAwareEventSink):
+            self._sink.end_run()
 
     def as_config(self) -> dict[str, Any]:
         """Return a LangChain ``RunnableConfig`` wiring our capture handler."""
         return {"callbacks": [self._handler]}
 
+    def _start_root(self, parent_run_id: str | None) -> None:
+        """Start RES-2 at the earliest observed root callback, idempotently."""
+        if parent_run_id is None and isinstance(self._sink, RunAwareEventSink):
+            self._sink.start_run()
+
     def _record_start(
         self, run_id: str, parent_run_id: str | None, tool: str, args: dict[str, Any]
     ) -> None:
+        self._start_root(parent_run_id)
         kind = EventKind.PROGRESS_SUMMARY if tool == PROGRESS_SUMMARY_TOOL else EventKind.TOOL_CALL
         with self._lock:
             self._pending[run_id] = _Pending(
@@ -279,6 +287,7 @@ class LangGraphAdapter(Adapter):
             )
 
     def _record_llm_start(self, run_id: str, parent_run_id: str | None, model: str | None) -> None:
+        self._start_root(parent_run_id)
         with self._lock:
             self._pending_llm[run_id] = _PendingLLM(model=model, parent_run_id=parent_run_id)
             # Bound the map: drop the oldest never-paired start if we exceed the cap.
@@ -369,6 +378,18 @@ class _LangChainCaptureHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self._adapter._record_error(str(run_id), error)
+
+    def on_chain_start(
+        self,
+        serialized: dict[str, Any] | None,
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        _ = serialized, inputs, run_id, kwargs
+        self._adapter._start_root(_parent(parent_run_id))
 
     def on_llm_start(
         self,

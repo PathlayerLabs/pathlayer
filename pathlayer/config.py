@@ -42,7 +42,7 @@ from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
-from pathlayer.detectors.resource import ResourceDetector
+from pathlayer.detectors.resource import DURATION_REASON_PREFIX, ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
@@ -285,15 +285,16 @@ class NoProgressConfig:
 @dataclass(slots=True)
 class ResourceConfig:
     # Disabled by default: no adapter emits SUBAGENT_SPAWN/RUN_RESTART yet, and
-    # the detector module's own docstring says "V1 is DETECT-ONLY". The three
+    # the detector module's own docstring says "V1 is DETECT-ONLY". The four
     # thresholds below are not calibrated against any corpus or real trace --
     # they're placeholder guesses, chosen only to be self-consistent round
     # numbers. Low risk while disabled by default; revisit once real traces
-    # with spawn/restart/depth data exist (post-adapter-wiring).
+    # with spawn/restart/depth/duration data exist (post-adapter-wiring).
     enabled: bool = False
     max_spawn_count: int = 5
     max_delegation_depth: int = 3
     max_restart_count: int = 3
+    max_duration_seconds: int = 14400
 
 
 @dataclass(slots=True)
@@ -324,8 +325,9 @@ class PolicySection:
     escalate_ticks: int = 1
     deescalate_ticks: int = 1
     # Priority overrides (ARB-4): detector name -> rule (threshold + action).
-    # Empty by default; the budget->stop rule is auto-wired by build_pipeline
-    # only when the budget detector is enabled (and not advisory).
+    # Empty by default; hard-ceiling budget/runtime-duration -> STOP rules are
+    # auto-wired by build_pipeline only while their detector is enabled and
+    # actionable. Explicit user rules still win.
     overrides: dict[str, OverrideRule] = field(default_factory=dict)
 
 
@@ -464,6 +466,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         max_spawn_count=resource_s.int_("max_spawn_count", 5),
         max_delegation_depth=resource_s.int_("max_delegation_depth", 3),
         max_restart_count=resource_s.int_("max_restart_count", 3),
+        max_duration_seconds=resource_s.int_("max_duration_seconds", 14400),
     )
     resource_s.finish()
 
@@ -796,6 +799,7 @@ def build_pipeline(
                     max_spawn_count=spec.resource.max_spawn_count,
                     max_delegation_depth=spec.resource.max_delegation_depth,
                     max_restart_count=spec.resource.max_restart_count,
+                    max_duration_seconds=spec.resource.max_duration_seconds,
                 )
             )
         tier_thresholds = {
@@ -803,6 +807,7 @@ def build_pipeline(
             for name, threshold in config.policy.tier_thresholds.items()
         }
         overrides = dict(config.policy.overrides)
+        conditional_overrides: dict[str, tuple[str, OverrideRule]] = {}
         # ARB-4: budget at ceiling = stop now. Auto-wire the budget->stop
         # override when the detector is enabled, unless the user already set a
         # budget rule (theirs wins) or made budget observe-only (advisory wins).
@@ -812,6 +817,26 @@ def build_pipeline(
             and BudgetDetector.name not in config.policy.advisory_signals
         ):
             overrides[BudgetDetector.name] = OverrideRule(threshold=1.0, action=Action.STOP)
+        # RES-2: RUN_TIMEOUT is deliberately a single lifecycle fact. Map its
+        # ceiling signal straight to STOP so policy hysteresis cannot turn a
+        # hard runtime limit into a request for another (possibly impossible)
+        # confirming event. Explicit overrides and advisory mode remain
+        # authoritative, matching the budget rule above.
+        # An explicit resource rule governs the whole detector, including
+        # duration. Otherwise only the timeout condition receives this rule;
+        # spawn/depth/restart keep their historical hysteresis semantics.
+        # DURATION_REASON_PREFIX (pathlayer/detectors/resource.py) is a
+        # machine contract here, matched via .startswith() in
+        # policies/base.py::_triggered_overrides -- not just display text.
+        if (
+            spec.resource.enabled
+            and ResourceDetector.name not in config.policy.advisory_signals
+            and ResourceDetector.name not in overrides
+        ):
+            conditional_overrides[ResourceDetector.name] = (
+                DURATION_REASON_PREFIX,
+                OverrideRule(threshold=1.0, action=Action.STOP),
+            )
         suppressions: dict[str, SuppressionRule] = {}
         # LOOP-2 precision: loop<-progress suppression, auto-wired the same way
         # as the budget override above -- only when both loop and no_progress
@@ -834,6 +859,7 @@ def build_pipeline(
                 escalate_ticks=config.policy.escalate_ticks,
                 deescalate_ticks=config.policy.deescalate_ticks,
                 overrides=overrides,
+                conditional_overrides=conditional_overrides,
                 suppressions=suppressions,
             )
         )

@@ -30,6 +30,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -67,10 +68,11 @@ from pathlayer.adapters.openclaw_run_store import (
 )
 from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
 from pathlayer.detectors.budget import BudgetDetector, BudgetState
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
 from pathlayer.postmortem import TickRecord
+from pathlayer.runtime import Scheduler, WatchdogEventSink
 from pathlayer.store import (
     PersistentPipeline,
     SQLiteStateStore,
@@ -80,12 +82,14 @@ from pathlayer.store import (
     StateCorruptionError,
     StateIncompleteError,
     StateStoreError,
+    StateWriteError,
 )
 from pathlayer.validation.traces import UNKNOWN_LABEL, Trace, trace_to_dict
 
 logger = logging.getLogger(__name__)
 
 PipelineFactory = Callable[[], Pipeline]
+_LIFECYCLE_HOOK = "pathlayer_lifecycle"
 
 
 @dataclass(slots=True)
@@ -105,6 +109,17 @@ class _ActiveRun:
     # if the process dies before ``agent_end``; equal by construction to folding
     # ``events`` in one batch (``BudgetDetector.accumulate``).
     cost_state: BudgetState | None = None
+    # HTTP hooks and the timer are two producers for one run. They share this
+    # re-entrant lock so lifecycle injection, raw journaling and decisions stay
+    # in one total order without deadlocking when start_run emits synchronously.
+    lock: Any = field(default_factory=threading.RLock)
+    runtime_sink: WatchdogEventSink | None = None
+    # A lifecycle sink failure can occur after raw/event journaling but before
+    # the pipeline commits. Reuse this logical record on the bounded watchdog
+    # retry so RUN_START/RUN_TIMEOUT remain unique in raw history and replay.
+    runtime_records: dict[EventKind, tuple[dict[str, Any], ToolEvent, int]] = field(
+        default_factory=dict
+    )
 
 
 def _hook_part(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -112,7 +127,38 @@ def _hook_part(payload: dict[str, Any], key: str) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _write_report(directory: RunDirectory) -> None:
+def _translate_recorded_payload(
+    payload: dict[str, Any], *, internal_lifecycle: bool = False
+) -> list[ToolEvent]:
+    """Translate external OpenClaw hooks and Pathlayer lifecycle records."""
+    if payload.get("hook") != _LIFECYCLE_HOOK:
+        return translate_openclaw_event(payload)
+    if not internal_lifecycle:
+        # The hook name is reserved for records synthesized by this recorder.
+        # Never promote an externally supplied payload into a trusted timeout
+        # merely because it later passes through journal replay.
+        return []
+    raw = _hook_part(payload, "event")
+    metadata = raw.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        kind = EventKind(raw.get("kind"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid recorded Pathlayer lifecycle kind") from exc
+    if kind not in {EventKind.RUN_START, EventKind.RUN_TIMEOUT}:
+        raise ValueError("recorded Pathlayer lifecycle kind is not a run boundary")
+    return [
+        ToolEvent(
+            tool=str(raw.get("tool") or f"pathlayer_{kind.value}"),
+            kind=kind,
+            run_id=extract_openclaw_run_id(payload),
+            metadata=dict(metadata),
+        )
+    ]
+
+
+def _write_report(directory: RunDirectory) -> bool:
     """Write a run's OBS-2 report, never letting a failure escape the hook.
 
     The report is a summary of data that is already durable, so failing to write
@@ -128,6 +174,8 @@ def _write_report(directory: RunDirectory) -> None:
             directory.original_run_id,
             exc,
         )
+        return False
+    return True
 
 
 def _budget_detector_for(config: PathlayerConfig | None) -> BudgetDetector | None:
@@ -165,6 +213,9 @@ class OpenClawRunRecorder:
         config: PathlayerConfig | None = None,
         pipeline_factory: PipelineFactory | None = None,
         pathlayer_commit: str | None = None,
+        clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
+        scheduler: Scheduler | None = None,
     ) -> None:
         """Record runs under ``runs_root``, one pipeline per ``ctx.runId``.
 
@@ -212,6 +263,9 @@ class OpenClawRunRecorder:
         # says the estimate is unavailable rather than inventing a zero.
         self._budget_detector = _budget_detector_for(config)
         self._pathlayer_commit = pathlayer_commit or _detect_commit_sha()
+        self._clock = clock
+        self._monotonic = monotonic
+        self._scheduler = scheduler
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
         self._orphan_counters: dict[str, int] = {}
@@ -333,8 +387,12 @@ class OpenClawRunRecorder:
         failing event was folded so the controlled interruption does not lose
         its final known spend.
         """
-        if error is not None:
-            self._record_persistence_error(directory, error)
+        if active is not None:
+            # Stop timer production before any filesystem write below: this is
+            # already an error path, so even the manifest update may fail.
+            active.completed = True
+            if active.runtime_sink is not None:
+                active.runtime_sink.end_run()
         fields: dict[str, Any] = {
             "status": "interrupted",
             "ended_at": utc_now_iso(),
@@ -346,8 +404,21 @@ class OpenClawRunRecorder:
                 **self._cost_fields(active),
             )
             active.persistence_reported = True
-            active.completed = True
-        directory.update_manifest(**fields)
+        if error is not None:
+            try:
+                self._record_persistence_error(directory, error)
+            except (OSError, ValueError, KeyError, TypeError):
+                logger.exception(
+                    "could not persist the interruption error for OpenClaw run %r",
+                    directory.original_run_id,
+                )
+        try:
+            directory.update_manifest(**fields)
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.exception(
+                "could not persist terminal interruption metadata for OpenClaw run %r",
+                directory.original_run_id,
+            )
         _write_report(directory)
         if active is not None:
             with self._lock:
@@ -362,6 +433,8 @@ class OpenClawRunRecorder:
         """
         if not isinstance(payload, dict):
             raise ValueError(f"OpenClaw payload must be an object, got {type(payload).__name__}")
+        if payload.get("hook") == _LIFECYCLE_HOOK:
+            raise ValueError(f"OpenClaw hook {_LIFECYCLE_HOOK!r} is reserved for Pathlayer")
         hook_kind = classify_openclaw_hook(payload)
         run_id = extract_openclaw_run_id(payload)
         if run_id is None:
@@ -369,15 +442,41 @@ class OpenClawRunRecorder:
         active = self._get_or_create_run(run_id, payload, hook_kind)
         if active is None:
             return
-        record = self._append_raw(active, payload)
-        if hook_kind is OpenClawHookKind.RUN_START:
-            self._handle_run_start(active, payload, record)
-        elif hook_kind is OpenClawHookKind.TOOL:
-            self._handle_tool(active, payload, record)
-        elif hook_kind is OpenClawHookKind.RUN_END:
-            self._handle_run_end(active, payload, record)
-        else:
-            active.directory.update_manifest(event_count=active.sequence)
+        with active.lock:
+            if active.completed:
+                return
+            assert active.runtime_sink is not None
+            if any(event.kind is EventKind.RUN_START for event in active.pipeline.history):
+                # Reattachment happens under the recorder's global map lock;
+                # re-arm only after it is released so an immediately overdue
+                # callback can safely finalize/remove this run.
+                active.runtime_sink.start_run()
+            elif hook_kind is OpenClawHookKind.TOOL:
+                # A missing before_agent_run must not disable RES-2. Start at
+                # the first observable tool boundary and make the unmeasured
+                # prefix explicit in logs, matching the generic sink fallback.
+                active.runtime_sink.start_run(fallback=True)
+            if active.completed:
+                return
+            # OpenClaw processes tool hooks itself rather than forwarding them
+            # through WatchdogEventSink.__call__. Preserve the same delayed-
+            # scheduler guarantee explicitly at every observed HTTP boundary,
+            # Check before reserving the external sequence so the raw source of
+            # truth and live processing share one total order. A successful
+            # passive STOP still records the payload below as not analyzed; a
+            # controlled interruption does not append past its terminal state.
+            active.runtime_sink.check_deadline()
+            if active.completed:
+                return
+            record = self._append_raw(active, payload)
+            if hook_kind is OpenClawHookKind.RUN_START:
+                self._handle_run_start(active, payload, record)
+            elif hook_kind is OpenClawHookKind.TOOL:
+                self._handle_tool(active, payload, record)
+            elif hook_kind is OpenClawHookKind.RUN_END:
+                self._handle_run_end(active, payload, record)
+            else:
+                active.directory.update_manifest(event_count=active.sequence)
 
     def attach_http(self, *, host: str = "127.0.0.1", port: int = 0) -> HttpIngestAdapter:
         """Start loopback ingest that routes payloads to this recorder."""
@@ -489,6 +588,7 @@ class OpenClawRunRecorder:
                 pipeline=pipeline,
                 cost_state=self._initial_cost_state(),
             )
+            self._arm_runtime(active)
             self._runs[run_id] = active
             return active
 
@@ -577,8 +677,22 @@ class OpenClawRunRecorder:
                 None if self._budget_detector is None else self._budget_detector.accumulate(events)
             ),
         )
+        self._arm_runtime(active)
         self._runs[run_id] = active
         return active
+
+    def _arm_runtime(self, active: _ActiveRun) -> None:
+        active.runtime_sink = WatchdogEventSink(
+            lambda event: self._handle_runtime_event(active, event),
+            max_duration_seconds=active.pipeline.max_duration_seconds,
+            history=lambda: active.pipeline.history,
+            clock=self._clock,
+            monotonic=self._monotonic,
+            scheduler=self._scheduler,
+            terminal=lambda: active.completed or active.pipeline.stopped,
+            logger=logger,
+            lock=active.lock,
+        )
 
     def _initial_cost_state(self) -> BudgetState | None:
         """A fresh cost accumulator, or ``None`` when no budget detector is wired."""
@@ -612,7 +726,12 @@ class OpenClawRunRecorder:
                     f"invalid record in {directory.raw_events_path} at line {line_number}"
                 )
             sequence = max(sequence, _as_int(record.get("sequence")))
-            for offset, event in enumerate(translate_openclaw_event(record["payload"])):
+            internal_lifecycle = record.get("internal_lifecycle") is True
+            for offset, event in enumerate(
+                _translate_recorded_payload(
+                    record["payload"], internal_lifecycle=internal_lifecycle
+                )
+            ):
                 event.ts = float(len(events))
                 events.append(event)
                 if not pipeline.stopped:
@@ -623,7 +742,13 @@ class OpenClawRunRecorder:
                     )
         return sequence, events
 
-    def _append_raw(self, active: _ActiveRun, payload: dict[str, Any]) -> dict[str, Any]:
+    def _append_raw(
+        self,
+        active: _ActiveRun,
+        payload: dict[str, Any],
+        *,
+        internal_lifecycle: bool = False,
+    ) -> dict[str, Any]:
         active.sequence += 1
         record = {
             "sequence": active.sequence,
@@ -631,12 +756,18 @@ class OpenClawRunRecorder:
             "hook": payload.get("hook"),
             "payload": payload,
         }
+        if internal_lifecycle:
+            record["internal_lifecycle"] = True
         append_jsonl(active.directory.raw_events_path, record)
         return record
 
     def _handle_run_start(
         self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]
     ) -> None:
+        assert active.runtime_sink is not None
+        active.runtime_sink.start_run()
+        if active.completed:
+            return
         if active.started and active.directory.request_path.is_file():
             # Duplicate start for the same run_id: preserve first request snapshot.
             active.directory.update_manifest(status="started", event_count=active.sequence)
@@ -665,6 +796,216 @@ class OpenClawRunRecorder:
             openclaw_provider=_extract_provider(payload),
             workspace=_extract_workspace(payload),
         )
+
+    def _handle_runtime_event(self, active: _ActiveRun, event: ToolEvent) -> None:
+        """Journal, analyze and report one synthetic lifecycle event."""
+        pending = active.runtime_records.get(event.kind)
+        if pending is None:
+            payload = {
+                "hook": _LIFECYCLE_HOOK,
+                "event": {
+                    "kind": event.kind.value,
+                    "tool": event.tool,
+                    "metadata": dict(event.metadata),
+                },
+                "ctx": {"runId": active.directory.original_run_id},
+            }
+            raw_path = active.directory.raw_events_path
+            try:
+                size_before = raw_path.stat().st_size if raw_path.exists() else 0
+            except OSError:
+                size_before = None
+            try:
+                record = self._append_raw(active, payload, internal_lifecycle=True)
+            except OSError as error:
+                # append_jsonl may have written and flushed the complete line
+                # before fsync failed. Adopt that exact last record if visible;
+                # otherwise propagate so a later retry may append safely.
+                recovered_record = self._recover_appended_lifecycle(active, payload)
+                if recovered_record is None:
+                    try:
+                        size_after = raw_path.stat().st_size if raw_path.exists() else 0
+                    except OSError:
+                        size_after = None
+                    if size_before is not None and size_after == size_before:
+                        # No bytes own the reserved sequence; return it before
+                        # the bounded retry. A size change with no complete
+                        # record means a torn JSONL line and is non-durable.
+                        active.sequence -= 1
+                        raise
+                wrapped = StateWriteError(
+                    "OpenClaw lifecycle journal could not confirm append durability"
+                )
+                wrapped.__cause__ = error
+                logger.error(
+                    "interrupting OpenClaw run %r after lifecycle journal durability failed",
+                    active.directory.original_run_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                self._interrupt_active_run(active, wrapped)
+                return
+            normalized = _translate_recorded_payload(payload, internal_lifecycle=True)[0]
+            normalized.ts = float(len(active.events))
+            active.events.append(normalized)
+            index = len(active.events) - 1
+            active.runtime_records[event.kind] = (record, normalized, index)
+        else:
+            record, normalized, index = pending
+        if active.pipeline.stopped:
+            self._record_decision(
+                active, record, normalized, Action.STOP, index=index, analyzed=False
+            )
+            return
+        try:
+            action = _process_pipeline(
+                active.pipeline,
+                normalized,
+                _openclaw_event_id(_as_int(record.get("sequence")), 0),
+            )
+        except StateStoreError as error:
+            logger.exception(
+                "interrupting OpenClaw run %r after lifecycle persistence failed",
+                active.directory.original_run_id,
+            )
+            self._interrupt_active_run(active, error)
+            return
+        durability_must_be_reported = (
+            isinstance(active.pipeline, PersistentPipeline)
+            and not active.pipeline.durable
+            and not active.persistence_reported
+        )
+        if normalized.kind is EventKind.RUN_TIMEOUT:
+            self._finalize_timeout_artifacts(active, record, normalized, action, index=index)
+            return
+        if durability_must_be_reported:
+            assert isinstance(active.pipeline, PersistentPipeline)
+            self._record_pipeline_durability(active.directory, active.pipeline)
+            active.persistence_reported = True
+        self._record_decision(active, record, normalized, action, index=index)
+        active.directory.update_manifest(
+            event_count=active.sequence,
+            stopped=active.pipeline.stopped,
+            **self._cost_fields(active),
+        )
+
+    def _finalize_timeout_artifacts(
+        self,
+        active: _ActiveRun,
+        record: dict[str, Any],
+        event: ToolEvent,
+        action: Action,
+        *,
+        index: int,
+    ) -> None:
+        """Persist the timeout snapshot after its pipeline tick committed.
+
+        Lifecycle identity is already durable at this point, so artifact
+        failures must never escape to the watchdog and invite another timeout.
+        Instead the run becomes an honest controlled interruption while the
+        canonical RUN_TIMEOUT stays committed exactly once.
+        """
+        trace_document = trace_to_dict(
+            Trace(
+                label=UNKNOWN_LABEL,
+                description=(
+                    f"Recorded OpenClaw run {active.directory.original_run_id} "
+                    "at its runtime timeout"
+                ),
+                events=list(active.events),
+                metadata={
+                    "run_id": active.directory.original_run_id,
+                    "recorded_at": utc_now_iso(),
+                    "snapshot": "runtime_timeout",
+                },
+            )
+        )
+        try:
+            if (
+                isinstance(active.pipeline, PersistentPipeline)
+                and not active.pipeline.durable
+                and not active.persistence_reported
+            ):
+                # The timeout tick may have committed only in memory. Publishing
+                # that poison marker is part of the same protected artifact
+                # phase as the snapshot and decision; a manifest failure here
+                # must produce the same controlled interruption.
+                self._record_pipeline_durability(active.directory, active.pipeline)
+                active.persistence_reported = True
+            # Write the event-sourced snapshot first: if a later sidecar fails,
+            # the controlled-interruption report can still describe the timeout.
+            atomic_write_json(active.directory.trace_path, trace_document)
+            self._record_decision(active, record, event, action, index=index)
+            active.directory.update_manifest(
+                event_count=active.sequence,
+                stopped=active.pipeline.stopped,
+                **self._cost_fields(active),
+            )
+            if not _write_report(active.directory):
+                raise OSError("OpenClaw timeout report could not be written")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self._interrupt_after_timeout_artifact_failure(active, error, trace_document)
+
+    def _interrupt_after_timeout_artifact_failure(
+        self,
+        active: _ActiveRun,
+        error: Exception,
+        trace_document: dict[str, Any],
+    ) -> None:
+        """Contain a sidecar failure without invalidating the durable tick."""
+        logger.error(
+            "interrupting OpenClaw run %r after timeout artifact finalization failed",
+            active.directory.original_run_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        active.completed = True
+        if active.runtime_sink is not None:
+            active.runtime_sink.end_run()
+
+        # Atomic trace writes are safe to retry and maximize the evidence an
+        # interrupted report can consume. Append-only decisions are not retried:
+        # an fsync failure could have left a complete line visible.
+        if not active.directory.trace_path.is_file():
+            try:
+                atomic_write_json(active.directory.trace_path, trace_document)
+            except (OSError, ValueError, KeyError, TypeError):
+                logger.exception(
+                    "could not preserve the timeout trace for interrupted OpenClaw run %r",
+                    active.directory.original_run_id,
+                )
+
+        persistence_error: StateStoreError | None = None
+        if isinstance(active.pipeline, PersistentPipeline):
+            active.pipeline.close("interrupted")
+            if not active.pipeline.durable:
+                persistence_error = active.pipeline.persistence_error or StateWriteError(
+                    "OpenClaw durable scope could not close after artifact failure"
+                )
+        self._finalize_interrupted_run(
+            active.directory,
+            error=persistence_error,
+            active=active,
+        )
+
+    @staticmethod
+    def _recover_appended_lifecycle(
+        active: _ActiveRun, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        path = active.directory.raw_events_path
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if not lines:
+                return None
+            record = json.loads(lines[-1])
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(record, dict)
+            or record.get("sequence") != active.sequence
+            or record.get("internal_lifecycle") is not True
+            or record.get("payload") != payload
+        ):
+            return None
+        return record
 
     def _handle_tool(
         self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]
@@ -718,6 +1059,8 @@ class OpenClawRunRecorder:
     ) -> None:
         if active.completed:
             return
+        assert active.runtime_sink is not None
+        active.runtime_sink.end_run()
         hook_event: dict[str, Any] = _hook_part(payload, "event")
         hook_ctx: dict[str, Any] = _hook_part(payload, "ctx")
         duration_ms = hook_event.get("durationMs")

@@ -118,3 +118,13 @@ class Detector(ABC):
         if kinds is None:
             return history
         return [event for event in history if event.kind in kinds]
+
+
+class RuntimeLimitProvider(ABC):
+    """Nominal capability for a detector that owns one runtime deadline."""
+
+    @property
+    @abstractmethod
+    def max_duration_seconds(self) -> int:
+        """Return the positive hard runtime limit consumed by ``wire()``."""
+        raise NotImplementedError

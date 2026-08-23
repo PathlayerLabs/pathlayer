@@ -325,7 +325,11 @@ def test_concurrent_stop_wins_without_appending_stale_event(tmp_path: Path) -> N
     assert winner.process(ToolEvent("read"), event_id="winner") is Action.STOP
     assert stale.process(ToolEvent("edit"), event_id="stale") is Action.STOP
     assert stale.stopped
+    assert stale.durable
     assert len(stale.history) == 1
+    snapshot = SQLiteStateStore(tmp_path / "state.db").read_scope("run")
+    assert snapshot.status == "stopped"
+    assert snapshot.durable
 
 
 def test_concurrent_close_fails_open_and_poisons_terminal_scope(tmp_path: Path) -> None:
@@ -618,6 +622,62 @@ def test_fingerprint_ignores_future_non_decision_sections(tmp_path: Path) -> Non
     changed = SimpleNamespace(**vars(projected))
     changed.pipeline = PipelineSection(dry_run=True)
     assert configuration_fingerprint(changed) != configuration_fingerprint(config)
+
+
+def test_resource_duration_only_changes_fingerprint_when_resource_is_enabled(
+    tmp_path: Path,
+) -> None:
+    disabled_a = _config(tmp_path / "a.db")
+    disabled_b = replace(
+        disabled_a,
+        detectors=replace(
+            disabled_a.detectors,
+            resource=ResourceConfig(enabled=False, max_duration_seconds=7),
+        ),
+    )
+    assert configuration_fingerprint(disabled_a) == configuration_fingerprint(disabled_b)
+
+    enabled_a = replace(
+        disabled_a,
+        detectors=replace(
+            disabled_a.detectors,
+            resource=ResourceConfig(enabled=True, max_duration_seconds=7),
+        ),
+    )
+    enabled_b = replace(
+        enabled_a,
+        detectors=replace(
+            enabled_a.detectors,
+            resource=ResourceConfig(enabled=True, max_duration_seconds=8),
+        ),
+    )
+    assert configuration_fingerprint(enabled_a) != configuration_fingerprint(enabled_b)
+
+
+def test_real_v3_default_scope_resumes_with_resource_disabled(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database)
+    historical = "b15037528988ec774f889c83bcf27254ea2f69f23bdfc4b33177b3c9471c8a3b"
+    store.load_or_create("run", historical)
+
+    resumed = build_pipeline(_config(database), state_key="run", store=store)
+    assert resumed.history == ()
+    assert resumed.durable
+
+
+def test_v3_scope_created_with_resource_enabled_is_refused_conservatively(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.db"
+    store = SQLiteStateStore(database)
+    store.load_or_create("run", "pre-res2-resource-fingerprint")
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True)),
+        store=StoreSection(path=str(database)),
+    )
+
+    with pytest.raises(StateCompatibilityError, match="different configuration"):
+        build_pipeline(config, state_key="run", store=store)
 
 
 def test_v1_schema_migrates_action_reason_transactionally(tmp_path: Path) -> None:
@@ -1025,6 +1085,53 @@ class _FailOnceStore:
             self.failed = True
             raise StateWriteError("disk full")
         return self.delegate.append_tick(*args, **kwargs)
+
+
+class _LegacySignatureStore:
+    """Third-party store compiled against the public pre-RES-2 signature."""
+
+    def __init__(self, delegate: StateStore) -> None:
+        self.delegate = delegate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.delegate, name)
+
+    def append_tick(
+        self,
+        state_key: str,
+        fingerprint: str,
+        expected_revision: int,
+        event_id: str | None,
+        event: ToolEvent,
+        decision: Any,
+        costs: BudgetState,
+    ) -> Any:
+        return self.delegate.append_tick(
+            state_key,
+            fingerprint,
+            expected_revision,
+            event_id,
+            event,
+            decision,
+            costs,
+        )
+
+
+def test_persistent_pipeline_keeps_legacy_store_append_signature(tmp_path: Path) -> None:
+    delegate = SQLiteStateStore(tmp_path / "state.db")
+    pipeline = build_pipeline(
+        PathlayerConfig(
+            detectors=DetectorsConfig(resource=ResourceConfig(enabled=True)),
+            store=StoreSection(path=str(tmp_path / "ignored.db")),
+        ),
+        state_key="run",
+        store=_LegacySignatureStore(delegate),  # type: ignore[arg-type]
+    )
+
+    assert (
+        pipeline.process(ToolEvent("pathlayer_run_start", kind=EventKind.RUN_START)) is Action.NONE
+    )
+    assert delegate.read_scope("run").revision == 1
 
 
 def test_write_failure_keeps_action_and_permanently_degrades(

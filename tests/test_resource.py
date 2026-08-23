@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from pathlayer.detectors.resource import (
+    DURATION_REASON_PREFIX,
     ResourceDetector,
     ResourceState,
     advance_resource_state,
@@ -15,6 +16,7 @@ from pathlayer.detectors.resource import (
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, Policy
+from pathlayer.policies.base import PolicyConfig
 from pathlayer.validation import Trace, inject_resource_spike, load_trace
 
 _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
@@ -33,6 +35,22 @@ def _restart(depth: int | None = None) -> ToolEvent:
 def _tool(depth: int | None = None) -> ToolEvent:
     metadata = {} if depth is None else {"depth": depth}
     return ToolEvent(tool="call", metadata=metadata)
+
+
+def _start() -> ToolEvent:
+    return ToolEvent(
+        tool="pathlayer_run_start",
+        kind=EventKind.RUN_START,
+        metadata={"started_at_unix": 100.0, "max_duration_seconds": 100},
+    )
+
+
+def _timeout() -> ToolEvent:
+    return ToolEvent(
+        tool="pathlayer_run_timeout",
+        kind=EventKind.RUN_TIMEOUT,
+        metadata={"started_at_unix": 100.0, "max_duration_seconds": 100},
+    )
 
 
 def test_empty_history_is_silent() -> None:
@@ -117,6 +135,15 @@ def test_restart_heavy_is_proportional_then_saturates() -> None:
     assert "restart" in at.reason
 
 
+def test_duration_is_silent_until_the_discrete_timeout_event() -> None:
+    detector = ResourceDetector(max_duration_seconds=100)
+    assert detector.evaluate([_start(), _tool()]).confidence == 0.0
+
+    at = detector.evaluate([_start(), _tool(), _timeout()])
+    assert at.confidence == 1.0
+    assert at.reason == "run duration reached 100s hard limit"
+
+
 # --------------------------------------------------------------------------- #
 # independence + reason naming
 # --------------------------------------------------------------------------- #
@@ -157,6 +184,19 @@ def test_co_occurring_breach_is_visible_in_diagnostics() -> None:
     assert signal.diagnostics == ("restart also at threshold (2/2)",)
 
 
+def test_duration_wins_tie_break_after_timeout() -> None:
+    # RUN_TIMEOUT is the one-shot hard-ceiling fact. It must remain the
+    # actionable reason even when an older RES-1 counter is also saturated;
+    # otherwise the duration-only policy override cannot recognize it.
+    detector = ResourceDetector(max_spawn_count=2)
+    events = [_spawn(), _spawn(), _start(), _timeout()]
+    signal = detector.evaluate(events)
+
+    assert signal.confidence == 1.0
+    assert signal.reason.startswith(DURATION_REASON_PREFIX)
+    assert signal.diagnostics == ("spawn also at threshold (2/2)",)
+
+
 def test_invalid_depths_diagnostic() -> None:
     detector = ResourceDetector()
     signal = detector.evaluate([ToolEvent(tool="call", metadata={"depth": -1})])
@@ -174,6 +214,8 @@ def test_incremental_step_matches_batch_for_every_prefix() -> None:
         _spawn(),
         _tool(depth=1),
         _restart(),
+        _start(),
+        _timeout(),
         _tool(depth=3),
         _spawn(),
         _tool(depth=1),
@@ -229,13 +271,27 @@ def test_reason_names_counter_value_and_threshold() -> None:
     assert signal.reason == "3 sub-agent spawn(s) / 5 threshold"
 
 
+def test_timeout_reason_starts_with_the_exported_prefix() -> None:
+    # config.py wires pathlayer.policies.base's hard-STOP override by matching
+    # signal.reason.startswith(DURATION_REASON_PREFIX) (conditional_overrides).
+    # If this ever drifts, that override silently stops firing -- this test
+    # exists so a reformulation of the reason string is a deliberate decision,
+    # not an accident.
+    detector = ResourceDetector()
+    signal = detector.evaluate([_timeout()])
+    assert signal.reason.startswith(DURATION_REASON_PREFIX)
+
+
 # --------------------------------------------------------------------------- #
 # config validation
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, True])
-@pytest.mark.parametrize("field", ["max_spawn_count", "max_delegation_depth", "max_restart_count"])
+@pytest.mark.parametrize(
+    "field",
+    ["max_spawn_count", "max_delegation_depth", "max_restart_count", "max_duration_seconds"],
+)
 def test_invalid_config_raises(field: str, bad: object) -> None:
     with pytest.raises(ValueError):
         ResourceDetector(**{field: bad})  # type: ignore[arg-type]
@@ -260,9 +316,36 @@ def test_pipeline_stops_when_a_counter_crosses_stop_threshold_independently() ->
     ) == [Action.NONE, Action.STOP]
 
 
+def test_pipeline_stops_exactly_on_timeout_event() -> None:
+    pipeline = Pipeline([ResourceDetector(max_duration_seconds=100)], Policy())
+    assert pipeline.process(_start()) is Action.NONE
+    assert pipeline.process(_tool()) is Action.NONE
+    assert pipeline.process(_timeout()) is Action.STOP
+
+
+def test_direct_pipeline_resource_advisory_also_covers_timeout() -> None:
+    policy = Policy(PolicyConfig(advisory_signals=frozenset({"resource"})))
+    pipeline = Pipeline([ResourceDetector(max_duration_seconds=100)], policy)
+
+    assert pipeline.process(_start()) is Action.NONE
+    assert pipeline.process(_timeout()) is Action.NONE
+    assert pipeline.last_decision is not None
+    assert pipeline.last_decision.signals[-1].name == "resource"
+
+
 def test_healthy_trace_stays_silent() -> None:
     trace = load_trace(_TRACES_DIR / "healthy" / "varied_long_run.json")
     assert ResourceDetector().evaluate(trace.events).confidence == 0.0
+
+
+def test_labeled_timeout_trace_fires_and_healthy_duration_counterexample_stays_silent() -> None:
+    failing = load_trace(Path(__file__).parent / "fixtures" / "runtime_timeout.json")
+    healthy = load_trace(_TRACES_DIR / "healthy" / "finishes_before_runtime_limit.json")
+    detector = ResourceDetector(max_duration_seconds=100)
+
+    assert detector.evaluate(failing.events).confidence == 1.0
+    assert Policy().decide([detector.evaluate(failing.events)]) is Action.STOP
+    assert detector.evaluate(healthy.events).confidence == 0.0
 
 
 # --------------------------------------------------------------------------- #

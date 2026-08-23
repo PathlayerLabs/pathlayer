@@ -1,0 +1,14 @@
+{
+  "label": "healthy",
+  "description": "A long but healthy run starts lifecycle measurement and completes before the hard ceiling, so no timeout event exists and duration stays silent.",
+  "metadata": { "curated_by": "RES-2", "max_duration_seconds": 100 },
+  "events": [
+    {
+      "tool": "pathlayer_run_start",
+      "kind": "run_start",
+      "metadata": { "started_at_unix": 2000.0, "max_duration_seconds": 100 }
+    },
+    { "tool": "read_file", "args": { "path": "src/a.py" }, "ts": 40.0 },
+    { "tool": "run_tests", "result": { "passed": 12, "failed": 0 }, "ts": 99.999 }
+  ]
+}

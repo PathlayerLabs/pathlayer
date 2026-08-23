@@ -128,6 +128,30 @@ uses the same convention throughout Pathlayer: `cost_usd > 0` is a captured,
 priced event; `cost_usd == 0` means that no captured price is available and may
 therefore use a configured estimate when BUD is enabled.
 
+Duration enforcement is also opt-in and requires the live run-aware sink:
+
+```yaml
+detectors:
+  resource:
+    enabled: true
+    max_duration_seconds: 14400
+```
+
+`wire()` returns a callable sink with `start_run()` and `end_run()`. LangGraph
+starts it on the first root callback and OpenClaw starts it on
+`before_agent_run`; custom adapters should call those lifecycle methods at the
+real run boundaries. If they do not, the first event starts the watchdog with a
+warning, and time before that event cannot be measured. The detector remains
+pure: durable `run_start` and `run_timeout` events carry the lifecycle through
+SQLite and exact replay. The configured duration is a hard ceiling, not a
+confidence ramp: the duration signal is `0` before the deadline and `1` at it.
+`build_pipeline()` auto-wires that ceiling to STOP so one timeout bypasses
+normal multi-tick hysteresis; an explicit resource override or advisory mode
+still wins.
+The shipped value is an uncalibrated default and the entire resource detector
+is disabled until explicitly enabled. `policy.advisory_signals`, dry-run mode
+and the actuator's real capabilities remain authoritative over enforcement.
+
 ### Crash-safe run state
 
 Pass a stable logical run identity to resume detectors, policy hysteresis and
@@ -253,6 +277,12 @@ reach the model, add `actuator.injection_node()` before the model node.
 SUMMARIZE additionally requires `summary_tool()`, `summary_gate_node(sink)` and
 the conditional route returned by `summary_route()`. The complete runnable
 wiring lives in [`examples/demo_no_progress.py`](examples/demo_no_progress.py).
+
+At a duration timeout, `LangGraphActuator` requests cooperative drain. It does
+not forcibly cancel a provider request that is already blocked; the STOP is
+applied as soon as the runtime can observe/cooperate with that request. The
+OpenClaw recorder persists the timeout, STOP decision, trace and report, but is
+passive toward the separate OpenClaw process and does not terminate it.
 
 ## Development
 

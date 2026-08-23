@@ -7,22 +7,23 @@ piece of glue needed to change that: it builds an
 :data:`~pathlayer.adapters.base.EventSink` that runs the pipeline and forwards
 its decision to an :class:`~pathlayer.policies.actuators.Actuator`.
 
-No change to ``Pipeline``, ``Adapter`` or ``EventSink`` was needed for this:
-the pipeline stays a pure, adapter-agnostic decision engine. ``pipeline.sink``
-remains available unchanged for every existing detection-only / offline-replay
-use; ``wire()`` is additive, not a replacement.
+The returned object remains callable as an EventSink and additionally exposes
+``start_run()``/``end_run()``. Those lifecycle hooks own the RES-2 watchdog;
+the pipeline stays a pure, adapter-agnostic decision engine.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from pathlayer.adapters.base import EventSink
+from pathlayer.adapters.base import RunAwareEventSink
 from pathlayer.events import ToolEvent
 from pathlayer.policies.actions import Action
 from pathlayer.policies.actuators import Actuator
+from pathlayer.runtime import Scheduler, WatchdogEventSink
 
 if TYPE_CHECKING:
     # Deferred to a type-checking-only import: pathlayer.pipeline imports
@@ -34,8 +35,14 @@ if TYPE_CHECKING:
 
 
 def wire(
-    pipeline: Pipeline, actuator: Actuator, *, logger: logging.Logger | None = None
-) -> EventSink:
+    pipeline: Pipeline,
+    actuator: Actuator,
+    *,
+    logger: logging.Logger | None = None,
+    clock: Callable[[], float] = time.time,
+    monotonic: Callable[[], float] = time.monotonic,
+    scheduler: Scheduler | None = None,
+) -> RunAwareEventSink:
     """Build an :data:`EventSink` that runs ``pipeline`` then applies its Action.
 
     Only calls ``actuator.apply_with_context`` (ACT-1; its default delegates to
@@ -47,12 +54,9 @@ def wire(
     for no reason -- harmless for the idempotent ``RunControl.request_drain``,
     but not a contract a generic ``Actuator`` should have to assume.
 
-    The returned sink serializes calls with one private lock. ``Pipeline`` has
-    no internal lock, by design (it is a pure, single-threaded decision engine),
-    but ACT-2 gives a run two event producers: adapter capture and the summary
-    gate's synthetic refusal events. Passing this *same* sink to both keeps
-    ``Pipeline.process`` and the transition-local ``last_applied`` state safe
-    even when framework callbacks arrive from different threads.
+    The returned run-aware sink serializes adapter calls and the watchdog timer
+    with one private lock. ``clock``/``monotonic``/``scheduler`` are injectable
+    so deadline behavior can be tested without sleeping.
 
     Raises ``ValueError`` if ``pipeline.dry_run`` is ``True``: a dry-run
     pipeline's ``process()`` always returns ``Action.NONE`` (the action it
@@ -74,34 +78,34 @@ def wire(
         )
     log = logger if logger is not None else logging.getLogger(__name__)
     last_applied = Action.NONE
-    sink_lock = threading.Lock()
 
     def sink(event: ToolEvent) -> None:
         nonlocal last_applied
-        with sink_lock:
-            action = pipeline.process(event)
-            if action is last_applied:
-                return
-            # Update on every change, including a de-escalation to NONE (mirrors
-            # Pipeline._observe/_last_would_be): otherwise a later re-escalation
-            # to the *same* tier after a NONE in between (e.g. WARN -> NONE ->
-            # WARN) would be mistaken for "unchanged" and never re-applied.
-            last_applied = action
-            if action is Action.NONE:
-                return
-            try:
-                # ACT-1: hand the actuator the full context of this tick. The default
-                # Actuator.apply_with_context delegates to apply(action, post_mortem),
-                # so a legacy actuator behaves exactly as before. The pipeline builds
-                # the context for every emitted non-NONE action, so it is invariably
-                # present here (an AssertionError would be caught and logged like any
-                # actuator failure, keeping capture fail-open).
-                context = pipeline.actuation_context
-                assert context is not None
-                actuator.apply_with_context(context)
-            except Exception:
-                log.exception(
-                    "actuator.apply failed for action=%s; event capture continues", action.name
-                )
+        action = pipeline.process(event)
+        if action is last_applied:
+            return
+        # Update on every change, including a de-escalation to NONE (mirrors
+        # Pipeline._observe/_last_would_be): otherwise a later re-escalation
+        # to the *same* tier after a NONE in between would never be re-applied.
+        last_applied = action
+        if action is Action.NONE:
+            return
+        try:
+            context = pipeline.actuation_context
+            assert context is not None
+            actuator.apply_with_context(context)
+        except Exception:
+            log.exception(
+                "actuator.apply failed for action=%s; event capture continues", action.name
+            )
 
-    return sink
+    return WatchdogEventSink(
+        sink,
+        max_duration_seconds=pipeline.max_duration_seconds,
+        history=lambda: pipeline.history,
+        clock=clock,
+        monotonic=monotonic,
+        scheduler=scheduler,
+        terminal=lambda: pipeline.stopped,
+        logger=log,
+    )

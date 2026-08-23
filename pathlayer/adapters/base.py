@@ -8,11 +8,27 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Protocol, runtime_checkable
 
 from pathlayer.events import ToolEvent
 
 # Callback invoked for every captured event (e.g. fed to the detector pipeline).
 EventSink = Callable[[ToolEvent], None]
+
+
+@runtime_checkable
+class RunAwareEventSink(Protocol):
+    """Callable event sink with explicit logical-run lifecycle hooks.
+
+    Adapters may use the lifecycle methods when they observe a real run
+    boundary. Existing callers can keep treating the object as an EventSink.
+    """
+
+    def __call__(self, event: ToolEvent) -> None: ...
+
+    def start_run(self, *, started_at: float | None = None) -> None: ...
+
+    def end_run(self) -> None: ...
 
 
 class Adapter(ABC):

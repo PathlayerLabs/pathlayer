@@ -81,6 +81,18 @@ detectors:
     threshold: 2.0     # cumulative sum at which it fires (> 0)
     window: 64         # >= ceil(threshold / target_rate) + 1
 
+  # ResourceDetector: lifecycle/resource runaway facts. Disabled by default;
+  # these placeholder thresholds are not calibrated for your workload.
+  resource:
+    enabled: false
+    max_spawn_count: 5
+    max_delegation_depth: 3
+    max_restart_count: 3
+    # Exact hard runtime ceiling (> 0, integer seconds). With resource enabled,
+    # a run-aware live sink emits RUN_TIMEOUT at this deadline: confidence is 0
+    # before it and 1 at it. Offline Pipeline.process() alone has no watchdog.
+    max_duration_seconds: 14400
+
 # Per-tool canonicalization overrides (CAN-2). Empty by default.
 canonicalization:
   tool_masks: {}
@@ -94,7 +106,7 @@ canonicalization:
 policy:
   stop_threshold: 0.9     # fused confidence at/above which we STOP (in [0, 1])
   advisory_signals: []    # signals computed/logged but never allowed to STOP
-                          # (one of: loop, retry, budget, no_progress)
+                          # (one of: loop, retry, budget, no_progress, resource)
   # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
   # Signals are fused with a weighted noisy-OR (1 - prod(1 - weight * confidence)),
   # so two converging signals reinforce each other. A weight of 0 makes a signal
@@ -154,14 +166,15 @@ policy:
   # Priority overrides (ARB-4). Some signals don't deserve the graduated path:
   # a rule maps a detector to a confidence threshold + action that is committed
   # IMMEDIATELY, bypassing both fusion and hysteresis. The headline case is
-  # "budget at ceiling = stop now".
+  # "budget or runtime at ceiling = stop now".
   #
-  # AUTO-WIRING: when the budget detector is enabled (detectors.budget.enabled),
-  # a `budget -> {threshold: 1.0, action: stop}` rule is added automatically, so
-  # hitting the ceiling stops at once regardless of escalate_ticks. You do NOT
-  # need to declare it. Declaring `budget` here overrides that default; listing
-  # `budget` in advisory_signals disables it (advisory wins, and the two cannot
-  # be combined -- that is rejected).
+  # AUTO-WIRING: enabled budget and resource-duration hard ceilings receive a
+  # `{threshold: 1.0, action: stop}` rule automatically, so they stop at once
+  # regardless of escalate_ticks. Resource spawn/depth/restart counters keep
+  # normal hysteresis. You do NOT need to declare the automatic rules.
+  # Declaring the corresponding detector here overrides its default; listing
+  # it in advisory_signals disables it (advisory wins, and the two cannot be
+  # combined -- that is rejected).
   #
   # Fields per rule: `threshold` (confidence in [0, 1], default 1.0) and
   # `action` (warn/summarize/fallback/escalate/stop, default stop). Enforcement

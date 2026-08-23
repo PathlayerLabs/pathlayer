@@ -7,6 +7,7 @@ intervene during execution.
 Detection is deterministic/statistical: no LLM in the detection loop.
 """
 
+from pathlayer.adapters.base import RunAwareEventSink
 from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline, load_config
 from pathlayer.pipeline import Pipeline, PipelineDecision, WouldBeAction
 from pathlayer.postmortem import (
@@ -27,6 +28,7 @@ __all__ = [
     "Pipeline",
     "PipelineDecision",
     "PostMortem",
+    "RunAwareEventSink",
     "SQLiteStateStore",
     "SessionOutcome",
     "SessionReport",

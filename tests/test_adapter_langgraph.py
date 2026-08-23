@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -25,8 +26,11 @@ from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors
+from pathlayer.detectors.resource import ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
+from pathlayer.policies import Action, Actuator, Policy, wire
+from pathlayer.postmortem import PostMortem
 from pathlayer.validation.traces import Trace, dump_trace, load_trace
 
 
@@ -392,6 +396,44 @@ from langchain_core.messages import AIMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, Generation, LLMResult  # noqa: E402
 
 
+class _TimerHandle:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _ManualScheduler:
+    def __init__(self) -> None:
+        self.handle: _TimerHandle | None = None
+        self.delay: float | None = None
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> _TimerHandle:
+        self.delay = delay_seconds
+        self.handle = _TimerHandle(callback)
+        return self.handle
+
+    def fire(self) -> None:
+        assert self.handle is not None and not self.handle.cancelled
+        assert self.delay is not None
+        self.now += self.delay
+        self.handle.callback()
+
+
+class _StopActuator(Actuator):
+    def __init__(self) -> None:
+        self.actions: list[Action] = []
+
+    def apply(self, action: Action, post_mortem: PostMortem | None) -> None:
+        self.actions.append(action)
+
+
 def _chat_result(input_tokens: int, output_tokens: int, model: str | None = "gpt-4o") -> LLMResult:
     """A chat-model LLMResult carrying usage_metadata on its AIMessage."""
     message = AIMessage(
@@ -410,6 +452,98 @@ def _drive_llm(adapter: LangGraphAdapter, response: LLMResult, *, serialized: di
     run_id = uuid4()
     adapter._handler.on_llm_start(serialized, ["prompt"], run_id=run_id)
     adapter._handler.on_llm_end(response, run_id=run_id)
+
+
+def test_root_llm_start_arms_watchdog_before_in_flight_call_finishes() -> None:
+    pipeline = Pipeline([ResourceDetector(max_duration_seconds=10)], Policy())
+    actuator = _StopActuator()
+    scheduler = _ManualScheduler()
+    sink = wire(
+        pipeline,
+        actuator,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    adapter = LangGraphAdapter(sink)
+    adapter.attach()
+
+    run_id = uuid4()
+    adapter._handler.on_llm_start({"kwargs": {"model": "gpt-4o"}}, ["prompt"], run_id=run_id)
+    assert [event.kind for event in pipeline.history] == [EventKind.RUN_START]
+
+    scheduler.fire()
+    assert [event.kind for event in pipeline.history] == [
+        EventKind.RUN_START,
+        EventKind.RUN_TIMEOUT,
+    ]
+    assert EventKind.LLM_CALL not in [event.kind for event in pipeline.history]
+    assert actuator.actions == [Action.STOP]
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_completed_root_llm_cancels_watchdog(fails: bool) -> None:
+    # The watchdog is cancelled by detach() (called right after the root call
+    # completes, matching the README's try/finally pattern) -- not by the root
+    # callback itself, since one attach() may legitimately cover several
+    # independent root-level calls (see
+    # test_two_independent_root_calls_share_one_watchdog below).
+    pipeline = Pipeline([ResourceDetector(max_duration_seconds=10)], Policy())
+    scheduler = _ManualScheduler()
+    sink = wire(
+        pipeline,
+        _StopActuator(),
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    adapter = LangGraphAdapter(sink)
+    adapter.attach()
+    run_id = uuid4()
+    adapter._handler.on_llm_start({"kwargs": {"model": "gpt-4o"}}, ["prompt"], run_id=run_id)
+
+    if fails:
+        adapter._handler.on_llm_error(RuntimeError("provider failed"), run_id=run_id)
+    else:
+        adapter._handler.on_llm_end(_chat_result(1, 1, "gpt-4o"), run_id=run_id)
+    adapter.detach()
+
+    assert scheduler.handle is not None and scheduler.handle.cancelled
+    scheduler.now = 20.0
+    scheduler.handle.callback()
+    assert EventKind.RUN_TIMEOUT not in [event.kind for event in pipeline.history]
+
+
+def test_two_independent_root_calls_share_one_watchdog() -> None:
+    # A root-level callback ending (e.g. the first of two standalone
+    # add.invoke() calls under one attach(), as in test_pipeline_integration)
+    # must not silently kill the watchdog for the rest of the logical run --
+    # only detach() may end it.
+    pipeline = Pipeline([ResourceDetector(max_duration_seconds=10)], Policy())
+    scheduler = _ManualScheduler()
+    sink = wire(
+        pipeline,
+        _StopActuator(),
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    adapter = LangGraphAdapter(sink)
+    adapter.attach()
+
+    add.invoke({"a": 1, "b": 2}, config=adapter.as_config())
+    assert scheduler.handle is not None and not scheduler.handle.cancelled
+
+    add.invoke({"a": 3, "b": 4}, config=adapter.as_config())
+    assert scheduler.handle is not None and not scheduler.handle.cancelled
+    assert [event.kind for event in pipeline.history] == [
+        EventKind.RUN_START,
+        EventKind.TOOL_CALL,
+        EventKind.TOOL_CALL,
+    ]
+
+    adapter.detach()
+    assert scheduler.handle is not None and scheduler.handle.cancelled
 
 
 def test_llm_call_is_captured_with_cost() -> None:

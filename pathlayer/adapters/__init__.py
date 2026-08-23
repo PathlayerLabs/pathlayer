@@ -9,9 +9,15 @@ optional dependency). Planned: OpenAI Agents SDK, CrewAI, AutoGen, browser-use.
 Long term: OpenTelemetry.
 """
 
-from pathlayer.adapters.base import Adapter
+from pathlayer.adapters.base import Adapter, RunAwareEventSink
 from pathlayer.adapters.http_ingest import HttpIngestAdapter
 from pathlayer.adapters.memory import InMemoryAdapter
 from pathlayer.adapters.openclaw import OpenClawAdapter
 
-__all__ = ["Adapter", "HttpIngestAdapter", "InMemoryAdapter", "OpenClawAdapter"]
+__all__ = [
+    "Adapter",
+    "HttpIngestAdapter",
+    "InMemoryAdapter",
+    "OpenClawAdapter",
+    "RunAwareEventSink",
+]

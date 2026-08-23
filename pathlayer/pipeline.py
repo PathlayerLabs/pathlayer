@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from pathlayer.detectors.base import Detector, Signal
+from pathlayer.detectors.base import Detector, RuntimeLimitProvider, Signal
 from pathlayer.detectors.progress import ProgressAnchor
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.observability import (
@@ -238,6 +238,18 @@ class Pipeline:
             d.create_state() if inc else None
             for d, inc in zip(self._detectors, self._incremental, strict=True)
         ]
+        # RES-2: validated once, here, so a misconfigured pipeline (two
+        # RuntimeLimitProvider detectors) fails at construction -- not
+        # silently later, the first time something reads max_duration_seconds
+        # (e.g. mid-run, from OpenClawRunRecorder's pipeline_factory path).
+        limits = [
+            detector.max_duration_seconds
+            for detector in self._detectors
+            if isinstance(detector, RuntimeLimitProvider)
+        ]
+        if len(limits) > 1:
+            raise ValueError("a pipeline may have only one runtime-limit provider")
+        self._max_duration_seconds: int | None = min(limits) if limits else None
 
     @property
     def history(self) -> tuple[ToolEvent, ...]:
@@ -271,6 +283,17 @@ class Pipeline:
     def stopped(self) -> bool:
         """True once a STOP action has halted the run."""
         return self._stopped
+
+    @property
+    def max_duration_seconds(self) -> int | None:
+        """Configured RES-2 hard limit, if a ResourceDetector is enabled.
+
+        This exposes configuration only. Clock ownership remains entirely at
+        the runtime sink boundary, preserving Pipeline's deterministic replay.
+        Validated once at construction (see ``__init__``); reading this
+        property never raises.
+        """
+        return self._max_duration_seconds
 
     @property
     def post_mortem(self) -> PostMortem | None:

@@ -218,6 +218,9 @@ class PolicyConfig:
     # automatically by the config layer (loop <- progress) when no_progress
     # (and therefore its anchors) is enabled -- never a user-facing config key.
     suppressions: Mapping[str, SuppressionRule] = field(default_factory=dict)
+    # Runtime-wired, reason-scoped overrides. Appended after the historical
+    # public fields to preserve positional PolicyConfig construction.
+    conditional_overrides: Mapping[str, tuple[str, OverrideRule]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # stop_threshold is a confidence in [0, 1]; reject misconfigurations
@@ -248,6 +251,18 @@ class PolicyConfig:
                 raise ValueError(f"{attr} must be an int >= 1")
 
         self.overrides = self._validate_overrides()
+        conditional: dict[str, tuple[str, OverrideRule]] = {}
+        for name, entry in dict(self.conditional_overrides).items():
+            if (
+                not isinstance(entry, tuple)
+                or len(entry) != 2
+                or not isinstance(entry[0], str)
+                or not entry[0]
+            ):
+                raise ValueError(f"conditional override for {name!r} must be (reason_prefix, rule)")
+            prefix, rule = entry
+            conditional[name] = (prefix, self._validate_override(name, rule))
+        self.conditional_overrides = conditional
         self.suppressions = self._validate_suppressions()
 
     def _validate_suppressions(self) -> dict[str, SuppressionRule]:
@@ -319,21 +334,25 @@ class PolicyConfig:
         """
         validated: dict[str, OverrideRule] = {}
         for name, rule in dict(self.overrides).items():
-            if not isinstance(rule, OverrideRule):
-                raise ValueError(f"override for {name!r} must be an OverrideRule")
-            threshold = rule.threshold
-            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-                raise ValueError(f"override threshold for {name!r} must be a number in [0, 1]")
-            threshold = float(threshold)
-            if not 0.0 <= threshold <= 1.0:
-                raise ValueError(f"override threshold for {name!r} must be in [0, 1]")
-            if rule.action not in _OVERRIDE_ACTIONS:
-                raise ValueError(
-                    f"override action for {name!r} must be an actionable tier "
-                    "(WARN, SUMMARIZE, FALLBACK, ESCALATE, STOP)"
-                )
-            validated[name] = OverrideRule(threshold=threshold, action=rule.action)
+            validated[name] = self._validate_override(name, rule)
         return validated
+
+    @staticmethod
+    def _validate_override(name: str, rule: OverrideRule) -> OverrideRule:
+        if not isinstance(rule, OverrideRule):
+            raise ValueError(f"override for {name!r} must be an OverrideRule")
+        threshold = rule.threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            raise ValueError(f"override threshold for {name!r} must be a number in [0, 1]")
+        threshold = float(threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"override threshold for {name!r} must be in [0, 1]")
+        if rule.action not in _OVERRIDE_ACTIONS:
+            raise ValueError(
+                f"override action for {name!r} must be an actionable tier "
+                "(WARN, SUMMARIZE, FALLBACK, ESCALATE, STOP)"
+            )
+        return OverrideRule(threshold=threshold, action=rule.action)
 
     def weight_for(self, name: str) -> float:
         """Fusion weight for a detector name (``DEFAULT_WEIGHT`` if unset).
@@ -459,11 +478,16 @@ class Policy:
         path runs unchanged.
         """
         overrides = self.config.overrides
-        if not overrides:
+        conditional = self.config.conditional_overrides
+        if not overrides and not conditional:
             return []
         triggered: list[tuple[Signal, OverrideRule]] = []
         for signal in self._actionable(signals, evidence):
             rule = overrides.get(signal.name)
+            if rule is None:
+                conditional_entry = conditional.get(signal.name)
+                if conditional_entry is not None and signal.reason.startswith(conditional_entry[0]):
+                    rule = conditional_entry[1]
             # Normalize before comparing, like every other confidence site
             # (fusion, ladder, post-mortem): a custom detector may emit a raw
             # confidence outside [0, 1] or NaN, and the dataclass does not

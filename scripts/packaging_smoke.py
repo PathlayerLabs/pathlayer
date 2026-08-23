@@ -103,6 +103,7 @@ def _exercise_core() -> None:
         "Pipeline",
         "PipelineDecision",
         "PostMortem",
+        "RunAwareEventSink",
         "SQLiteStateStore",
         "SessionOutcome",
         "SessionReport",

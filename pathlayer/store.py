@@ -35,6 +35,10 @@ EVENT_CODEC_VERSION = 1
 # Bump when unchanged configuration can change future decisions in a way full
 # prefix replay cannot expose. Package/OBS-only changes deliberately do not.
 STATE_SEMANTICS_VERSION = 1
+# RES-2 deliberately does not bump this version: its changed semantics are
+# fully visible in the newly persisted RUN_START/RUN_TIMEOUT event prefix. The
+# config fingerprint rejects pre-RES-2 active-resource scopes, while disabled
+# resource configs preserve their historical fingerprint exactly.
 TERMINAL_STATUSES = frozenset({"completed", "interrupted", "stopped"})
 _VALID_CLOSE_STATUSES = TERMINAL_STATUSES
 _T = TypeVar("_T")
@@ -387,6 +391,15 @@ def configuration_fingerprint(config: Any) -> str:
         name: _fingerprint_value(getattr(config, name))
         for name in ("detectors", "canonicalization", "policy", "pipeline")
     }
+    # RES-2 adds one decision-relevant field. When the resource detector is
+    # disabled it cannot affect replay, so omit only that inactive field and
+    # preserve the exact historical fingerprint of v3/default databases. When
+    # enabled, retain it: a pre-RES-2 state is then rejected conservatively.
+    detectors = decision_config.get("detectors")
+    if isinstance(detectors, dict):
+        resource = detectors.get("resource")
+        if isinstance(resource, dict) and resource.get("enabled") is False:
+            resource.pop("max_duration_seconds", None)
     canonical = json.dumps(
         {
             # Keep the same canonical shape as the first INF-1 draft while
@@ -1330,8 +1343,31 @@ class PersistentPipeline:
                         return action
                     if self._pipeline.stopped:
                         return Action.STOP
+                    if event.kind is EventKind.RUN_START and any(
+                        stored.kind is EventKind.RUN_START for stored in self._pipeline.history
+                    ):
+                        # RES-2 lifecycle start is idempotent per scope. A
+                        # concurrent writer already established the durable
+                        # anchor; do not append this racer's timestamp as a
+                        # second start event. The runtime sink re-reads history
+                        # after this return and schedules from the winner.
+                        restored = self._pipeline.last_decision
+                        return restored.emitted_action if restored is not None else Action.NONE
                     continue
                 except StateClosedError as error:
+                    # Another writer may have committed the terminal STOP for
+                    # this same active scope. That is normal convergence, not
+                    # a persistence outage: restore the canonical STOP and
+                    # keep its journal durable. Completed/interrupted scopes
+                    # still fail restoration and follow the fail-open poison
+                    # path below.
+                    try:
+                        self._restore()
+                    except StateStoreError:
+                        self._degrade(error)
+                        return action
+                    if self._pipeline.stopped:
+                        return Action.STOP
                     self._degrade(error)
                     return action
                 except StateStoreError as error:

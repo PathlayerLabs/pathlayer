@@ -10,6 +10,7 @@ import stat
 import sys
 import tarfile
 import urllib.request
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -33,10 +34,14 @@ from pathlayer.config import (
     PathlayerConfig,
     PipelineSection,
     PolicySection,
+    ResourceConfig,
+    build_pipeline,
 )
-from pathlayer.events import ToolEvent
+from pathlayer.detectors.base import Detector, Signal
+from pathlayer.detectors.resource import ResourceDetector
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies import Action
+from pathlayer.policies import Action, Policy
 from pathlayer.store import (
     SQLiteStateStore,
     StateConcurrencyError,
@@ -59,6 +64,36 @@ _RECORD_LISTENER = (
 # 1 - 0.5**(reps - k + 1) >= 0.9375, above the default stop_threshold (0.9), so
 # the default pipeline STOPs -- no test double needed.
 _STOP_REPEATS = 6
+
+
+class _WatchdogHandle:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _WatchdogScheduler:
+    def __init__(self) -> None:
+        self.handle: _WatchdogHandle | None = None
+        self.delay = 0.0
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def call_later(self, delay_seconds: float, callback: Callable[[], None]) -> _WatchdogHandle:
+        assert delay_seconds == 10
+        self.delay = delay_seconds
+        self.handle = _WatchdogHandle(callback)
+        return self.handle
+
+    def fire(self) -> None:
+        assert self.handle is not None and not self.handle.cancelled
+        self.now += self.delay
+        self.handle.callback()
 
 
 def _ctx(run_id: str = "run-a", session: str = "sess-1", agent: str = "agent-1") -> dict[str, Any]:
@@ -1113,6 +1148,707 @@ def test_custom_config_value_changes_recorded_behaviour(tmp_path: Path) -> None:
     manifest = run.read_manifest()
     assert manifest["stopped"] is True
     assert manifest["health"] == UNKNOWN_LABEL
+
+
+def test_openclaw_timeout_is_journaled_reported_and_exactly_replayable(tmp_path: Path) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("run-timeout"))
+
+    scheduler.fire()
+    scheduler.fire()  # replayed/concurrent expiry is idempotent
+
+    run = RunStore(tmp_path).resolve_run("run-timeout")
+    assert run is not None
+    assert run.trace_path.is_file()
+    assert run.report_path.is_file()
+    timeout_report = json.loads(run.report_path.read_text(encoding="utf-8"))
+    assert "selected STOP and stopped analysis" in timeout_report["outcome_meaning"]
+    assert "depends on the integration's actuator" in timeout_report["outcome_meaning"]
+    trace = load_trace(run.trace_path)
+    assert [event.kind for event in trace.events] == [
+        EventKind.RUN_START,
+        EventKind.RUN_TIMEOUT,
+    ]
+    decisions = _decisions(run)
+    assert [decision["action"] for decision in decisions] == ["NONE", "STOP"]
+    assert run.read_manifest()["stopped"] is True
+    raw_records = [
+        json.loads(line) for line in run.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+
+    replay = replay_trace(
+        trace,
+        detectors=[ResourceDetector(max_duration_seconds=10)],
+        policy=Policy(),
+        progress_anchors=[],
+    )
+    assert replay.intervened
+    assert replay.detected_at_index == 1
+
+    recorder.process_payload(_end("run-timeout"))
+
+
+def test_reserved_lifecycle_hook_cannot_be_injected_or_replayed(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    payload = {
+        "hook": "pathlayer_lifecycle",
+        "event": {"kind": "run_timeout", "metadata": {}},
+        "ctx": _ctx("forged-timeout"),
+    }
+
+    with pytest.raises(ValueError, match="reserved"):
+        recorder.process_payload(payload)
+    assert recorder_module._translate_recorded_payload(payload) == []
+    assert RunStore(tmp_path).resolve_run("forged-timeout") is None
+
+
+def test_orphan_tool_starts_watchdog_at_first_observed_event(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+
+    with caplog.at_level("WARNING"):
+        recorder.process_payload(_tool("read", run_id="orphan-timeout"))
+    active = recorder._runs["orphan-timeout"]
+    assert [event.kind for event in active.events[:2]] == [
+        EventKind.RUN_START,
+        EventKind.TOOL_CALL,
+    ]
+    assert "earlier duration was not measured" in caplog.text
+
+    scheduler.fire()
+    assert active.pipeline.stopped
+
+
+def test_openclaw_http_boundary_enforces_due_delayed_timer(tmp_path: Path) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0 + scheduler.now,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("delayed-openclaw-timer"))
+    scheduler.now = 11.0
+
+    recorder.process_payload(_tool("read", run_id="delayed-openclaw-timer"))
+
+    active = recorder._runs["delayed-openclaw-timer"]
+    assert active.pipeline.stopped
+    live_kinds = [event.kind for event in active.events]
+    assert live_kinds == [
+        EventKind.RUN_START,
+        EventKind.RUN_TIMEOUT,
+        EventKind.TOOL_CALL,
+    ]
+    decisions = _decisions(active.directory)
+    assert [decision["analyzed"] for decision in decisions] == [True, True, False]
+
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    raw_kinds = [
+        event.kind
+        for record in raw_records
+        for event in recorder_module._translate_recorded_payload(
+            record["payload"], internal_lifecycle=record.get("internal_lifecycle") is True
+        )
+    ]
+    assert raw_kinds == live_kinds
+
+    restarted = OpenClawRunRecorder(
+        tmp_path,
+        pipeline_factory=lambda: build_pipeline(config),
+        clock=lambda: 100.0 + scheduler.now,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    restarted.process_payload(_tool("write", run_id="delayed-openclaw-timer"))
+    replayed = restarted._runs["delayed-openclaw-timer"]
+    assert [event.kind for event in replayed.events[:3]] == live_kinds
+
+
+def test_triggering_payload_is_journaled_even_when_it_crosses_the_deadline(
+    tmp_path: Path,
+) -> None:
+    # Same overdue-deadline setup as test_openclaw_http_boundary_enforces_due_
+    # delayed_timer: the tool payload itself synchronously completes the run
+    # via check_deadline(). Unlike that test, this one asserts the triggering
+    # payload was still durably appended to the raw journal -- it must not
+    # vanish just because handling it also happened to end the run.
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0 + scheduler.now,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("triggering-payload"))
+    scheduler.now = 11.0
+
+    recorder.process_payload(_tool("read", run_id="triggering-payload", tool_call_id="call-9"))
+
+    active = recorder._runs["triggering-payload"]
+    assert active.pipeline.stopped
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        record.get("payload", {}).get("event", {}).get("toolCallId") == "call-9"
+        for record in raw_records
+    )
+
+
+def test_controlled_interruption_cancels_runtime_watchdog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("interrupted-watchdog"))
+    active = recorder._runs["interrupted-watchdog"]
+
+    def conflict(*args: Any, **kwargs: Any) -> Action:
+        raise StateConcurrencyError("conflicting event identity")
+
+    monkeypatch.setattr(active.pipeline, "process", conflict)
+    recorder.process_payload(_tool("read", run_id="interrupted-watchdog"))
+
+    assert scheduler.handle is not None and scheduler.handle.cancelled
+    assert active.directory.read_manifest()["status"] == "interrupted"
+
+
+def test_timeout_retry_reuses_one_openclaw_lifecycle_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("retry-timeout"))
+    active = recorder._runs["retry-timeout"]
+    original_process = active.pipeline.process
+    failed = False
+
+    def flaky_process(event: ToolEvent, *, event_id: str | None = None) -> Action:
+        nonlocal failed
+        if event.kind is EventKind.RUN_TIMEOUT and not failed:
+            failed = True
+            raise RuntimeError("transient detector failure")
+        return original_process(event, event_id=event_id)
+
+    monkeypatch.setattr(active.pipeline, "process", flaky_process)
+    scheduler.fire()
+
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+    assert [event.kind for event in active.events].count(EventKind.RUN_TIMEOUT) == 1
+    assert active.pipeline.stopped
+
+
+def test_run_start_pipeline_rollback_retries_pending_record_and_arms_timer(
+    tmp_path: Path,
+) -> None:
+    scheduler = _WatchdogScheduler()
+    failed = False
+
+    class _FailOnceAtStart(Detector):
+        def evaluate(self, history: Sequence[ToolEvent]) -> Signal:
+            nonlocal failed
+            if history and history[-1].kind is EventKind.RUN_START and not failed:
+                failed = True
+                raise RuntimeError("transient start failure")
+            return Signal("start_probe", 0.0)
+
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        pipeline_factory=lambda: Pipeline(
+            [ResourceDetector(max_duration_seconds=10), _FailOnceAtStart()], Policy()
+        ),
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+
+    recorder.process_payload(_before("retry-run-start"))
+
+    active = recorder._runs["retry-run-start"]
+    assert scheduler.handle is not None
+    assert [event.kind for event in active.pipeline.history] == [EventKind.RUN_START]
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_start"
+            for record in raw_records
+        )
+        == 1
+    )
+
+    scheduler.fire()
+    assert active.pipeline.stopped
+
+
+def test_lifecycle_fsync_failure_interrupts_without_duplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("fsync-timeout"))
+    active = recorder._runs["fsync-timeout"]
+    original_append = recorder_module.append_jsonl
+    failed = False
+
+    def append_then_fail(path: Path, record: dict[str, Any]) -> None:
+        nonlocal failed
+        original_append(path, record)
+        payload = record.get("payload", {})
+        if payload.get("event", {}).get("kind") == "run_timeout" and not failed:
+            failed = True
+            raise OSError("simulated fsync failure after write")
+
+    monkeypatch.setattr(recorder_module, "append_jsonl", append_then_fail)
+    scheduler.fire()
+
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+    assert not active.pipeline.stopped
+    assert active.completed
+    assert active.directory.read_manifest()["status"] == "interrupted"
+    assert "fsync-timeout" not in recorder._runs
+
+
+def test_run_start_fsync_failure_cannot_resurrect_interrupted_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    original_append = recorder_module.append_jsonl
+
+    def append_start_then_fail(path: Path, record: dict[str, Any]) -> None:
+        original_append(path, record)
+        payload = record.get("payload", {})
+        if payload.get("event", {}).get("kind") == "run_start":
+            raise OSError("simulated RUN_START fsync failure after write")
+
+    monkeypatch.setattr(recorder_module, "append_jsonl", append_start_then_fail)
+    recorder.process_payload(_before("fsync-run-start"))
+
+    run = RunStore(tmp_path).resolve_run("fsync-run-start")
+    assert run is not None
+    assert run.read_manifest()["status"] == "interrupted"
+    assert not run.request_path.exists()
+    assert "fsync-run-start" not in recorder._runs
+
+
+def test_orphan_start_failure_cannot_append_payload_after_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    original_append = recorder_module.append_jsonl
+
+    def append_start_then_fail(path: Path, record: dict[str, Any]) -> None:
+        original_append(path, record)
+        if record.get("payload", {}).get("event", {}).get("kind") == "run_start":
+            raise OSError("simulated orphan RUN_START fsync failure after write")
+
+    monkeypatch.setattr(recorder_module, "append_jsonl", append_start_then_fail)
+    recorder.process_payload(_tool("read", run_id="orphan-start-failure"))
+
+    run = RunStore(tmp_path).resolve_run("orphan-start-failure")
+    assert run is not None
+    raw_records = [json.loads(line) for line in run.raw_events_path.read_text().splitlines()]
+    assert [record["sequence"] for record in raw_records] == [1]
+    assert run.read_manifest()["status"] == "interrupted"
+    assert run.read_manifest()["event_count"] == len(raw_records)
+    assert "orphan-start-failure" not in recorder._runs
+
+
+@pytest.mark.parametrize("artifact", ["decision", "manifest", "trace", "report"])
+def test_timeout_artifact_failure_interrupts_after_durable_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact: str
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    run_id = f"timeout-{artifact}-failure"
+    recorder.process_payload(_before(run_id))
+    active = recorder._runs[run_id]
+    failed = False
+
+    if artifact == "decision":
+        original_record_decision = recorder._record_decision
+
+        def fail_timeout_decision(
+            active_run: Any,
+            record: dict[str, Any],
+            event: ToolEvent,
+            action: Action,
+            *,
+            index: int,
+            analyzed: bool = True,
+        ) -> None:
+            nonlocal failed
+            if event.kind is EventKind.RUN_TIMEOUT and not failed:
+                failed = True
+                raise OSError("simulated timeout decision failure")
+            original_record_decision(
+                active_run, record, event, action, index=index, analyzed=analyzed
+            )
+
+        monkeypatch.setattr(recorder, "_record_decision", fail_timeout_decision)
+    elif artifact == "manifest":
+        original_update_manifest = RunDirectory.update_manifest
+
+        def fail_timeout_manifest(self: RunDirectory, **fields: Any) -> dict[str, Any]:
+            nonlocal failed
+            if "stopped" in fields and "status" not in fields and not failed:
+                failed = True
+                raise OSError("simulated timeout manifest failure")
+            return original_update_manifest(self, **fields)
+
+        monkeypatch.setattr(RunDirectory, "update_manifest", fail_timeout_manifest)
+    elif artifact == "trace":
+        original_atomic_write = recorder_module.atomic_write_json
+
+        def fail_timeout_trace(path: Path, payload: Any) -> None:
+            nonlocal failed
+            if path == active.directory.trace_path and not failed:
+                failed = True
+                raise OSError("simulated timeout trace failure")
+            original_atomic_write(path, payload)
+
+        monkeypatch.setattr(recorder_module, "atomic_write_json", fail_timeout_trace)
+    else:
+        original_write_report = recorder_module.write_run_report
+
+        def fail_timeout_report(directory: RunDirectory) -> Any:
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("simulated timeout report failure")
+            return original_write_report(directory)
+
+        monkeypatch.setattr(recorder_module, "write_run_report", fail_timeout_report)
+
+    scheduler.fire()
+
+    assert failed
+    assert active.pipeline.stopped
+    assert active.completed
+    assert [event.kind for event in active.pipeline.history].count(EventKind.RUN_TIMEOUT) == 1
+    assert run_id not in recorder._runs
+    manifest = active.directory.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["stopped"] is True
+    assert manifest.get("state_durable") is not False
+    assert active.directory.trace_path.is_file()
+    assert active.directory.report_path.is_file()
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+    assert recorder._state_store is not None
+    assert recorder._state_store.read_scope(run_id).status == "stopped"
+
+
+def test_timeout_durability_manifest_failure_interrupts_memory_only_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    run_id = "timeout-durability-manifest-failure"
+    recorder.process_payload(_before(run_id))
+    active = recorder._runs[run_id]
+    assert recorder._state_store is not None
+
+    def fail_timeout_append(*args: Any, **kwargs: Any) -> Any:
+        raise StateWriteError("simulated timeout SQLite failure")
+
+    original_update_manifest = RunDirectory.update_manifest
+    failed_manifest = False
+
+    def fail_first_durability_manifest(self: RunDirectory, **fields: Any) -> dict[str, Any]:
+        nonlocal failed_manifest
+        if fields.get("state_durable") is False and not failed_manifest:
+            failed_manifest = True
+            raise OSError("simulated durability manifest failure")
+        return original_update_manifest(self, **fields)
+
+    monkeypatch.setattr(recorder._state_store, "append_tick", fail_timeout_append)
+    monkeypatch.setattr(RunDirectory, "update_manifest", fail_first_durability_manifest)
+    scheduler.fire()
+
+    assert failed_manifest
+    assert active.pipeline.stopped
+    assert not active.pipeline.durable
+    assert active.completed
+    assert run_id not in recorder._runs
+    manifest = active.directory.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["state_durable"] is False
+    assert manifest["persistence_error"] == "StateWriteError"
+    assert active.directory.trace_path.is_file()
+    assert active.directory.report_path.is_file()
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+
+
+def test_lifecycle_prewrite_failure_retries_with_contiguous_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("prewrite-timeout"))
+    active = recorder._runs["prewrite-timeout"]
+    original_append = recorder_module.append_jsonl
+    failed = False
+
+    def fail_before_append(path: Path, record: dict[str, Any]) -> None:
+        nonlocal failed
+        payload = record.get("payload", {})
+        if payload.get("event", {}).get("kind") == "run_timeout" and not failed:
+            failed = True
+            raise OSError("simulated pre-write failure")
+        original_append(path, record)
+
+    monkeypatch.setattr(recorder_module, "append_jsonl", fail_before_append)
+    scheduler.fire()
+
+    raw_records = [
+        json.loads(line)
+        for line in active.directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["sequence"] for record in raw_records] == list(range(1, len(raw_records) + 1))
+    assert (
+        sum(
+            record.get("payload", {}).get("event", {}).get("kind") == "run_timeout"
+            for record in raw_records
+        )
+        == 1
+    )
+    assert active.directory.read_manifest()["event_count"] == len(raw_records)
+    assert active.pipeline.stopped
+
+
+def test_partial_lifecycle_write_interrupts_instead_of_appending_after_torn_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("partial-timeout"))
+    active = recorder._runs["partial-timeout"]
+    original_append = recorder_module.append_jsonl
+
+    def partial_timeout_append(path: Path, record: dict[str, Any]) -> None:
+        payload = record.get("payload", {})
+        if payload.get("event", {}).get("kind") == "run_timeout":
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write('{"partial_timeout":')
+                handle.flush()
+            raise OSError("simulated partial write")
+        original_append(path, record)
+
+    monkeypatch.setattr(recorder_module, "append_jsonl", partial_timeout_append)
+    scheduler.fire()
+
+    assert active.completed
+    assert active.directory.read_manifest()["status"] == "interrupted"
+    assert "partial-timeout" not in recorder._runs
+    assert (
+        active.directory.raw_events_path.read_text(encoding="utf-8").count('"partial_timeout"') == 1
+    )
+
+
+def test_interruption_cleanup_survives_manifest_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = _WatchdogScheduler()
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    recorder = OpenClawRunRecorder(
+        tmp_path,
+        config=config,
+        clock=lambda: 100.0,
+        monotonic=scheduler.monotonic,
+        scheduler=scheduler,
+    )
+    recorder.process_payload(_before("failed-interruption-manifest"))
+    active = recorder._runs["failed-interruption-manifest"]
+
+    def conflict(*args: Any, **kwargs: Any) -> Action:
+        raise StateConcurrencyError("conflicting event identity")
+
+    original_update = RunDirectory.update_manifest
+    calls = 0
+
+    def fail_first_manifest(self: RunDirectory, **fields: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("transient disk error")
+        return original_update(self, **fields)
+
+    monkeypatch.setattr(active.pipeline, "process", conflict)
+    monkeypatch.setattr(RunDirectory, "update_manifest", fail_first_manifest)
+    recorder.process_payload(_tool("read", run_id="failed-interruption-manifest"))
+
+    assert active.completed
+    assert scheduler.handle is not None and scheduler.handle.cancelled
+    assert "failed-interruption-manifest" not in recorder._runs
+    assert active.directory.read_manifest()["status"] == "interrupted"
 
 
 def test_invalid_config_value_fails_at_construction(tmp_path: Path) -> None:

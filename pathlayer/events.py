@@ -29,6 +29,11 @@ class EventKind(str, Enum):
     # Resource / lifecycle events (class iii incidents). Detect-only in V1.
     SUBAGENT_SPAWN = "subagent_spawn"
     RUN_RESTART = "run_restart"
+    # Event-sourced runtime lifecycle used by RES-2. RUN_START carries the
+    # durable Unix start time in metadata; RUN_TIMEOUT is injected exactly once
+    # by a run-aware runtime sink when the configured hard limit expires.
+    RUN_START = "run_start"
+    RUN_TIMEOUT = "run_timeout"
 
 
 # Stable name of the Pathlayer progress-summary tool (ACT-2). The adapter keys
@@ -44,6 +49,11 @@ PROGRESS_SUMMARY_TOOL = "pathlayer_progress_summary"
 # is real no-progress evidence that Loop/Retry/NoProgress must observe so Policy
 # can escalate to STOP instead of the graph re-prompting forever.
 SUMMARY_BLOCKED_TOOL = "pathlayer_summary_blocked"
+
+# Stable names for the synthetic lifecycle events. Keeping these centralized
+# makes persisted traces portable across adapters and replay implementations.
+RUN_START_TOOL = "pathlayer_run_start"
+RUN_TIMEOUT_TOOL = "pathlayer_run_timeout"
 
 
 @dataclass(slots=True)

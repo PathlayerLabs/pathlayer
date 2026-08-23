@@ -1,0 +1,19 @@
+{
+  "label": "no_progress",
+  "description": "A run reaches its configured hard runtime ceiling; the durable timeout lifecycle event is deterministic failing evidence for RES-2.",
+  "metadata": { "curated_by": "RES-2", "max_duration_seconds": 100 },
+  "events": [
+    {
+      "tool": "pathlayer_run_start",
+      "kind": "run_start",
+      "metadata": { "started_at_unix": 1000.0, "max_duration_seconds": 100 }
+    },
+    { "tool": "read_file", "args": { "path": "src/large.py" } },
+    {
+      "tool": "pathlayer_run_timeout",
+      "kind": "run_timeout",
+      "ts": 100.0,
+      "metadata": { "started_at_unix": 1000.0, "max_duration_seconds": 100 }
+    }
+  ]
+}

@@ -37,7 +37,7 @@ field is optional and falls back to the `ToolEvent` default when absent:
 | `result` | `null` | Raw result. |
 | `cost_usd` | `0.0` | Cost of the call. |
 | `ts` | `0.0` | Event-sourced timestamp (the detection loop never reads the wall clock). |
-| `kind` | `"tool_call"` | `tool_call`, `subagent_spawn` or `run_restart`. |
+| `kind` | `"tool_call"` | Includes `tool_call`, resource events, and RES-2 `run_start`/`run_timeout`. |
 | `run_id` | `null` | Run identifier (cross-run state). |
 | `metadata` | `{}` | Free-form per-event data. |
 

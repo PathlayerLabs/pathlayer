@@ -255,7 +255,10 @@ class SessionOutcome(str, Enum):
 
 _OUTCOME_MEANING: dict[SessionOutcome, str] = {
     SessionOutcome.COMPLETED: "the run reached its end and Pathlayer never halted it",
-    SessionOutcome.STOPPED: "Pathlayer halted the run",
+    SessionOutcome.STOPPED: (
+        "Pathlayer selected STOP and stopped analysis; runtime termination depends on the "
+        "integration's actuator"
+    ),
     SessionOutcome.ESCALATED: "arbitration reached the ESCALATE tier; no actuator applies it in V1",
     SessionOutcome.INTERRUPTED: "the run never reached its end, so its record is partial",
 }
