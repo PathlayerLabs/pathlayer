@@ -152,6 +152,20 @@ The shipped value is an uncalibrated default and the entire resource detector
 is disabled until explicitly enabled. `policy.advisory_signals`, dry-run mode
 and the actuator's real capabilities remain authoritative over enforcement.
 
+RSS memory tracking shares the same `resource` section:
+
+```yaml
+detectors:
+  resource:
+    enabled: true
+    max_rss_bytes: 2147483648
+```
+
+Each observed event is stamped with the process's current resident set size,
+read live from `/proc/self/status` on Linux; on platforms without `/proc`
+(e.g. macOS, Windows) the signal silently stays at `0` -- no hard dependency
+on a platform API, per the detector's "gracefully unavailable" contract.
+
 ### Crash-safe run state
 
 Pass a stable logical run identity to resume detectors, policy hysteresis and

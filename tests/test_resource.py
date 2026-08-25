@@ -22,19 +22,25 @@ from pathlayer.validation import Trace, inject_resource_spike, load_trace
 _TRACES_DIR = Path(__file__).resolve().parents[1] / "traces"
 
 
-def _spawn(depth: int | None = None) -> ToolEvent:
-    metadata = {} if depth is None else {"depth": depth}
-    return ToolEvent(tool="spawn", kind=EventKind.SUBAGENT_SPAWN, metadata=metadata)
+def _metadata(depth: int | None, rss: int | None) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    if depth is not None:
+        metadata["depth"] = depth
+    if rss is not None:
+        metadata["rss_bytes"] = rss
+    return metadata
 
 
-def _restart(depth: int | None = None) -> ToolEvent:
-    metadata = {} if depth is None else {"depth": depth}
-    return ToolEvent(tool="restart", kind=EventKind.RUN_RESTART, metadata=metadata)
+def _spawn(depth: int | None = None, rss: int | None = None) -> ToolEvent:
+    return ToolEvent(tool="spawn", kind=EventKind.SUBAGENT_SPAWN, metadata=_metadata(depth, rss))
 
 
-def _tool(depth: int | None = None) -> ToolEvent:
-    metadata = {} if depth is None else {"depth": depth}
-    return ToolEvent(tool="call", metadata=metadata)
+def _restart(depth: int | None = None, rss: int | None = None) -> ToolEvent:
+    return ToolEvent(tool="restart", kind=EventKind.RUN_RESTART, metadata=_metadata(depth, rss))
+
+
+def _tool(depth: int | None = None, rss: int | None = None) -> ToolEvent:
+    return ToolEvent(tool="call", metadata=_metadata(depth, rss))
 
 
 def _start() -> ToolEvent:
@@ -55,6 +61,24 @@ def _timeout() -> ToolEvent:
 
 def test_empty_history_is_silent() -> None:
     assert ResourceDetector().evaluate([]).confidence == 0.0
+
+
+def test_resource_state_field_order_is_positionally_stable() -> None:
+    # RES-3 fields must be appended after every pre-existing field, never
+    # interleaved: a historical positional ResourceState(spawn, restart,
+    # depth, invalid_depths, timed_out) call must still mean exactly that,
+    # with the two RES-3 fields defaulting to 0 rather than silently
+    # consuming timed_out's slot.
+    state = ResourceState(1, 2, 3, 4, True)
+    assert state == ResourceState(
+        spawn_count=1,
+        restart_count=2,
+        max_depth=3,
+        invalid_depths=4,
+        timed_out=True,
+        peak_rss_bytes=0,
+        invalid_rss=0,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -90,6 +114,30 @@ def test_advance_resource_state_sums_counts_and_maxes_depth() -> None:
     state = advance_resource_state(state, ResourceState(spawn_count=1, max_depth=1))
 
     assert state == ResourceState(spawn_count=3, max_depth=3)
+
+
+def test_resource_delta_reads_rss_from_any_event_kind() -> None:
+    assert resource_delta(_tool(rss=2048)) == ResourceState(peak_rss_bytes=2048)
+    assert resource_delta(_spawn(rss=2048)) == ResourceState(spawn_count=1, peak_rss_bytes=2048)
+
+
+def test_resource_delta_missing_rss_is_zero_without_diagnostic() -> None:
+    assert resource_delta(_tool()) == ResourceState()
+
+
+@pytest.mark.parametrize("bad_rss", [-1, 1.5, True, "3", None])
+def test_resource_delta_invalid_rss_is_ignored_and_flagged(bad_rss: object) -> None:
+    event = ToolEvent(tool="call", metadata={"rss_bytes": bad_rss})
+    assert resource_delta(event) == ResourceState(peak_rss_bytes=0, invalid_rss=1)
+
+
+def test_advance_resource_state_maxes_rss() -> None:
+    state = ResourceState()
+    state = advance_resource_state(state, ResourceState(peak_rss_bytes=1024))
+    state = advance_resource_state(state, ResourceState(peak_rss_bytes=4096))
+    state = advance_resource_state(state, ResourceState(peak_rss_bytes=1024))
+
+    assert state == ResourceState(peak_rss_bytes=4096)
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +183,21 @@ def test_restart_heavy_is_proportional_then_saturates() -> None:
     assert "restart" in at.reason
 
 
+def test_rss_heavy_is_proportional_then_saturates_and_tracks_high_water_mark() -> None:
+    detector = ResourceDetector(max_rss_bytes=4000)
+    below = detector.evaluate([_tool(rss=2000)])
+    assert below.confidence == pytest.approx(0.5)
+
+    at = detector.evaluate([_tool(rss=4000)])
+    assert at.confidence == 1.0
+    assert "rss" in at.reason
+
+    # 1000 -> 3000 -> 1000: the high-water mark of 3000 must still be
+    # reported, not the most recent reading of 1000.
+    sequence = detector.evaluate([_tool(rss=1000), _tool(rss=3000), _tool(rss=1000)])
+    assert sequence.confidence == pytest.approx(0.75)
+
+
 def test_duration_is_silent_until_the_discrete_timeout_event() -> None:
     detector = ResourceDetector(max_duration_seconds=100)
     assert detector.evaluate([_start(), _tool()]).confidence == 0.0
@@ -165,6 +228,13 @@ def test_each_counter_fires_independently_of_the_others() -> None:
     assert "restart" in restart_only.reason
 
 
+def test_each_counter_fires_independently_including_rss() -> None:
+    detector = ResourceDetector(max_rss_bytes=2000)
+    rss_only = detector.evaluate([_tool(rss=2000)])
+    assert rss_only.confidence == 1.0
+    assert "rss" in rss_only.reason
+
+
 def test_mixed_case_names_the_dominant_counter_in_the_reason() -> None:
     detector = ResourceDetector(max_spawn_count=10, max_delegation_depth=10, max_restart_count=2)
     signal = detector.evaluate([_spawn(), _tool(depth=1), _restart(), _restart()])
@@ -186,15 +256,19 @@ def test_co_occurring_breach_is_visible_in_diagnostics() -> None:
 
 def test_duration_wins_tie_break_after_timeout() -> None:
     # RUN_TIMEOUT is the one-shot hard-ceiling fact. It must remain the
-    # actionable reason even when an older RES-1 counter is also saturated;
-    # otherwise the duration-only policy override cannot recognize it.
-    detector = ResourceDetector(max_spawn_count=2)
-    events = [_spawn(), _spawn(), _start(), _timeout()]
+    # actionable reason even when an older RES-1/RES-3 counter is also
+    # saturated; otherwise the duration-only policy override cannot
+    # recognize it.
+    detector = ResourceDetector(max_spawn_count=2, max_rss_bytes=100)
+    events = [_spawn(), _spawn(), _tool(rss=100), _start(), _timeout()]
     signal = detector.evaluate(events)
 
     assert signal.confidence == 1.0
     assert signal.reason.startswith(DURATION_REASON_PREFIX)
-    assert signal.diagnostics == ("spawn also at threshold (2/2)",)
+    assert signal.diagnostics == (
+        "spawn also at threshold (2/2)",
+        "rss also at threshold (100/100)",
+    )
 
 
 def test_invalid_depths_diagnostic() -> None:
@@ -203,23 +277,31 @@ def test_invalid_depths_diagnostic() -> None:
     assert signal.diagnostics == ("1 invalid depth value(s) ignored",)
 
 
+def test_invalid_rss_diagnostic() -> None:
+    detector = ResourceDetector()
+    signal = detector.evaluate([ToolEvent(tool="call", metadata={"rss_bytes": -1})])
+    assert signal.diagnostics == ("1 invalid rss_bytes value(s) ignored",)
+
+
 # --------------------------------------------------------------------------- #
 # PERF-2 contract
 # --------------------------------------------------------------------------- #
 
 
 def test_incremental_step_matches_batch_for_every_prefix() -> None:
-    detector = ResourceDetector(max_spawn_count=3, max_delegation_depth=5, max_restart_count=3)
+    detector = ResourceDetector(
+        max_spawn_count=3, max_delegation_depth=5, max_restart_count=3, max_rss_bytes=5000
+    )
     events = [
         _spawn(),
-        _tool(depth=1),
+        _tool(depth=1, rss=1000),
         _restart(),
         _start(),
         _timeout(),
-        _tool(depth=3),
+        _tool(depth=3, rss=3000),
         _spawn(),
-        _tool(depth=1),
-        ToolEvent(tool="call", metadata={"depth": -1}),
+        _tool(depth=1, rss=1000),
+        ToolEvent(tool="call", metadata={"depth": -1, "rss_bytes": -1}),
         _restart(),
     ]
     state = detector.create_state()
@@ -290,7 +372,13 @@ def test_timeout_reason_starts_with_the_exported_prefix() -> None:
 @pytest.mark.parametrize("bad", [0, -1, 1.5, True])
 @pytest.mark.parametrize(
     "field",
-    ["max_spawn_count", "max_delegation_depth", "max_restart_count", "max_duration_seconds"],
+    [
+        "max_spawn_count",
+        "max_delegation_depth",
+        "max_restart_count",
+        "max_duration_seconds",
+        "max_rss_bytes",
+    ],
 )
 def test_invalid_config_raises(field: str, bad: object) -> None:
     with pytest.raises(ValueError):
@@ -375,3 +463,22 @@ def test_fires_on_restart_spike_mutation() -> None:
     signal = ResourceDetector(max_restart_count=3).evaluate(mutated.events)
     assert signal.confidence == 1.0
     assert Policy().decide([signal]) is Action.STOP
+
+
+def test_fires_on_rss_spike_mutation() -> None:
+    base = Trace(label="healthy", events=[ToolEvent(tool="call")])
+    mutated = inject_resource_spike(base, kind="rss", start_idx=1, count=2_000_000_000)
+    signal = ResourceDetector(max_rss_bytes=2_000_000_000).evaluate(mutated.events)
+    assert signal.confidence == 1.0
+    assert Policy().decide([signal]) is Action.STOP
+
+
+def test_healthy_boundary_stays_silent_well_below_rss_threshold() -> None:
+    # Half the threshold: comfortably below both 1.0 and the default 0.9
+    # stop_threshold, so this is a genuine "not a problem" counterexample,
+    # not just a hair under the saturation point.
+    base = Trace(label="healthy", events=[ToolEvent(tool="call")])
+    mutated = inject_resource_spike(base, kind="rss", start_idx=1, count=1_000_000_000)
+    signal = ResourceDetector(max_rss_bytes=2_000_000_000).evaluate(mutated.events)
+    assert signal.confidence == pytest.approx(0.5)
+    assert Policy().decide([signal]) is Action.NONE

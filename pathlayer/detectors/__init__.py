@@ -10,7 +10,7 @@ V1 detectors:
 - NoProgressDetector (class ii: no-progress-without-repetition; CUSUM on a
                       domain progress signal -- the differentiated case)
 - BudgetDetector     (cost ceiling)
-- ResourceDetector   (class iii: spawns/depth/restarts/wall-clock; detect-only)
+- ResourceDetector   (class iii: spawns/depth/restarts/wall-clock/peak RSS; detect-only)
 
 Deferred to V2: Markov spectral-gap analysis, TF-IDF/ROUGE coverage signal.
 """

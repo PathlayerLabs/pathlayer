@@ -29,7 +29,7 @@ from pathlayer.policies import Action, Policy
 from pathlayer.policies.actuators import Actuator
 from pathlayer.policies.wiring import wire
 from pathlayer.postmortem import PostMortem
-from pathlayer.runtime import WatchdogEventSink
+from pathlayer.runtime import RssSamplingEventSink, WatchdogEventSink
 
 
 @dataclass
@@ -558,4 +558,85 @@ def test_first_persistent_append_failure_still_allows_memory_only_timeout(
 
     scheduler.advance(10)
     assert pipeline.stopped
+    assert actuator.actions == [Action.STOP]
+
+
+# --------------------------------------------------------------------------- #
+# RES-3: RssSamplingEventSink
+# --------------------------------------------------------------------------- #
+
+
+def test_rss_sampling_sink_stamps_every_forwarded_event_with_a_live_reading() -> None:
+    # No baseline, no decimation: sample() returns a live current reading
+    # (see pathlayer.resource_sampling.sample_rss_bytes), so it is stamped
+    # verbatim on every event, comparable directly to a fixed threshold.
+    readings = iter([5000, 5000, 8000])
+    forwarded: list[ToolEvent] = []
+    sink = RssSamplingEventSink(forwarded.append, sample=lambda: next(readings))
+    original = ToolEvent(tool="call", metadata={"depth": 1})
+
+    sink(original)
+    sink(ToolEvent(tool="call"))
+    sink(ToolEvent(tool="call"))
+
+    assert [event.metadata["rss_bytes"] for event in forwarded] == [5000, 5000, 8000]
+    # The original event object is untouched -- a new ToolEvent was forwarded.
+    assert forwarded[0] is not original
+    assert original.metadata == {"depth": 1}
+    assert forwarded[0].metadata == {"depth": 1, "rss_bytes": 5000}
+
+
+def test_rss_sampling_sink_forwards_unchanged_when_sample_unavailable() -> None:
+    forwarded: list[ToolEvent] = []
+    sink = RssSamplingEventSink(forwarded.append, sample=lambda: None)
+    original = ToolEvent(tool="call", metadata={"depth": 1})
+
+    sink(original)
+
+    assert forwarded == [original]
+    assert forwarded[0] is original
+
+
+def test_rss_sampling_sink_defaults_to_real_sampler() -> None:
+    forwarded: list[ToolEvent] = []
+    sink = RssSamplingEventSink(forwarded.append)
+
+    sink(ToolEvent(tool="call"))
+
+    assert len(forwarded) == 1
+    # On any POSIX CI/dev box this resolves to a real int; on a platform
+    # without `resource` it stays None and the event passes through
+    # unchanged -- both are valid, so only assert the type is right either way.
+    assert forwarded[0].metadata.get("rss_bytes") is None or isinstance(
+        forwarded[0].metadata["rss_bytes"], int
+    )
+
+
+def test_wire_composes_rss_sampling_sink_only_when_resource_detector_is_active() -> None:
+    config_disabled = PathlayerConfig(detectors=DetectorsConfig())
+    pipeline_disabled = build_pipeline(config_disabled)
+    sink_disabled = wire(pipeline_disabled, _Actuator())
+    assert isinstance(sink_disabled, WatchdogEventSink)
+    assert not isinstance(sink_disabled._sink, RssSamplingEventSink)  # type: ignore[attr-defined]
+
+    config_enabled = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_duration_seconds=10))
+    )
+    pipeline_enabled = build_pipeline(config_enabled)
+    sink_enabled = wire(pipeline_enabled, _Actuator())
+    assert isinstance(sink_enabled._sink, RssSamplingEventSink)  # type: ignore[attr-defined]
+
+
+def test_wire_threads_rss_sample_through_to_the_detector() -> None:
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_rss_bytes=100))
+    )
+    pipeline = build_pipeline(config)
+    actuator = _Actuator()
+    sink = wire(pipeline, actuator)
+    assert isinstance(sink._sink, RssSamplingEventSink)  # type: ignore[attr-defined]
+    sink._sink._sample = lambda: 200  # type: ignore[attr-defined]
+
+    sink(ToolEvent(tool="call"))
+
     assert actuator.actions == [Action.STOP]

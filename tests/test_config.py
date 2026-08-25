@@ -803,6 +803,7 @@ def test_build_pipeline_threads_resource_thresholds() -> None:
                     "max_delegation_depth": 4,
                     "max_restart_count": 6,
                     "max_duration_seconds": 120,
+                    "max_rss_bytes": 1_073_741_824,
                 }
             }
         }
@@ -814,6 +815,7 @@ def test_build_pipeline_threads_resource_thresholds() -> None:
     assert resource._max_delegation_depth == 4
     assert resource._max_restart_count == 6
     assert resource.max_duration_seconds == 120
+    assert resource._max_rss_bytes == 1_073_741_824
 
 
 def test_resource_unknown_key_rejected() -> None:
@@ -834,6 +836,15 @@ def test_resource_duration_requires_a_positive_integer(bad: object) -> None:
     with pytest.raises(ConfigError, match="max_duration_seconds"):
         config = PathlayerConfig.from_mapping(
             {"detectors": {"resource": {"enabled": True, "max_duration_seconds": bad}}}
+        )
+        build_pipeline(config)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+def test_resource_max_rss_bytes_requires_a_positive_integer(bad: object) -> None:
+    with pytest.raises(ConfigError, match="max_rss_bytes"):
+        config = PathlayerConfig.from_mapping(
+            {"detectors": {"resource": {"enabled": True, "max_rss_bytes": bad}}}
         )
         build_pipeline(config)
 

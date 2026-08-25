@@ -23,7 +23,7 @@ from pathlayer.adapters.base import RunAwareEventSink
 from pathlayer.events import ToolEvent
 from pathlayer.policies.actions import Action
 from pathlayer.policies.actuators import Actuator
-from pathlayer.runtime import Scheduler, WatchdogEventSink
+from pathlayer.runtime import Scheduler, WatchdogEventSink, wrap_with_rss_sampling
 
 if TYPE_CHECKING:
     # Deferred to a type-checking-only import: pathlayer.pipeline imports
@@ -100,7 +100,7 @@ def wire(
             )
 
     return WatchdogEventSink(
-        sink,
+        wrap_with_rss_sampling(sink, max_duration_seconds=pipeline.max_duration_seconds),
         max_duration_seconds=pipeline.max_duration_seconds,
         history=lambda: pipeline.history,
         clock=clock,

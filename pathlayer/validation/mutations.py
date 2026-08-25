@@ -193,14 +193,15 @@ def inject_cost_spike(trace: Trace, event_idx: int, multiplier: float) -> Trace:
 
 
 def inject_resource_spike(
-    trace: Trace, kind: Literal["spawn", "depth", "restart"], start_idx: int, count: int
+    trace: Trace, kind: Literal["spawn", "depth", "restart", "rss"], start_idx: int, count: int
 ) -> Trace:
-    """Push one of ResourceDetector's three counters past a caller-chosen value.
+    """Push one of ResourceDetector's counters past a caller-chosen value.
 
     ``spawn``/``restart`` insert ``count`` ``SUBAGENT_SPAWN``/``RUN_RESTART``
-    events at ``start_idx``. ``depth`` inserts a single ``TOOL_CALL`` at
-    ``start_idx`` carrying ``metadata["depth"] = count``, since depth is a
-    high-water mark rather than a count of events.
+    events at ``start_idx``. ``depth``/``rss`` insert a single ``TOOL_CALL``
+    at ``start_idx`` carrying ``metadata["depth"] = count`` /
+    ``metadata["rss_bytes"] = count`` respectively, since both are
+    high-water marks rather than a count of events.
     """
     if count < 1:
         raise ValueError("count must be >= 1")
@@ -214,6 +215,8 @@ def inject_resource_spike(
         extra = [ToolEvent(tool="run", kind=EventKind.RUN_RESTART) for _ in range(count)]
     elif kind == "depth":
         extra = [ToolEvent(tool="delegate", metadata={"depth": count})]
+    elif kind == "rss":
+        extra = [ToolEvent(tool="allocate", metadata={"rss_bytes": count})]
     else:
         raise ValueError(f"unknown resource spike kind: {kind!r}")
     new_events = events[:start_idx] + extra + events[start_idx:]

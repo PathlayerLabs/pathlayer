@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +73,8 @@ from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
 from pathlayer.postmortem import TickRecord
-from pathlayer.runtime import Scheduler, WatchdogEventSink
+from pathlayer.resource_sampling import sample_rss_bytes
+from pathlayer.runtime import Scheduler, WatchdogEventSink, stamp_rss, wrap_with_rss_sampling
 from pathlayer.store import (
     PersistentPipeline,
     SQLiteStateStore,
@@ -216,6 +218,7 @@ class OpenClawRunRecorder:
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         scheduler: Scheduler | None = None,
+        sample_rss: Callable[[], int | None] = sample_rss_bytes,
     ) -> None:
         """Record runs under ``runs_root``, one pipeline per ``ctx.runId``.
 
@@ -266,6 +269,7 @@ class OpenClawRunRecorder:
         self._clock = clock
         self._monotonic = monotonic
         self._scheduler = scheduler
+        self._sample_rss = sample_rss
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
         self._orphan_counters: dict[str, int] = {}
@@ -682,8 +686,18 @@ class OpenClawRunRecorder:
         return active
 
     def _arm_runtime(self, active: _ActiveRun) -> None:
+        # RES-3: tool-call events never reach this sink -- OpenClaw processes
+        # tool hooks itself, see _handle_tool -- so they are stamped directly
+        # there via self._sample_rss instead. RSS sampling is stateless (a
+        # live current reading, not a growth delta), so no per-run object
+        # needs to be shared between the two call sites.
+        inner_sink = wrap_with_rss_sampling(
+            partial(self._handle_runtime_event, active),
+            max_duration_seconds=active.pipeline.max_duration_seconds,
+            sample=self._sample_rss,
+        )
         active.runtime_sink = WatchdogEventSink(
-            lambda event: self._handle_runtime_event(active, event),
+            inner_sink,
             max_duration_seconds=active.pipeline.max_duration_seconds,
             history=lambda: active.pipeline.history,
             clock=self._clock,
@@ -1022,6 +1036,12 @@ class OpenClawRunRecorder:
         if payload.get("hook") != AFTER_TOOL_CALL:
             return
         for offset, event in enumerate(translate_openclaw_event(payload)):
+            # RES-3: tool-call events never reach runtime_sink ("OpenClaw
+            # processes tool hooks itself", see process_payload above), so
+            # stamp them here directly instead. Same "is RSS sampling
+            # wanted" gate as wrap_with_rss_sampling (see its docstring).
+            if active.pipeline.max_duration_seconds is not None:
+                event = stamp_rss(event, sample=self._sample_rss)
             event.ts = float(len(active.events))
             active.events.append(event)
             self._advance_cost(active, event)

@@ -1,12 +1,14 @@
-"""Runtime lifecycle and hard-duration watchdog (RES-2).
+"""Runtime lifecycle, hard-duration watchdog (RES-2) and RSS sampling (RES-3).
 
-The watchdog is deliberately outside detectors, policy and Pipeline. It owns
-the clocks and scheduler, while the deterministic core sees only ordinary,
-persistable RUN_START/RUN_TIMEOUT events.
+Both live outside detectors, policy and Pipeline. The watchdog owns the
+clocks and scheduler, while RSS sampling owns the one platform-specific read
+memory tracking needs; the deterministic core sees only ordinary,
+persistable RUN_START/RUN_TIMEOUT events and plain ``event.metadata`` values.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import threading
@@ -21,6 +23,7 @@ from pathlayer.events import (
     EventKind,
     ToolEvent,
 )
+from pathlayer.resource_sampling import sample_rss_bytes
 
 
 class CancelHandle(Protocol):
@@ -37,6 +40,80 @@ class _ThreadingScheduler:
         timer.daemon = True
         timer.start()
         return timer
+
+
+def stamp_rss(
+    event: ToolEvent, *, sample: Callable[[], int | None] = sample_rss_bytes
+) -> ToolEvent:
+    """Return ``event`` with ``metadata["rss_bytes"]`` set to a live reading, or unchanged.
+
+    RES-3.
+
+    ``sample`` returns the process's *current* RSS (see
+    ``pathlayer.resource_sampling.sample_rss_bytes``), not a monotonic peak,
+    so each event simply gets stamped with this process's actual memory
+    footprint at that instant -- no per-run baseline or growth-delta
+    bookkeeping needed, and no state to share between call sites (OpenClaw's
+    tool-call path and its lifecycle sink both just call this directly with
+    the same default). Stateless and cheap enough (one file read on Linux) to
+    call on every event; ``None`` (unavailable -- e.g. non-Linux) leaves the
+    event unchanged, and :func:`~pathlayer.detectors.resource.resource_delta`
+    already treats a missing key as "no observation."
+
+    Builds a *new* ``ToolEvent`` via ``dataclasses.replace`` rather than
+    mutating ``event.metadata`` in place: the same event object may still be
+    referenced elsewhere by the caller (e.g. a durable raw-journal write)
+    around this call, and ``ToolEvent``'s immutability contract only formally
+    starts once the event reaches ``Pipeline.process`` -- this stays
+    defensive rather than relying on that boundary precisely.
+    """
+    sampled = sample()
+    if sampled is None:
+        return event
+    return dataclasses.replace(event, metadata={**event.metadata, "rss_bytes": sampled})
+
+
+class RssSamplingEventSink:
+    """Stamp ``event.metadata["rss_bytes"]`` onto every forwarded event (RES-3).
+
+    A plain :data:`EventSink`, not a :class:`RunAwareEventSink`: it is always
+    composed as the *inner* sink, underneath :class:`WatchdogEventSink`, which
+    stays the outermost object and keeps satisfying the lifecycle protocol
+    unchanged. Delegates the actual sampling to :func:`stamp_rss`.
+    """
+
+    def __init__(
+        self, sink: EventSink, *, sample: Callable[[], int | None] = sample_rss_bytes
+    ) -> None:
+        self._sink = sink
+        self._sample = sample
+
+    def __call__(self, event: ToolEvent) -> None:
+        self._sink(stamp_rss(event, sample=self._sample))
+
+
+def wrap_with_rss_sampling(
+    sink: EventSink,
+    *,
+    max_duration_seconds: int | None,
+    sample: Callable[[], int | None] = sample_rss_bytes,
+) -> EventSink:
+    """Compose ``sink`` with :class:`RssSamplingEventSink`, or return it as is.
+
+    The single source of truth for "is RSS sampling wanted" (RES-3), so
+    ``policies/wiring.py::wire()`` and
+    ``adapters/openclaw_recorder.py::_arm_runtime()`` -- the two places that
+    each build a per-run sink chain -- share one decision instead of each
+    re-implementing the same condition. ``max_duration_seconds`` reuses the
+    RES-2 runtime-limit check as "a ResourceDetector is active": it is
+    currently the only :class:`~pathlayer.detectors.base.RuntimeLimitProvider`,
+    always constructed with ``max_rss_bytes`` whenever it's constructed at
+    all, so a caller's ``pipeline.max_duration_seconds`` being set already
+    means RSS sampling is wanted too.
+    """
+    if max_duration_seconds is None:
+        return sink
+    return RssSamplingEventSink(sink, sample=sample)
 
 
 class WatchdogEventSink(RunAwareEventSink):

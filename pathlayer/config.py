@@ -285,16 +285,17 @@ class NoProgressConfig:
 @dataclass(slots=True)
 class ResourceConfig:
     # Disabled by default: no adapter emits SUBAGENT_SPAWN/RUN_RESTART yet, and
-    # the detector module's own docstring says "V1 is DETECT-ONLY". The four
+    # the detector module's own docstring says "V1 is DETECT-ONLY". The five
     # thresholds below are not calibrated against any corpus or real trace --
     # they're placeholder guesses, chosen only to be self-consistent round
     # numbers. Low risk while disabled by default; revisit once real traces
-    # with spawn/restart/depth/duration data exist (post-adapter-wiring).
+    # with spawn/restart/depth/duration/rss data exist (post-adapter-wiring).
     enabled: bool = False
     max_spawn_count: int = 5
     max_delegation_depth: int = 3
     max_restart_count: int = 3
     max_duration_seconds: int = 14400
+    max_rss_bytes: int = 2_147_483_648
 
 
 @dataclass(slots=True)
@@ -467,6 +468,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         max_delegation_depth=resource_s.int_("max_delegation_depth", 3),
         max_restart_count=resource_s.int_("max_restart_count", 3),
         max_duration_seconds=resource_s.int_("max_duration_seconds", 14400),
+        max_rss_bytes=resource_s.int_("max_rss_bytes", 2_147_483_648),
     )
     resource_s.finish()
 
@@ -800,6 +802,7 @@ def build_pipeline(
                     max_delegation_depth=spec.resource.max_delegation_depth,
                     max_restart_count=spec.resource.max_restart_count,
                     max_duration_seconds=spec.resource.max_duration_seconds,
+                    max_rss_bytes=spec.resource.max_rss_bytes,
                 )
             )
         tier_thresholds = {

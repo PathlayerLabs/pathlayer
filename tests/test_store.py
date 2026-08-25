@@ -654,6 +654,36 @@ def test_resource_duration_only_changes_fingerprint_when_resource_is_enabled(
     assert configuration_fingerprint(enabled_a) != configuration_fingerprint(enabled_b)
 
 
+def test_resource_max_rss_bytes_only_changes_fingerprint_when_resource_is_enabled(
+    tmp_path: Path,
+) -> None:
+    disabled_a = _config(tmp_path / "a.db")
+    disabled_b = replace(
+        disabled_a,
+        detectors=replace(
+            disabled_a.detectors,
+            resource=ResourceConfig(enabled=False, max_rss_bytes=7),
+        ),
+    )
+    assert configuration_fingerprint(disabled_a) == configuration_fingerprint(disabled_b)
+
+    enabled_a = replace(
+        disabled_a,
+        detectors=replace(
+            disabled_a.detectors,
+            resource=ResourceConfig(enabled=True, max_rss_bytes=7),
+        ),
+    )
+    enabled_b = replace(
+        enabled_a,
+        detectors=replace(
+            enabled_a.detectors,
+            resource=ResourceConfig(enabled=True, max_rss_bytes=8),
+        ),
+    )
+    assert configuration_fingerprint(enabled_a) != configuration_fingerprint(enabled_b)
+
+
 def test_real_v3_default_scope_resumes_with_resource_disabled(tmp_path: Path) -> None:
     database = tmp_path / "state.db"
     store = SQLiteStateStore(database)

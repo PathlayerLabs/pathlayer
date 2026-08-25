@@ -391,15 +391,17 @@ def configuration_fingerprint(config: Any) -> str:
         name: _fingerprint_value(getattr(config, name))
         for name in ("detectors", "canonicalization", "policy", "pipeline")
     }
-    # RES-2 adds one decision-relevant field. When the resource detector is
-    # disabled it cannot affect replay, so omit only that inactive field and
-    # preserve the exact historical fingerprint of v3/default databases. When
-    # enabled, retain it: a pre-RES-2 state is then rejected conservatively.
+    # RES-2/RES-3 each add one decision-relevant field. When the resource
+    # detector is disabled neither can affect replay, so omit both inactive
+    # fields and preserve the exact historical fingerprint of v3/default
+    # databases. When enabled, retain them: a pre-RES-2/RES-3 state is then
+    # rejected conservatively.
     detectors = decision_config.get("detectors")
     if isinstance(detectors, dict):
         resource = detectors.get("resource")
         if isinstance(resource, dict) and resource.get("enabled") is False:
             resource.pop("max_duration_seconds", None)
+            resource.pop("max_rss_bytes", None)
     canonical = json.dumps(
         {
             # Keep the same canonical shape as the first INF-1 draft while

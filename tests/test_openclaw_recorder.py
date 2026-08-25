@@ -1205,6 +1205,24 @@ def test_openclaw_timeout_is_journaled_reported_and_exactly_replayable(tmp_path:
     recorder.process_payload(_end("run-timeout"))
 
 
+def test_openclaw_rss_over_threshold_stops_the_run(tmp_path: Path) -> None:
+    # RES-3: inject a deterministic sampler (same DI idiom as clock/monotonic)
+    # rather than faking the platform read -- the real sampler
+    # (sample_rss_bytes) already has its own dedicated unit tests.
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(resource=ResourceConfig(enabled=True, max_rss_bytes=1000))
+    )
+    recorder = OpenClawRunRecorder(tmp_path, config=config, sample_rss=lambda: 2000)
+    recorder.process_payload(_before("run-rss"))
+    recorder.process_payload(_tool("read", run_id="run-rss"))
+    recorder.process_payload(_end("run-rss"))
+
+    run = RunStore(tmp_path).resolve_run("run-rss")
+    assert run is not None
+    assert run.read_manifest()["stopped"] is True
+    assert [decision["action"] for decision in _decisions(run)][-1] == "STOP"
+
+
 def test_reserved_lifecycle_hook_cannot_be_injected_or_replayed(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path)
     payload = {

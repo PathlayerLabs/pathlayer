@@ -92,6 +92,9 @@ detectors:
     # a run-aware live sink emits RUN_TIMEOUT at this deadline: confidence is 0
     # before it and 1 at it. Offline Pipeline.process() alone has no watchdog.
     max_duration_seconds: 14400
+    # Peak RSS in bytes (> 0). Sampled live from /proc/self/status on Linux;
+    # silently unavailable (no signal) on platforms without /proc.
+    max_rss_bytes: 2147483648
 
 # Per-tool canonicalization overrides (CAN-2). Empty by default.
 canonicalization:
