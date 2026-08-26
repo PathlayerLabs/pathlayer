@@ -24,6 +24,14 @@ from pathlayer.detectors.progress import (
     TestProgressAnchor,
     coding_anchors,
 )
+from pathlayer.detectors.proof import (
+    ProgressProof,
+    ProofProgressAnchor,
+    ProofSpec,
+    compute_spec_hash,
+    validate_progress_proof,
+    validate_proof_spec,
+)
 
 __all__ = [
     "BudgetState",
@@ -31,9 +39,15 @@ __all__ = [
     "ExitCodeProgressAnchor",
     "GitProgressAnchor",
     "ProgressAnchor",
+    "ProgressProof",
+    "ProofProgressAnchor",
+    "ProofSpec",
     "Signal",
     "TestProgressAnchor",
     "advance_budget_state",
     "budget_delta",
     "coding_anchors",
+    "compute_spec_hash",
+    "validate_progress_proof",
+    "validate_proof_spec",
 ]
