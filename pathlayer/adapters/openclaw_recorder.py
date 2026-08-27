@@ -69,6 +69,8 @@ from pathlayer.adapters.openclaw_run_store import (
 )
 from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
 from pathlayer.detectors.budget import BudgetDetector, BudgetState
+from pathlayer.detectors.proof import _PROGRESS_PROOF_KEY, _PROOF_SPEC_KEY
+from pathlayer.detectors.proof_producer import ProgressProofProducer, build_producer
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
@@ -92,6 +94,13 @@ logger = logging.getLogger(__name__)
 
 PipelineFactory = Callable[[], Pipeline]
 _LIFECYCLE_HOOK = "pathlayer_lifecycle"
+# ANC-2: reserved hook name for a durable proof sidecar record (see
+# _handle_tool/_restore_recorded_events). A probe result cannot be recomputed
+# from the raw wire payload alone -- replaying it must reconstruct the exact
+# enriched event a live PersistentPipeline durably committed, or a resumed
+# run's idempotency check (store.py's duplicate-tick comparison) sees a
+# mismatched event and raises StateConcurrencyError.
+_PROOF_HOOK = "pathlayer_progress_proof"
 
 
 @dataclass(slots=True)
@@ -239,6 +248,7 @@ class OpenClawRunRecorder:
         self._config: PathlayerConfig | None = None
         self._state_store: SQLiteStateStore | None = None
         self._state_init_error: StateStoreError | None = None
+        self._proof_producer: ProgressProofProducer | None = None
         if pipeline_factory is None:
             # A recorder without an explicit config keeps all of its durable
             # artifacts together under runs_root. Explicit store paths retain
@@ -251,6 +261,15 @@ class OpenClawRunRecorder:
                 )
             build_pipeline(effective_config)  # fail fast before hooks are swallowed
             self._config = effective_config
+            if effective_config.detectors.progress_proof.enabled:
+                # Same fail-fast boundary as build_pipeline above: a malformed
+                # manifest must reject the recorder at construction, not the
+                # first swallowed HTTP hook (SEC-3).
+                self._proof_producer = build_producer(
+                    effective_config.detectors.progress_proof.manifest_path,
+                    effective_config.detectors.progress_proof.probe_command,
+                    effective_config.detectors.progress_proof.timeout_seconds,
+                )
             try:
                 self._state_store = SQLiteStateStore(effective_config.store.path)
             except StateStoreError as error:
@@ -439,6 +458,8 @@ class OpenClawRunRecorder:
             raise ValueError(f"OpenClaw payload must be an object, got {type(payload).__name__}")
         if payload.get("hook") == _LIFECYCLE_HOOK:
             raise ValueError(f"OpenClaw hook {_LIFECYCLE_HOOK!r} is reserved for Pathlayer")
+        if payload.get("hook") == _PROOF_HOOK:
+            raise ValueError(f"OpenClaw hook {_PROOF_HOOK!r} is reserved for Pathlayer")
         hook_kind = classify_openclaw_hook(payload)
         run_id = extract_openclaw_run_id(payload)
         if run_id is None:
@@ -721,25 +742,63 @@ class OpenClawRunRecorder:
         omit every pre-restart event and would restart decision indexes at zero.
         The raw JSONL journal is the durable source of truth, so replay its tool
         payloads into a fresh pipeline without writing duplicate decisions.
+
+        ANC-2's proof sidecar records (``_PROOF_HOOK``, durably journaled by
+        ``_handle_tool`` alongside the tool event they enriched) are collected
+        first and re-applied by ``event_id`` below -- never replayed as events
+        of their own, and never re-derived by re-probing: a live probe result
+        cannot be recomputed from the raw wire payload alone, and the
+        reconstructed event must match byte-for-byte what a live
+        ``PersistentPipeline`` already durably committed, or its duplicate-tick
+        idempotency check (see ``store.py``) raises ``StateConcurrencyError``.
         """
         if not directory.raw_events_path.is_file():
             return 0, []
+        lines = directory.raw_events_path.read_text(encoding="utf-8").splitlines()
+        proofs_by_event_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # malformed JSON is re-raised properly by the pass below
+            if not isinstance(record, dict) or record.get("hook") != _PROOF_HOOK:
+                continue
+            sidecar = record.get("payload")
+            if not isinstance(sidecar, dict):
+                continue
+            event_id = sidecar.get("for_event_id")
+            proof_spec_payload = sidecar.get(_PROOF_SPEC_KEY)
+            progress_proof_payload = sidecar.get(_PROGRESS_PROOF_KEY)
+            if (
+                isinstance(event_id, str)
+                and isinstance(proof_spec_payload, dict)
+                and isinstance(progress_proof_payload, dict)
+            ):
+                proofs_by_event_id[event_id] = (proof_spec_payload, progress_proof_payload)
+
         sequence = 0
         events: list[ToolEvent] = []
-        for line_number, line in enumerate(
-            directory.raw_events_path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
+        for line_number, line in enumerate(lines, start=1):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(
                     f"invalid JSON in {directory.raw_events_path} at line {line_number}"
                 ) from exc
+            if isinstance(record, dict):
+                # Sidecars occupy a real slot in the append-only raw journal.
+                # Include them when recovering the next sequence even though
+                # they are folded into their tool event rather than replayed as
+                # events themselves. Otherwise a crash after the sidecar fsync
+                # but before the manifest update can make reattachment reuse
+                # the sidecar's sequence number.
+                sequence = max(sequence, _as_int(record.get("sequence")))
+            if isinstance(record, dict) and record.get("hook") == _PROOF_HOOK:
+                continue  # already folded into proofs_by_event_id above
             if not isinstance(record, dict) or not isinstance(record.get("payload"), dict):
                 raise ValueError(
                     f"invalid record in {directory.raw_events_path} at line {line_number}"
                 )
-            sequence = max(sequence, _as_int(record.get("sequence")))
             internal_lifecycle = record.get("internal_lifecycle") is True
             for offset, event in enumerate(
                 _translate_recorded_payload(
@@ -747,13 +806,15 @@ class OpenClawRunRecorder:
                 )
             ):
                 event.ts = float(len(events))
+                event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
+                proof = proofs_by_event_id.get(event_id)
+                if proof is not None:
+                    proof_spec_payload, progress_proof_payload = proof
+                    event.metadata[_PROOF_SPEC_KEY] = proof_spec_payload
+                    event.metadata[_PROGRESS_PROOF_KEY] = progress_proof_payload
                 events.append(event)
                 if not pipeline.stopped:
-                    _process_pipeline(
-                        pipeline,
-                        event,
-                        _openclaw_event_id(_as_int(record.get("sequence")), offset),
-                    )
+                    _process_pipeline(pipeline, event, event_id)
         return sequence, events
 
     def _append_raw(
@@ -1042,6 +1103,36 @@ class OpenClawRunRecorder:
             # wanted" gate as wrap_with_rss_sampling (see its docstring).
             if active.pipeline.max_duration_seconds is not None:
                 event = stamp_rss(event, sample=self._sample_rss)
+            event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
+            # ANC-2: probe live, once per captured tool-call event, same as RSS
+            # above. Unlike RSS (a real resource cost that keeps accruing after
+            # a passive STOP), a proof is pure detector input: once the
+            # pipeline has stopped, detectors never run again, so probing
+            # further would only spend the operator's probe cost for a result
+            # nothing reads.
+            if self._proof_producer is not None and not active.pipeline.stopped:
+                attached = self._proof_producer.attach(event)
+                if attached is not None:
+                    proof_spec_payload, progress_proof_payload = attached
+                    # A raw-journal replay can never re-derive a live probe
+                    # result (nor should it re-invoke the probe -- see
+                    # _restore_recorded_events). Durably journal exactly what
+                    # was attached as its own sidecar record, correlated by
+                    # event_id, so a resumed run reconstructs the identical
+                    # enriched event a live PersistentPipeline already
+                    # committed -- otherwise the idempotency check in
+                    # store.py's duplicate-tick comparison sees a mismatch and
+                    # raises StateConcurrencyError.
+                    self._append_raw(
+                        active,
+                        {
+                            "hook": _PROOF_HOOK,
+                            "for_event_id": event_id,
+                            _PROOF_SPEC_KEY: proof_spec_payload,
+                            _PROGRESS_PROOF_KEY: progress_proof_payload,
+                        },
+                        internal_lifecycle=True,
+                    )
             event.ts = float(len(active.events))
             active.events.append(event)
             self._advance_cost(active, event)
@@ -1052,11 +1143,7 @@ class OpenClawRunRecorder:
                 )
                 continue
             try:
-                action = _process_pipeline(
-                    active.pipeline,
-                    event,
-                    _openclaw_event_id(_as_int(record.get("sequence")), offset),
-                )
+                action = _process_pipeline(active.pipeline, event, event_id)
             except StateStoreError as error:
                 logger.exception(
                     "interrupting OpenClaw run %r after a durable identity conflict",

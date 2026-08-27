@@ -61,14 +61,13 @@ baseline, reset" (see their docstrings), and this anchor never emits
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from pathlayer.detectors.progress import AnchorSnapshot, AnchorState, ProgressAnchor
 from pathlayer.events import ToolEvent
+from pathlayer.store import _canonical_sha256
 
 _PROOF_SPEC_KEY = "proof_spec"
 _PROGRESS_PROOF_KEY = "progress_proof"
@@ -238,7 +237,7 @@ def compute_spec_hash(spec: ProofSpec) -> str:
     Describes *what the rule is*, never *where the proof came from* -- see the
     module docstring's trust-boundary note.
     """
-    canonical = json.dumps(
+    digest = _canonical_sha256(
         {
             "schema_version": spec.schema_version,
             "task_id": spec.task_id,
@@ -246,12 +245,9 @@ def compute_spec_hash(spec: ProofSpec) -> str:
             "scope_id": spec.scope_id,
             "kind": spec.kind,
             "required": list(spec.required),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+        }
     )
-    return _SPEC_HASH_ALGORITHM_PREFIX + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return _SPEC_HASH_ALGORITHM_PREFIX + digest
 
 
 def _find(event: ToolEvent, key: str) -> Any:

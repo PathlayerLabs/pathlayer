@@ -42,6 +42,7 @@ from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
+from pathlayer.detectors.proof import ProofProgressAnchor
 from pathlayer.detectors.resource import DURATION_REASON_PREFIX, ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import ToolEvent
@@ -299,12 +300,32 @@ class ResourceConfig:
 
 
 @dataclass(slots=True)
+class ProgressProofConfig:
+    # Disabled by default: the ANC-1 checkpoint_set anchor stays out of
+    # coding_anchors() until an operator opts in with a concrete manifest and
+    # probe (ANC-2). Exactly one producer slot -- no selection/priority logic
+    # between multiple manifests, since V1 cannot have more than one.
+    enabled: bool = False
+    manifest_path: str = ""
+    probe_command: tuple[str, ...] = ()
+    timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.enabled and (not self.manifest_path or not self.probe_command):
+            raise ConfigError(
+                "detectors.progress_proof.enabled requires both "
+                "'manifest_path' and 'probe_command' to be set"
+            )
+
+
+@dataclass(slots=True)
 class DetectorsConfig:
     loop: LoopConfig = field(default_factory=LoopConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     no_progress: NoProgressConfig = field(default_factory=NoProgressConfig)
     resource: ResourceConfig = field(default_factory=ResourceConfig)
+    progress_proof: ProgressProofConfig = field(default_factory=ProgressProofConfig)
 
 
 @dataclass(slots=True)
@@ -416,6 +437,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     budget_raw = _as_mapping(section._pop("budget", {}), "detectors.budget")
     nop_raw = _as_mapping(section._pop("no_progress", {}), "detectors.no_progress")
     resource_raw = _as_mapping(section._pop("resource", {}), "detectors.resource")
+    progress_proof_raw = _as_mapping(section._pop("progress_proof", {}), "detectors.progress_proof")
     section.finish()
 
     loop_s = _Section(loop_raw, "detectors.loop")
@@ -472,8 +494,22 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     )
     resource_s.finish()
 
+    progress_proof_s = _Section(progress_proof_raw, "detectors.progress_proof")
+    progress_proof = ProgressProofConfig(
+        enabled=progress_proof_s.bool_("enabled", False),
+        manifest_path=progress_proof_s.str_("manifest_path", ""),
+        probe_command=tuple(progress_proof_s.str_list("probe_command", [])),
+        timeout_seconds=progress_proof_s.nonnegative_float("timeout_seconds", 5.0),
+    )
+    progress_proof_s.finish()
+
     return DetectorsConfig(
-        loop=loop, retry=retry, budget=budget, no_progress=no_progress, resource=resource
+        loop=loop,
+        retry=retry,
+        budget=budget,
+        no_progress=no_progress,
+        resource=resource,
+        progress_proof=progress_proof,
     )
 
 
@@ -787,9 +823,28 @@ def build_pipeline(
                 )
             )
         if spec.no_progress.enabled:
+            anchors = list(coding_anchors())
+            if spec.progress_proof.enabled:
+                # Local import: pathlayer.detectors.proof_producer imports
+                # ConfigError from this module, so a top-level import here
+                # would cycle. Validate (and discard) a producer here so a
+                # malformed manifest fails *this* build, not just the
+                # recorder's own separate build_producer call below --
+                # build_pipeline is the one public entry point the ANC-2
+                # ticket's fail-fast contract is about, and any caller that
+                # builds a pipeline without going through OpenClawRunRecorder
+                # must get the same guarantee.
+                from pathlayer.detectors.proof_producer import build_producer
+
+                build_producer(
+                    spec.progress_proof.manifest_path,
+                    spec.progress_proof.probe_command,
+                    spec.progress_proof.timeout_seconds,
+                )
+                anchors.append(ProofProgressAnchor())
             detectors.append(
                 NoProgressDetector(
-                    coding_anchors(),
+                    anchors,
                     target_rate=spec.no_progress.target_rate,
                     threshold=spec.no_progress.threshold,
                     window=spec.no_progress.window,
@@ -875,6 +930,19 @@ def build_pipeline(
         # mistake (every detector disabled). Warn rather than fail: an empty,
         # observe-nothing pipeline is technically valid.
         resolved_logger.warning("build_pipeline: no detectors enabled; the pipeline will never act")
+    if spec.progress_proof.enabled and not spec.no_progress.enabled:
+        # ProofProgressAnchor is only ever appended to no_progress's anchor
+        # list (see above): disabled, the anchor has nowhere to wire, so the
+        # configured probe still runs on every tool call for no effect. Warn
+        # -- don't fail -- matching the loop<-progress precedent below: a
+        # deliberate override (e.g. staging progress_proof ahead of enabling
+        # no_progress) stays possible but never silent.
+        resolved_logger.warning(
+            "build_pipeline: detectors.progress_proof is enabled but "
+            "detectors.no_progress is disabled: the checkpoint_set anchor has "
+            "nowhere to wire, so the configured probe will run on every tool "
+            "call for no effect"
+        )
     # Audit #117 finding M-1: LOOP-2's n-gram fallback is an uncalibrated
     # heuristic (see pathlayer.detectors.loop module docstring) that is only
     # safe today because two independent guards hold: it can never solo-STOP

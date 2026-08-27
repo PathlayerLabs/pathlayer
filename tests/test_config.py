@@ -850,6 +850,118 @@ def test_resource_max_rss_bytes_requires_a_positive_integer(bad: object) -> None
 
 
 # --------------------------------------------------------------------------- #
+# ANC-2: progress_proof producer opt-in section + checkpoint_set anchor wiring
+# --------------------------------------------------------------------------- #
+
+
+def test_progress_proof_disabled_by_default() -> None:
+    config = PathlayerConfig()
+    assert config.detectors.progress_proof.enabled is False
+    assert config.detectors.progress_proof.manifest_path == ""
+    assert config.detectors.progress_proof.probe_command == ()
+    assert config.detectors.progress_proof.timeout_seconds == 5.0
+
+
+def test_progress_proof_enabled_requires_manifest_path_and_probe_command() -> None:
+    with pytest.raises(ConfigError, match=r"detectors\.progress_proof\.enabled"):
+        PathlayerConfig.from_mapping({"detectors": {"progress_proof": {"enabled": True}}})
+    with pytest.raises(ConfigError, match=r"detectors\.progress_proof\.enabled"):
+        PathlayerConfig.from_mapping(
+            {"detectors": {"progress_proof": {"enabled": True, "manifest_path": "spec.json"}}}
+        )
+
+
+def test_progress_proof_unknown_key_rejected() -> None:
+    with pytest.raises(ConfigError, match=r"detectors.progress_proof.*'bogus'"):
+        PathlayerConfig.from_mapping({"detectors": {"progress_proof": {"bogus": 1}}})
+
+
+def test_build_pipeline_zero_config_excludes_checkpoint_set_anchor() -> None:
+    pipeline = build_pipeline(PathlayerConfig())
+    no_progress = next(d for d in pipeline._detectors if isinstance(d, NoProgressDetector))
+    assert "progress_proof" not in [anchor.name for anchor in no_progress._anchors]
+
+
+def test_build_pipeline_wires_checkpoint_set_anchor_when_enabled(tmp_path: Path) -> None:
+    manifest = tmp_path / "spec.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "task_id": "t",
+                "proof_id": "p",
+                "scope_id": "s",
+                "kind": "checkpoint_set",
+                "required": ["done"],
+            }
+        )
+    )
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "progress_proof": {
+                    "enabled": True,
+                    "manifest_path": str(manifest),
+                    "probe_command": ["echo"],
+                }
+            }
+        }
+    )
+    pipeline = build_pipeline(config)
+    no_progress = next(d for d in pipeline._detectors if isinstance(d, NoProgressDetector))
+    assert "progress_proof" in [anchor.name for anchor in no_progress._anchors]
+
+
+def test_progress_proof_timeout_must_be_finite_and_nonnegative() -> None:
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        PathlayerConfig.from_mapping(
+            {
+                "detectors": {
+                    "progress_proof": {
+                        "enabled": True,
+                        "manifest_path": "spec.json",
+                        "probe_command": ["echo"],
+                        "timeout_seconds": -1.0,
+                    }
+                }
+            }
+        )
+
+
+def test_build_pipeline_warns_when_progress_proof_enabled_without_no_progress(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The checkpoint_set anchor is only ever wired into no_progress's anchor
+    # list: disabled, a configured probe still runs on every tool call for no
+    # effect.
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "no_progress": {"enabled": False},
+                "progress_proof": {
+                    "enabled": True,
+                    "manifest_path": "spec.json",
+                    "probe_command": ["echo"],
+                },
+            }
+        }
+    )
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "progress_proof is enabled" in caplog.text
+    assert "no_progress is disabled" in caplog.text
+
+
+def test_build_pipeline_does_not_warn_when_progress_proof_disabled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = PathlayerConfig.from_mapping({"detectors": {"no_progress": {"enabled": False}}})
+    with caplog.at_level("WARNING"):
+        build_pipeline(config)
+    assert "progress_proof" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
 # policy ladder + hysteresis (ARB-3)
 # --------------------------------------------------------------------------- #
 

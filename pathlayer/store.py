@@ -385,6 +385,18 @@ def _fingerprint_value(value: Any) -> Any:
     return value
 
 
+def _canonical_sha256(payload: Any) -> str:
+    """Sha256 hex digest of ``payload``'s canonical JSON (sorted, compact, no NaN).
+
+    Shared by :func:`configuration_fingerprint` and
+    :func:`pathlayer.detectors.proof.compute_spec_hash` so the two hashes stay
+    aligned on one canonicalization scheme rather than drifting apart as two
+    independent implementations.
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def configuration_fingerprint(config: Any) -> str:
     """Hash every configuration field that can influence a decision."""
     decision_config = {
@@ -402,19 +414,24 @@ def configuration_fingerprint(config: Any) -> str:
         if isinstance(resource, dict) and resource.get("enabled") is False:
             resource.pop("max_duration_seconds", None)
             resource.pop("max_rss_bytes", None)
-    canonical = json.dumps(
+        # ANC-2's whole progress_proof section is new and did not exist in the
+        # v3/default fingerprint. Disabled, it wires no anchor and cannot
+        # affect replay, so drop the entire section (not just some fields, as
+        # above -- there is no historical field here to keep) rather than
+        # rejecting every pre-ANC-2 database. Enabled, retain it: a pre-ANC-2
+        # state is then rejected conservatively, same as RES-2/RES-3.
+        progress_proof = detectors.get("progress_proof")
+        if isinstance(progress_proof, dict) and progress_proof.get("enabled") is False:
+            detectors.pop("progress_proof", None)
+    return _canonical_sha256(
         {
             # Keep the same canonical shape as the first INF-1 draft while
             # explicitly excluding future observability/pricing-only sections.
             "config": decision_config,
             "event_codec": EVENT_CODEC_VERSION,
             "state_semantics": STATE_SEMANTICS_VERSION,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+        }
     )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class SQLiteStateStore:
