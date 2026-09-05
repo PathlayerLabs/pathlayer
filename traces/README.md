@@ -190,3 +190,13 @@ Diagnostics never feed arbitration; they are purely observational.
 These fixtures are synthetic boundary cases, not production recordings. Runs
 without any deterministic ground truth remain outside NOP-5 and are tracked by
 ANC-1 (#135).
+
+## ANC-3 progress-proof measurement
+
+ANC-3 replays the 20 healthy and 8 no-progress traces twice: unchanged under
+zero-config, then on freshly loaded copies enriched by an external deterministic
+producer following explicit per-trace checkpoint schedules. The source traces
+remain byte-for-byte unchanged. See
+[`docs/anc-3-corpus-measurement.md`](../docs/anc-3-corpus-measurement.md) for the
+reproduction command, before/after metrics, per-trace outcomes and the one
+documented short-trace false negative.

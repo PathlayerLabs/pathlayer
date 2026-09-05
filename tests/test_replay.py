@@ -49,6 +49,9 @@ def test_replay_loop_intervenes_and_avoids_work() -> None:
     assert result.events_processed == 5
     assert result.events_avoided == 3
     assert result.cost_avoided == 3.0
+    assert result.intervention_reason is not None
+    assert result.intervention_reason.startswith("loop")
+    assert {signal.name for signal in result.intervention_signals} == {"loop", "no_progress"}
 
 
 def test_replay_healthy_does_not_intervene() -> None:
@@ -57,6 +60,8 @@ def test_replay_healthy_does_not_intervene() -> None:
     assert result.detected_at_index is None
     assert result.events_avoided == 0
     assert result.cost_avoided == 0.0
+    assert result.intervention_reason is None
+    assert result.intervention_signals == ()
 
 
 def test_replay_threshold_is_tunable() -> None:

@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "traces": {
+    "healthy_trivial.json": {
+      "objective": "Complete the bounded healthy task.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/expensive_but_legitimate.json": {
+      "objective": "Complete the legitimate expensive task.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/finished_without_tests.json": {
+      "objective": "Finish the task without requiring tests.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/finishes_before_runtime_limit.json": {
+      "objective": "Finish before the configured runtime limit.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/multi_file_refactor.json": {
+      "objective": "Refactor all ten modules without losing productive progress.",
+      "checkpoints": {
+        "modules_0_to_2_refactored": 8,
+        "modules_3_to_5_refactored": 17,
+        "modules_6_to_8_refactored": 26,
+        "module_9_refactored": 29
+      }
+    },
+    "healthy/noisy_progress.json": {
+      "objective": "Complete the task despite noisy intermediate results.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/plateau_after_success.json": {
+      "objective": "Reach success before the final healthy plateau.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/repeated_checkpoint_pair.json": {
+      "objective": "Complete productive work around repeated routine checkpoints.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/repetitive_but_passing.json": {
+      "objective": "Complete bounded repetitive work with passing tests.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/repo_exploration.json": {
+      "objective": "Map the requested API areas during legitimate repository exploration.",
+      "checkpoints": {
+        "routing_area_mapped": 3,
+        "validation_area_mapped": 9,
+        "authentication_area_mapped": 15,
+        "exploration_complete": 19
+      }
+    },
+    "healthy/retry_reset_after_progress.json": {
+      "objective": "Recover after a bounded retry sequence.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/retry_then_succeed.json": {
+      "objective": "Resolve a transient failure and succeed.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/rich_fail_to_pass_progress.json": {
+      "objective": "Repair stable failing test identities.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/rich_late_test_progress.json": {
+      "objective": "Build the implementation in phases before late test evidence arrives.",
+      "checkpoints": {
+        "implementation_phase_1_complete": 4,
+        "implementation_phase_2_complete": 9,
+        "initial_implementation_complete": 14
+      }
+    },
+    "healthy/rich_legacy_revert_recovers.json": {
+      "objective": "Recover after temporary loss of rich test evidence.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/rich_new_target_progress.json": {
+      "objective": "Progress on the newly selected test target.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/same_tool_different_args.json": {
+      "objective": "Inspect distinct resources with the same tool.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/slow_but_real_progress.json": {
+      "objective": "Complete slow work that continues to make measured progress.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/varied_long_run.json": {
+      "objective": "Complete a varied healthy run.",
+      "checkpoints": {"task_complete": null}
+    },
+    "healthy/varied_reads_by_id.json": {
+      "objective": "Read distinct resources identified by stable ids.",
+      "checkpoints": {"task_complete": null}
+    },
+    "no_progress_trivial.json": {
+      "objective": "Apply and verify the parser fix.",
+      "checkpoints": {"fix_applied": null, "fix_verified": null}
+    },
+    "no_progress/failing_edit_churn.json": {
+      "objective": "Repair the persistently failing tests.",
+      "checkpoints": {"tests_repaired": null}
+    },
+    "no_progress/replan_churn.json": {
+      "objective": "Execute and complete the planned implementation.",
+      "checkpoints": {"implementation_started": null, "implementation_verified": null}
+    },
+    "no_progress/research_rabbit_hole.json": {
+      "objective": "Implement and verify the websocket reconnection change.",
+      "checkpoints": {"change_implemented": null, "change_verified": null}
+    },
+    "no_progress/rich_deleted_failure.json": {
+      "objective": "Repair the failing test without deleting its evidence.",
+      "checkpoints": {"failure_repaired": null}
+    },
+    "no_progress/rich_flat_red.json": {
+      "objective": "Repair the stable red test suite.",
+      "checkpoints": {"tests_repaired": null}
+    },
+    "no_progress/rich_oscillation.json": {
+      "objective": "Repair the oscillating test debt durably.",
+      "checkpoints": {"tests_repaired": null}
+    },
+    "no_progress/slow_burn_47k.json": {
+      "objective": "Identify, implement, and verify the latency fix.",
+      "checkpoints": {"root_cause_confirmed": null, "fix_verified": null}
+    }
+  }
+}

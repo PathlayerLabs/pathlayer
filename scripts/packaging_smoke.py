@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from importlib.metadata import version
@@ -220,6 +222,43 @@ def _exercise_yaml() -> None:
         assert load_config(config).pipeline.dry_run is True
 
 
+def _exercise_scaffolder_entrypoint() -> None:
+    executable_name = (
+        "pathlayer-scaffold-proof.exe" if os.name == "nt" else "pathlayer-scaffold-proof"
+    )
+    executable = Path(sys.executable).with_name(executable_name)
+    assert executable.is_file(), f"missing installed entry point: {executable}"
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "proof"
+        completed = subprocess.run(
+            [
+                str(executable),
+                "--task-id",
+                "package-smoke",
+                "--name",
+                "Package smoke proof",
+                "--objective",
+                "Verify the installed scaffolder.",
+                "--checkpoint",
+                "installed",
+                "--output-dir",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "created" in completed.stdout
+        assert json.loads((output / "proof_spec.json").read_text(encoding="utf-8"))["required"] == [
+            "installed"
+        ]
+        probe = subprocess.run(
+            [sys.executable, str(output / "probe.py")], capture_output=True, text=True
+        )
+        assert probe.returncode != 0
+        assert "NotImplementedError" in probe.stderr
+
+
 def _exercise_missing_yaml_extra() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = Path(directory) / "config.yaml"
@@ -272,6 +311,7 @@ def main() -> None:
     _assert_network_blocked()
     _exercise_core()
     _exercise_session_report()
+    _exercise_scaffolder_entrypoint()
     if args.readme is not None:
         _exercise_readme(args.readme)
     if args.extras == "core":

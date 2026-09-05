@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pathlayer.detectors.base import Detector
+from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import ProgressAnchor, coding_anchors, loop_suppression_anchors
@@ -81,6 +81,8 @@ class ReplayResult:
     events_processed: int
     events_total: int
     cost_avoided: float
+    intervention_reason: str | None = None
+    intervention_signals: tuple[Signal, ...] = ()
 
     @property
     def events_avoided(self) -> int:
@@ -114,6 +116,7 @@ def replay_trace(
     processed = len(pipeline.history)
     total = len(trace.events)
     cost_avoided = sum(event.cost_usd for event in trace.events[processed:])
+    post_mortem = pipeline.post_mortem
     return ReplayResult(
         label=trace.label,
         intervened=detected_at_index is not None,
@@ -121,6 +124,8 @@ def replay_trace(
         events_processed=processed,
         events_total=total,
         cost_avoided=cost_avoided,
+        intervention_reason=post_mortem.reason if post_mortem is not None else None,
+        intervention_signals=post_mortem.signals if post_mortem is not None else (),
     )
 
 

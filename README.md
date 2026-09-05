@@ -166,6 +166,63 @@ read live from `/proc/self/status` on Linux; on platforms without `/proc`
 (e.g. macOS, Windows) the signal silently stays at `0` -- no hard dependency
 on a platform API, per the detector's "gracefully unavailable" contract.
 
+### Progress proofs for tasks without native ground truth
+
+When tests, exit codes and code-state evidence cannot define success, generate
+an explicit `checkpoint_set` contract and an external probe skeleton:
+
+```bash
+pathlayer-scaffold-proof \
+  --task-id customer-import-42 \
+  --name "Accepted deliverables" \
+  --objective "Import, validate and accept the customer dataset" \
+  --checkpoint file_created \
+  --checkpoint schema_valid \
+  --checkpoint accepted \
+  --output-dir /path/owned/by/operator/customer-import-42
+```
+
+The command writes a validated `proof_spec.json`, an intentionally inert
+`probe.py`, and a local `README.md` with the opt-in configuration. It refuses
+to overwrite any of those files. Implement the probe against state outside the
+observed agent's control; until then it raises `NotImplementedError`, ANC-2
+emits no proof and detection stays inert.
+
+Keep the manifest, probe code and state it reads outside the observed agent's
+write boundary, or enforce equivalent integration controls. An agent that can
+edit its own probe can forge success or stagnation, so that producer is not a
+valid trust boundary.
+
+The same deterministic renderer and safe writer are available in Python:
+
+```python
+from pathlayer.proof_scaffold import (
+    render_progress_proof_scaffold,
+    write_progress_proof_scaffold,
+)
+
+bundle = render_progress_proof_scaffold(
+    task_id="customer-import-42",
+    name="Accepted deliverables",
+    objective="Import, validate and accept the customer dataset",
+    checkpoints=["file_created", "schema_valid", "accepted"],
+)
+assert bundle.proof_spec.required == ("accepted", "file_created", "schema_valid")
+
+paths = write_progress_proof_scaffold(
+    output_dir="/path/owned/by/operator/customer-import-42",
+    task_id="customer-import-42",
+    name="Accepted deliverables",
+    objective="Import, validate and accept the customer dataset",
+    checkpoints=["file_created", "schema_valid", "accepted"],
+)
+```
+
+`proof_id` defaults to `name` and `scope_id` to `task_id`; both APIs and the
+CLI accept explicit overrides. Names and objectives are descriptive only and
+never determine checkpoint values. Pathlayer provides no V1 contract library,
+automatic selection, semantic inference, or ready-made business checks.
+
 ### Crash-safe run state
 
 Pass a stable logical run identity to resume detectors, policy hysteresis and
@@ -330,7 +387,10 @@ validation gate documented in [`AGENTS.md`](AGENTS.md#validation).
 
 The no-progress demo relies on deterministic ground truth from tests. Detecting
 slow burns with no tests, exit codes, code evidence or other objective signal is
-outside this V1 claim.
+outside the zero-config V1 claim. An operator-supplied progress-proof contract
+can cover such a run conditionally; the sealed ANC-3 corpus measurement and its
+remaining short-trace limitation are documented in
+[`docs/anc-3-corpus-measurement.md`](docs/anc-3-corpus-measurement.md).
 
 ## License
 
