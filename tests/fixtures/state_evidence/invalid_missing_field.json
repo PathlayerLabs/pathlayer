@@ -1,0 +1,16 @@
+{
+  "label": "missing_field",
+  "description": "Evidence payload is missing the required collector_version key -- the closed-schema check must reject it.",
+  "expected_valid": false,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0007-edit-target",
+    "phase": "before",
+    "resource_type": "filesystem",
+    "resource_id": "src/name_normalizer.py",
+    "status": "observed",
+    "raw_fingerprint": { "exists": true, "sha256": "9f2c0d1e2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d" },
+    "canonical_fingerprint": "sha256:9f2c0d1e2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "delta": null
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "label": "unavailable_before_capture_unsupported",
+  "description": "The runtime could not capture a before-phase snapshot for this resource -- status stays unavailable rather than reconstituting a guessed fingerprint.",
+  "expected_valid": true,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0031-edit-target",
+    "phase": "before",
+    "resource_type": "filesystem",
+    "resource_id": "src/decoder.py",
+    "status": "unavailable",
+    "raw_fingerprint": null,
+    "canonical_fingerprint": null,
+    "delta": null,
+    "collector_version": "filesystem-collector@1"
+  }
+}

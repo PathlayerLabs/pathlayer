@@ -1,0 +1,22 @@
+{
+  "label": "tests_before",
+  "description": "Selected test set observed before the tool call, with one failing case -- matches code.target-fixed's precondition in benchmarks/comp1/matrix.v1.json.",
+  "expected_valid": true,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0007-edit-target",
+    "phase": "before",
+    "resource_type": "tests",
+    "resource_id": "tests/test_name_normalizer.py::test_handles_empty_value",
+    "status": "observed",
+    "raw_fingerprint": {
+      "outcomes": { "tests/test_name_normalizer.py::test_handles_empty_value": "failed" }
+    },
+    "canonical_fingerprint": {
+      "failing": ["tests/test_name_normalizer.py::test_handles_empty_value"],
+      "passing": []
+    },
+    "delta": null,
+    "collector_version": "tests-collector@1"
+  }
+}

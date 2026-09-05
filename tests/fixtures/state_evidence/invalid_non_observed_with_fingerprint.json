@@ -1,0 +1,17 @@
+{
+  "label": "non_observed_with_fingerprint",
+  "description": "status is unavailable but raw_fingerprint is set -- a non-observed record must never smuggle a partial fingerprint through.",
+  "expected_valid": false,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0031-edit-target",
+    "phase": "before",
+    "resource_type": "filesystem",
+    "resource_id": "src/decoder.py",
+    "status": "unavailable",
+    "raw_fingerprint": { "exists": true, "sha256": "9f2c0d1e2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d" },
+    "canonical_fingerprint": null,
+    "delta": null,
+    "collector_version": "filesystem-collector@1"
+  }
+}

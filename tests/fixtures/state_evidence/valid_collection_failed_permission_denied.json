@@ -1,0 +1,17 @@
+{
+  "label": "collection_failed_permission_denied",
+  "description": "The collector attempted to capture the resource and errored -- distinct from unavailable, and still no fingerprint is smuggled through.",
+  "expected_valid": true,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0031-edit-target",
+    "phase": "after",
+    "resource_type": "filesystem",
+    "resource_id": "src/decoder.py",
+    "status": "collection_failed",
+    "raw_fingerprint": null,
+    "canonical_fingerprint": null,
+    "delta": null,
+    "collector_version": "filesystem-collector@1"
+  }
+}

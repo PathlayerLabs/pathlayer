@@ -32,6 +32,11 @@ from pathlayer.detectors.proof import (
     validate_progress_proof,
     validate_proof_spec,
 )
+from pathlayer.detectors.state_evidence import (
+    StateEvidence,
+    compute_evidence_hash,
+    validate_state_evidence,
+)
 
 __all__ = [
     "BudgetState",
@@ -43,11 +48,14 @@ __all__ = [
     "ProofProgressAnchor",
     "ProofSpec",
     "Signal",
+    "StateEvidence",
     "TestProgressAnchor",
     "advance_budget_state",
     "budget_delta",
     "coding_anchors",
+    "compute_evidence_hash",
     "compute_spec_hash",
     "validate_progress_proof",
     "validate_proof_spec",
+    "validate_state_evidence",
 ]

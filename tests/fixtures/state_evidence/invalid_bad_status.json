@@ -1,0 +1,17 @@
+{
+  "label": "bad_status",
+  "description": "status is not one of observed/unavailable/collection_failed -- must be rejected.",
+  "expected_valid": false,
+  "evidence": {
+    "schema_version": 1,
+    "tool_event_ref": "call-0007-edit-target",
+    "phase": "before",
+    "resource_type": "filesystem",
+    "resource_id": "src/name_normalizer.py",
+    "status": "unknown",
+    "raw_fingerprint": null,
+    "canonical_fingerprint": null,
+    "delta": null,
+    "collector_version": "filesystem-collector@1"
+  }
+}
