@@ -1,8 +1,8 @@
-"""Validation tooling: on-disk trace format, loader/writer and (later) the
-replay harness used to score detector quality offline.
+"""Offline tooling for trace replay and benchmark evidence collection.
 
-Everything here is built on :class:`pathlayer.events.ToolEvent` -- there is no
-parallel event schema.
+Behavioral traces reuse :class:`pathlayer.events.ToolEvent`; COMP-1 state
+observations use the separate, explicitly correlated ``StateEvidence``
+sidecar. Neither format changes the runtime event schema.
 """
 
 from pathlayer.validation.corpus import CorpusSummary, build_corpus
@@ -19,6 +19,13 @@ from pathlayer.validation.replay import (
     load_traces,
     replay_trace,
     score,
+)
+from pathlayer.validation.state_collectors import (
+    collect_filesystem_evidence,
+    collect_pytest_evidence,
+    dump_state_evidence_export,
+    load_state_evidence_export,
+    unavailable_state_evidence,
 )
 from pathlayer.validation.traces import (
     CURATED_LABELS,
@@ -44,6 +51,9 @@ __all__ = [
     "Report",
     "Trace",
     "build_corpus",
+    "collect_filesystem_evidence",
+    "collect_pytest_evidence",
+    "dump_state_evidence_export",
     "dump_trace",
     "event_from_dict",
     "event_to_dict",
@@ -52,10 +62,12 @@ __all__ = [
     "inject_no_progress",
     "inject_resource_spike",
     "inject_retry_storm",
+    "load_state_evidence_export",
     "load_trace",
     "load_traces",
     "replay_trace",
     "score",
     "trace_from_dict",
     "trace_to_dict",
+    "unavailable_state_evidence",
 ]

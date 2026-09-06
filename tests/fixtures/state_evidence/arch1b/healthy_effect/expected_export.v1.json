@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "evidence": [
+    {
+      "schema_version": 1,
+      "tool_event_ref": "call-edit-target",
+      "phase": "before",
+      "resource_type": "filesystem",
+      "resource_id": "target.py",
+      "status": "observed",
+      "raw_fingerprint": {
+        "exists": true,
+        "sha256": "653e0b0a6bc2098e68c3fd27408d3f801de559b7abed543823cd32d4bc24a544"
+      },
+      "canonical_fingerprint": "sha256:653e0b0a6bc2098e68c3fd27408d3f801de559b7abed543823cd32d4bc24a544",
+      "delta": null,
+      "collector_version": "filesystem-collector@1"
+    },
+    {
+      "schema_version": 1,
+      "tool_event_ref": "call-edit-target",
+      "phase": "before",
+      "resource_type": "tests",
+      "resource_id": "selected-normalizer-tests",
+      "status": "observed",
+      "raw_fingerprint": {
+        "outcomes": {
+          "case_target.py::test_normalize": "failed"
+        }
+      },
+      "canonical_fingerprint": {
+        "failing": [
+          "case_target.py::test_normalize"
+        ],
+        "passing": []
+      },
+      "delta": null,
+      "collector_version": "tests-collector@1"
+    },
+    {
+      "schema_version": 1,
+      "tool_event_ref": "call-edit-target",
+      "phase": "after",
+      "resource_type": "filesystem",
+      "resource_id": "target.py",
+      "status": "observed",
+      "raw_fingerprint": {
+        "exists": true,
+        "sha256": "ec0da0326b6442d0e3997e1837cceedfa48813c587e840e9f6058faa9ed4f547"
+      },
+      "canonical_fingerprint": "sha256:ec0da0326b6442d0e3997e1837cceedfa48813c587e840e9f6058faa9ed4f547",
+      "delta": {
+        "changed": true,
+        "hash_before": "sha256:653e0b0a6bc2098e68c3fd27408d3f801de559b7abed543823cd32d4bc24a544",
+        "hash_after": "sha256:ec0da0326b6442d0e3997e1837cceedfa48813c587e840e9f6058faa9ed4f547"
+      },
+      "collector_version": "filesystem-collector@1"
+    },
+    {
+      "schema_version": 1,
+      "tool_event_ref": "call-edit-target",
+      "phase": "after",
+      "resource_type": "tests",
+      "resource_id": "selected-normalizer-tests",
+      "status": "observed",
+      "raw_fingerprint": {
+        "outcomes": {
+          "case_target.py::test_normalize": "passed"
+        }
+      },
+      "canonical_fingerprint": {
+        "failing": [],
+        "passing": [
+          "case_target.py::test_normalize"
+        ]
+      },
+      "delta": {
+        "newly_passing": [
+          "case_target.py::test_normalize"
+        ],
+        "newly_failing": [],
+        "still_failing": []
+      },
+      "collector_version": "tests-collector@1"
+    }
+  ]
+}

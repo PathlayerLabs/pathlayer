@@ -1,0 +1,6 @@
+# The ARCH-1B filesystem collector hashes fixture file bytes exactly. Without
+# this, `git checkout` on Windows converts LF -> CRLF (core.autocrlf), so the
+# same fixture produces a different sha256 than the one recorded in
+# expected_export.v1.json, and test_fixture_exports_round_trip_and_distinguish_effect
+# fails on a Windows dev machine even though nothing about the fixture changed.
+tests/fixtures/state_evidence/arch1b/**/*.py text eol=lf
