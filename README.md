@@ -343,6 +343,26 @@ finally:
     adapter.detach()
 ```
 
+State capture is opt-in. To bracket each real tool call with the deterministic
+filesystem collector, configure the adapter with an explicit sensor:
+
+```python
+from pathlayer.state_evidence import FilesystemStateSensor, StateEvidenceProducer
+
+state_evidence = StateEvidenceProducer(
+    [FilesystemStateSensor("workspace/result.json", resource_id="result.json")]
+)
+adapter = LangGraphAdapter(sink, state_evidence=state_evidence)
+```
+
+`PytestStateSensor` similarly observes an explicit tuple of pytest nodeids. The
+adapter embeds the validated before/after records and a `changed`, `unchanged`,
+`unavailable` or `collection_failed` outcome in the corresponding `ToolEvent`.
+That metadata survives the normal trace and durable-store codecs and can be read
+without I/O using `state_evidence_from_event(event)`. With no producer supplied,
+capture and pipeline behavior are unchanged. These observations do not yet alter
+policy decisions; that validation belongs to VAL-5 (#184).
+
 The fragment assumes `graph` and `initial_state` already exist. For WARN to
 reach the model, add `actuator.injection_node()` before the model node.
 SUMMARIZE additionally requires `summary_tool()`, `summary_gate_node(sink)` and

@@ -1,5 +1,5 @@
-"""Shared private constants for the COMP-1 pytest collector subprocess."""
+"""Compatibility imports for the relocated private pytest protocol."""
 
-OUTPUT_ENV = "PATHLAYER_PYTEST_EVIDENCE_OUTPUT"
-MAX_OUTCOMES = 1_000
-MAX_NODEID_LENGTH = 4_096
+from pathlayer._pytest_evidence_protocol import MAX_NODEID_LENGTH, MAX_OUTCOMES, OUTPUT_ENV
+
+__all__ = ["MAX_NODEID_LENGTH", "MAX_OUTCOMES", "OUTPUT_ENV"]

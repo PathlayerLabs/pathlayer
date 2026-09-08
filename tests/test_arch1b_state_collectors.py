@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import pathlayer.validation.state_collectors as collectors_module
+import pathlayer.state_collectors as collectors_module
 from pathlayer.detectors.state_evidence import StateEvidence
 from pathlayer.validation import _pytest_evidence_plugin as pytest_plugin
 from pathlayer.validation import (

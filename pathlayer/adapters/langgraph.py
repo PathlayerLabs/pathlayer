@@ -50,6 +50,7 @@ from langchain_core.outputs import LLMResult
 from pathlayer.adapters.base import Adapter, EventSink, RunAwareEventSink
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
+from pathlayer.state_evidence import StateCapture, StateEvidenceProducer
 
 # Bound on un-paired ``on_tool_start`` calls held in ``_pending``. A start that
 # is never followed by an end/error (cancelled coroutine, interrupted run, a
@@ -133,6 +134,7 @@ class _Pending:
     args: dict[str, Any]
     parent_run_id: str | None
     kind: EventKind = EventKind.TOOL_CALL
+    state_capture: StateCapture | None = None
 
 
 @dataclass(slots=True)
@@ -205,7 +207,13 @@ class LangGraphAdapter(Adapter):
     routes its callbacks to this adapter's handler.
     """
 
-    def __init__(self, sink: EventSink, prices: Mapping[str, ModelPrice] | None = None) -> None:
+    def __init__(
+        self,
+        sink: EventSink,
+        prices: Mapping[str, ModelPrice] | None = None,
+        *,
+        state_evidence: StateEvidenceProducer | None = None,
+    ) -> None:
         super().__init__(sink)
         self._handler = _LangChainCaptureHandler(self)
         self._lock = threading.Lock()
@@ -213,6 +221,7 @@ class LangGraphAdapter(Adapter):
         self._pending_llm: OrderedDict[str, _PendingLLM] = OrderedDict()
         self._ts = 0
         self._prices = prices
+        self._state_evidence = state_evidence
 
     def attach(self) -> None:
         """Reset capture state (deterministic ``ts`` per attached run)."""
@@ -244,8 +253,26 @@ class LangGraphAdapter(Adapter):
         self._start_root(parent_run_id)
         kind = EventKind.PROGRESS_SUMMARY if tool == PROGRESS_SUMMARY_TOOL else EventKind.TOOL_CALL
         with self._lock:
+            state_capture = None
+            if self._state_evidence is not None and kind is EventKind.TOOL_CALL:
+                overlapping = [
+                    item for item in self._pending.values() if item.state_capture is not None
+                ]
+                if overlapping:
+                    for item in overlapping:
+                        assert item.state_capture is not None
+                        item.state_capture = self._state_evidence.unavailable_capture(
+                            item.state_capture.tool_event_ref
+                        )
+                    state_capture = self._state_evidence.unavailable_capture(run_id)
+                else:
+                    state_capture = self._state_evidence.capture_before(run_id)
             self._pending[run_id] = _Pending(
-                tool=tool, args=args, parent_run_id=parent_run_id, kind=kind
+                tool=tool,
+                args=args,
+                parent_run_id=parent_run_id,
+                kind=kind,
+                state_capture=state_capture,
             )
             # Bound the map: drop the oldest never-paired start if we exceed the cap.
             if len(self._pending) > _MAX_PENDING:
@@ -274,17 +301,18 @@ class LangGraphAdapter(Adapter):
             metadata: dict[str, Any] = {"parent_run_id": pending.parent_run_id}
             if error is not None:
                 metadata["error"] = error
-            self.emit(
-                ToolEvent(
-                    tool=pending.tool,
-                    args=pending.args,
-                    result=result,
-                    ts=ts,
-                    kind=pending.kind,
-                    run_id=run_id,
-                    metadata=metadata,
-                )
+            event = ToolEvent(
+                tool=pending.tool,
+                args=pending.args,
+                result=result,
+                ts=ts,
+                kind=pending.kind,
+                run_id=run_id,
+                metadata=metadata,
             )
+            if self._state_evidence is not None and pending.state_capture is not None:
+                event = self._state_evidence.attach_after(event, pending.state_capture)
+            self.emit(event)
 
     def _record_llm_start(self, run_id: str, parent_run_id: str | None, model: str | None) -> None:
         self._start_root(parent_run_id)

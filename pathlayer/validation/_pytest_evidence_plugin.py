@@ -1,4 +1,4 @@
-"""Private pytest plugin used by :mod:`pathlayer.validation.state_collectors`."""
+"""Private pytest plugin used by pathlayer.state_collectors."""
 
 from __future__ import annotations
 
@@ -7,11 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pathlayer.validation._pytest_evidence_protocol import (
-    MAX_NODEID_LENGTH,
-    MAX_OUTCOMES,
-    OUTPUT_ENV,
-)
+from pathlayer._pytest_evidence_protocol import MAX_NODEID_LENGTH, MAX_OUTCOMES, OUTPUT_ENV
 
 _outcomes: dict[str, str] = {}
 _capture_invalid = False
