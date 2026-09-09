@@ -35,6 +35,11 @@ jobs:
         run: mypy
       - name: Tests
         run: pytest
+      - name: Regenerate and compare VAL-5 runtime evidence
+        run: |
+          python -m benchmarks.val5.run \
+            --output "$RUNNER_TEMP/val5-regenerated" \
+            --check-results benchmarks/val5/results
 
   package-build:
     runs-on: ubuntu-latest

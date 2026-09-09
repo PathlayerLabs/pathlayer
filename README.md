@@ -360,8 +360,12 @@ adapter embeds the validated before/after records and a `changed`, `unchanged`,
 `unavailable` or `collection_failed` outcome in the corresponding `ToolEvent`.
 That metadata survives the normal trace and durable-store codecs and can be read
 without I/O using `state_evidence_from_event(event)`. With no producer supplied,
-capture and pipeline behavior are unchanged. These observations do not yet alter
-policy decisions; that validation belongs to VAL-5 (#184).
+capture and pipeline behavior are unchanged. Capture alone does not alter policy
+decisions. The opt-in `StateEvidenceProgressAnchor` lets the existing progress
+mechanisms consume novelty on one explicitly selected filesystem artifact.
+See [VAL-5 integration and measured results](benchmarks/val5/README.md) for the
+bounded runtime GO, configuration and abstentions. Novelty is not proof of task
+success or semantic progress.
 
 The fragment assumes `graph` and `initial_state` already exist. For WARN to
 reach the model, add `actuator.injection_node()` before the model node.
