@@ -16,6 +16,7 @@ from typing import Any
 BEFORE_AGENT_RUN = "before_agent_run"
 AFTER_TOOL_CALL = "after_tool_call"
 AGENT_END = "agent_end"
+LLM_OUTPUT = "llm_output"
 
 # Filesystem-safe directory names derived from external run IDs.
 _UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
@@ -25,6 +26,7 @@ class OpenClawHookKind(str, Enum):
     RUN_START = "run_start"
     TOOL = "tool"
     RUN_END = "run_end"
+    LLM = "llm"
     IGNORED = "ignored"
 
 
@@ -74,6 +76,8 @@ def classify_openclaw_hook(payload: Any) -> OpenClawHookKind:
         return OpenClawHookKind.TOOL
     if hook == AGENT_END:
         return OpenClawHookKind.RUN_END
+    if hook == LLM_OUTPUT:
+        return OpenClawHookKind.LLM
     return OpenClawHookKind.IGNORED
 
 

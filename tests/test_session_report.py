@@ -569,7 +569,7 @@ def test_a_measured_cost_shows_every_component_and_its_provenance() -> None:
     text = cost.describe()
     assert "$3.7500 effective" in text
     assert "$1.5000 captured over 3 priced event(s)" in text
-    assert "$0.2500 estimated (BUD-3)" in text
+    assert "$0.2500 estimated" in text
     assert "$2.0000 configured baseline" in text
 
 
@@ -755,7 +755,7 @@ def test_a_run_with_no_cost_source_says_so_instead_of_zero(tmp_path: Path) -> No
     assert report.cost.captured_usd is None
     assert report.cost.priced_events == 0
     assert "$0.00" not in report.format()
-    assert "no tokens" in report.cost.source
+    assert "total-token usage" in report.cost.source
     assert "budget detector was not enabled" in report.cost.source
     assert "cost: not measured" in report.format()
 
@@ -785,7 +785,7 @@ def test_bud3_estimates_are_reported_as_estimates_not_as_captured_cost(tmp_path:
     # $0.00 captured component; that is the detector's diagnostic, not the
     # report's claim about what was measured.)
     cost_line = next(line for line in report.format().splitlines() if line.startswith("cost:"))
-    assert "estimated (BUD-3)" in cost_line
+    assert "estimated" in cost_line
     assert "captured" not in cost_line
 
 
@@ -865,7 +865,7 @@ def test_a_budget_estimate_of_zero_is_a_measured_zero_not_an_absence(tmp_path: P
     assert report.cost.total_usd == 0.0
     assert "not measured" not in report.cost.describe()
     # And the measured zero is explained, so it cannot be read as "free".
-    assert "measured $0.00" in report.cost.source
+    assert "computed $0.00" in report.cost.source
     assert "$0.0000 effective" in report.format()
 
 
@@ -1404,3 +1404,51 @@ def test_reports_survive_a_policy_that_acts_without_any_detector() -> None:
     )
     assert report.detectors == ()
     assert "stop reason: stop" in report.format()
+
+
+@pytest.mark.parametrize("amount", [0.0, 0.25])
+@pytest.mark.parametrize("manifest_mode", ["new", "legacy", "disabled"])
+def test_adapter_estimates_are_reported_once(amount: float, manifest_mode: str) -> None:
+    from pathlayer.adapters.openclaw_report import _build_cost, cost_manifest_fields
+    from pathlayer.detectors.budget import BudgetDetector
+
+    events = [
+        ToolEvent(
+            tool="model", cost_usd=amount, metadata={"cost_measurement": "estimated_total_tokens"}
+        )
+    ]
+    detector = BudgetDetector(default_cost_usd=10.0)
+    if manifest_mode == "new":
+        manifest = cost_manifest_fields(detector, detector.accumulate(events))
+    elif manifest_mode == "legacy":
+        manifest = {"cost_estimated_usd": 0.1}
+    else:
+        manifest = {"cost_budget_status": "disabled"}
+    cost = _build_cost(manifest, events, True, completed=True, legacy_journal=False)
+    assert cost.captured_usd is None
+    assert cost.priced_events == 0
+    assert cost.estimated_usd == pytest.approx(amount + (0.1 if manifest_mode == "legacy" else 0))
+    assert "estimated from total tokens" in cost.source
+    assert "estimated" in cost.describe()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_recorded_llm_estimate_report_retains_provenance(tmp_path: Path, enabled: bool) -> None:
+    from pathlayer.config import PricingSection
+    from pathlayer.pricing import ModelPrice
+
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(budget=BudgetConfig(enabled=enabled, max_cost_usd=100.0)),
+        pricing=PricingSection(models={"model": ModelPrice(1.0, 2.0)}),
+    )
+    payload = {
+        "hook": "llm_output",
+        "event": {"runId": "llm", "model": "model", "usage": {"total": 1000}},
+        "ctx": _ctx("llm"),
+    }
+    _record_run(tmp_path, "llm", [payload], config=config)
+    report = build_run_report(_run(tmp_path, "llm"))
+    assert report.cost.captured_usd is None
+    assert report.cost.estimated_usd == pytest.approx(0.0012)
+    assert report.cost.total_usd == pytest.approx(0.0012)
+    assert "estimated" in report.cost.describe()

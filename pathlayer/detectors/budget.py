@@ -5,7 +5,10 @@ confidence equal to the fraction of the budget consumed, saturating at 1.0 once
 the ceiling is reached. BUD-3 fills the gap left by adapters that cannot price a
 tool/model call: a configured per-tool USD estimate is used only when a
 ``TOOL_CALL`` or ``LLM_CALL`` has no positive captured cost. A captured positive
-cost always wins, so model pricing is never charged twice.
+cost always wins, so model pricing is never charged twice. Adapter costs marked
+``estimated_total_tokens`` remain estimates, including a computed zero, and
+replace the per-call fallback. They count toward enforcement just like BUD-3
+estimates, with their estimated contribution exposed in the signal reason.
 
 ``baseline_usd`` is an explicit external seed for spend that is not present in
 the replayed event journal. SQLite restoration replays every durable event, so
@@ -49,7 +52,8 @@ class BudgetState:
 
     ``priced_events`` counts valid, strictly positive captured costs. Under the
     normalized event contract, zero means no captured price rather than a
-    measured zero; configured estimates remain a separate component.
+    measured zero; explicitly marked adapter estimates (including zero) and
+    configured estimates remain a separate component.
     ``invalid_costs`` counts events whose ``cost_usd`` was unusable (non-finite
     or negative) and was therefore ignored.
 
@@ -81,6 +85,8 @@ def budget_delta(
     """
     raw = event.cost_usd
     valid = isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+    if valid and raw >= 0.0 and event.metadata.get("cost_measurement") == "estimated_total_tokens":
+        return BudgetState(estimated_usd=float(raw))
     if valid and raw > 0.0:
         return BudgetState(captured_usd=float(raw), priced_events=1)
 

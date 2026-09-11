@@ -17,12 +17,12 @@ Two properties shape the design:
   see it, so ``CostBreakdown.carried_over_usd`` stays empty here and would not
   enter the effective total anyway.
 - **A report never fills a gap with a zero, and never hides a computed zero.**
-  A journal line written before OBS-2 has no fused score, and the OpenClaw hooks
-  carry no token or cost data whatsoever: both are reported as *unmeasured*, with
-  the reason, instead of as "nothing happened" or "$0.00". Conversely a figure
-  that was computed is reported even when it is zero, because refusing a measured
-  zero misleads in exactly the same way. The report is aggregation only -- no
-  detector, no threshold, no inference beyond what the files say.
+  A journal line written before OBS-2 has no fused score. An OpenClaw LLM event
+  can carry a total-token estimate but no provider input/output split; its
+  estimated status remains explicit. Missing token/model evidence is reported as
+  *unmeasured*, never as "nothing happened" or "$0.00". Conversely a computed
+  free-model value is reported even when it is zero. The report is aggregation
+  only -- no detector, no threshold, no inference beyond what the files say.
 
 The report data model itself lives in :mod:`pathlayer.postmortem` next to the
 ACT-5 post-mortem, as OBS-2 asks. Only the filesystem reconstruction and the CLI
@@ -46,7 +46,7 @@ from pathlayer.adapters.openclaw_run_store import (
     atomic_write_json,
     runs_root_from_env,
 )
-from pathlayer.detectors.budget import BudgetDetector, BudgetState
+from pathlayer.detectors.budget import BudgetDetector, BudgetState, budget_delta
 from pathlayer.events import ToolEvent
 from pathlayer.policies import Action
 from pathlayer.postmortem import (
@@ -107,9 +107,10 @@ def cost_manifest_fields(detector: BudgetDetector, state: BudgetState) -> dict[s
     """The cost components a later report could not recompute on its own.
 
     The captured cost is already in ``trace.json`` (every event carries its own
-    ``cost_usd``), so only the BUD-3 estimate and the configured cross-run
-    baseline are persisted here: both depend on the config the run was recorded
-    with, which the run directory does not store.
+    ``cost_usd``), so only the total estimate and the configured cross-run
+    baseline are persisted here: the BUD-3 fallback and baseline depend on the run
+    config. A marker distinguishes this combined estimate from older manifests
+    carrying only BUD-3 fallback costs, so trace estimates are never added twice.
 
     ``state`` is the accumulator folded over *every* recorded event, including
     those that arrived after a passive STOP and were never analyzed. A session
@@ -122,6 +123,7 @@ def cost_manifest_fields(detector: BudgetDetector, state: BudgetState) -> dict[s
     """
     return {
         ESTIMATED_COST_KEY: state.estimated_usd,
+        "cost_estimate_includes_event_estimates": True,
         BASELINE_COST_KEY: detector.baseline_usd,
         COST_BUDGET_STATUS_KEY: COST_BUDGET_ENABLED,
     }
@@ -297,53 +299,69 @@ def _build_cost(
     budget_status = manifest.get(COST_BUDGET_STATUS_KEY)
     captured: float | None = None
     priced: int | None = None
+    adapter_estimate: float | None = None
     if trace_available:
-        priced_events = [event for event in events if event.cost_usd > 0.0]
-        priced = len(priced_events)
-        # Left at None when nothing was priced: a 0.0 here would be an absence of
-        # measurement wearing the clothes of a measurement. ``priced_events=0``
-        # is the honest statement -- the trace was readable and priced nothing.
+        deltas = [budget_delta(event) for event in events]
+        priced = sum(delta.priced_events for delta in deltas)
         if priced:
-            captured = sum(event.cost_usd for event in priced_events)
+            captured = sum(delta.captured_usd for delta in deltas)
+        if any(
+            event.metadata.get("cost_measurement") == "estimated_total_tokens"
+            and _optional_float(event.cost_usd) is not None
+            and 0.0 <= event.cost_usd < float("inf")
+            for event in events
+        ):
+            adapter_estimate = sum(delta.estimated_usd for delta in deltas)
+    manifest_estimated = estimated
+    if adapter_estimate is not None:
+        if estimated is None:
+            estimated = adapter_estimate
+        elif not manifest.get("cost_estimate_includes_event_estimates", False):
+            # Older manifests contain only BUD-3 per-call fallback estimates.
+            estimated += adapter_estimate
     reasons: list[str] = []
     if not trace_available:
         reasons.append("no trace.json, so no event cost could be read back")
     elif not priced:
         reasons.append(
-            "no recorded event carried a cost: the OpenClaw hooks report no tokens "
-            "and no price, so nothing on this path measures spend"
+            "no recorded event carried a positive measured price; LLM spend can be "
+            "estimated when total-token usage and model pricing are available"
         )
-    if estimated is None and budget_status == COST_BUDGET_DISABLED:
+    if manifest_estimated is None and budget_status == COST_BUDGET_DISABLED:
         reasons.append(
             "no BUD-3 estimate: the budget detector was not enabled for this run, "
             "so no per-tool estimate was ever computed"
         )
-    elif estimated is None and budget_status == COST_BUDGET_UNKNOWN:
+    elif manifest_estimated is None and budget_status == COST_BUDGET_UNKNOWN:
         reasons.append(
             "the BUD-3 estimate is indeterminate: this run used a custom pipeline factory, "
             "so the recorder cannot establish whether a budget detector was enabled"
         )
-    elif estimated is None and legacy_journal:
+    elif manifest_estimated is None and legacy_journal:
         reasons.append(
             "the BUD-3 estimate is indeterminate: this run was recorded before Pathlayer "
             "persisted cost components, so whether the budget detector was enabled cannot "
             "be established from this directory"
         )
-    elif estimated is None and not completed:
+    elif manifest_estimated is None and not completed:
         reasons.append(
             "the BUD-3 estimate is indeterminate: this run never reached its end, and no "
             "estimate was journaled before the cut, so whether the budget detector was "
             "enabled cannot be established from this directory"
         )
-    elif estimated is None:
+    elif manifest_estimated is None:
         reasons.append(
             "the BUD-3 estimate is indeterminate: this run directory does not record "
             "whether the budget detector was enabled"
         )
-    elif estimated == 0.0:
+    elif manifest_estimated == 0.0:
         reasons.append(
-            "the BUD-3 estimate is a measured $0.00: the budget detector ran and no "
-            "configured per-tool price applied to the recorded calls"
+            "the budget estimate is a computed $0.00: no positive estimated cost "
+            "applied to the recorded calls"
+        )
+    if adapter_estimate is not None:
+        reasons.append(
+            f"${adapter_estimate:.6f} estimated from total tokens and an input/output ratio"
         )
     return CostBreakdown(
         captured_usd=captured,

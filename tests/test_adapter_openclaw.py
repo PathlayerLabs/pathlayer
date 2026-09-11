@@ -23,9 +23,15 @@ from typing import Any
 import pytest
 
 from pathlayer import Pipeline
-from pathlayer.adapters.openclaw import DEFAULT_PORT, OpenClawAdapter, translate_openclaw_event
+from pathlayer.adapters.openclaw import (
+    DEFAULT_PORT,
+    OpenClawAdapter,
+    translate_openclaw_event,
+    translate_openclaw_llm_event,
+)
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.events import EventKind, ToolEvent
+from pathlayer.pricing import ModelPrice
 from pathlayer.validation.traces import Trace, dump_trace, load_trace
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +143,41 @@ def test_non_dict_payload_raises() -> None:
 def test_after_tool_call_missing_tool_name_raises() -> None:
     with pytest.raises(ValueError, match="toolName"):
         translate_openclaw_event({"hook": "after_tool_call", "event": {"params": {}}, "ctx": {}})
+
+
+def test_llm_total_tokens_are_priced_as_an_explicit_estimate() -> None:
+    events = translate_openclaw_llm_event(
+        {
+            "hook": "llm_output",
+            "event": {"model": "house", "usage": {"total": 100}},
+            "ctx": {"runId": "run-1", "sessionKey": "session-1"},
+        },
+        prices={"house": ModelPrice(10_000.0, 20_000.0)},
+        input_ratio=0.75,
+    )
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind is EventKind.LLM_CALL
+    assert event.cost_usd == pytest.approx(1.25)
+    assert event.metadata == {
+        "input_tokens": 75,
+        "output_tokens": 25,
+        "reported_total_tokens": 100,
+        "input_ratio": 0.75,
+        "cost_measurement": "estimated_total_tokens",
+        "session_key": "session-1",
+    }
+
+
+def test_llm_total_missing_or_unknown_price_is_never_a_fabricated_cost() -> None:
+    missing = {"hook": "llm_output", "event": {"model": "house", "usage": {}}, "ctx": {}}
+    assert translate_openclaw_llm_event(missing) == []
+
+    unknown = translate_openclaw_llm_event(
+        {"hook": "llm_output", "event": {"model": "unknown", "usage": {"total": 3}}, "ctx": {}}
+    )
+    assert unknown[0].cost_usd == 0.0
+    assert unknown[0].metadata["cost_measurement"] == "unmeasured_unknown_model"
 
 
 def test_missing_params_defaults_to_empty_args() -> None:
@@ -318,3 +359,23 @@ def test_recorded_session_feeds_the_real_pipeline() -> None:
 
     assert len(pipeline.history) == 3
     assert [e.tool for e in pipeline.history] == ["read_file", "edit_file", "run_tests"]
+
+
+@pytest.mark.parametrize(
+    "ratio", [-0.1, 1.1, float("nan"), float("inf"), -float("inf"), True, False, "0.8", None]
+)
+def test_invalid_input_ratio_rejected_before_any_events(ratio: Any) -> None:
+    with pytest.raises(ValueError, match="input_ratio"):
+        OpenClawAdapter(Pipeline([]), input_ratio=ratio)
+    with pytest.raises(ValueError, match="input_ratio"):
+        translate_openclaw_llm_event({"hook": "llm_output", "event": {}}, input_ratio=ratio)
+
+
+@pytest.mark.parametrize("ratio, expected_input", [(0, 0), (1, 5), (0.8, 4)])
+def test_input_ratio_boundaries_preserve_total(ratio: float, expected_input: int) -> None:
+    event = translate_openclaw_llm_event(
+        {"hook": "llm_output", "event": {"model": "house", "usage": {"total": 5}}},
+        input_ratio=ratio,
+    )[0]
+    assert event.metadata["input_tokens"] == expected_input
+    assert event.metadata["input_tokens"] + event.metadata["output_tokens"] == 5

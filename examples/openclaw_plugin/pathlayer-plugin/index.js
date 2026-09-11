@@ -27,7 +27,10 @@ const DEFAULT_PORT = 8787;
 const PATHLAYER_URL = process.env.PATHLAYER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}/ingest`;
 const SEND_TIMEOUT_MS = 300;
 
-const FORWARDED_HOOKS = ["before_agent_run", "after_tool_call", "agent_end"];
+// `llm_output` is required for the bounded total-token cost estimate. The
+// Python side will only price it when a non-negative `usage.total` is present;
+// it never infers a model call from `after_tool_call`.
+const FORWARDED_HOOKS = ["before_agent_run", "llm_output", "after_tool_call", "agent_end"];
 
 async function forward(api, hook, event, ctx) {
   try {

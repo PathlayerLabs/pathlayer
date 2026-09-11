@@ -278,7 +278,7 @@ class CostBreakdown:
       events (``ToolEvent.cost_usd``), and how many events carried one.
       ``captured_usd`` is ``None`` -- never ``0.0`` -- when ``priced_events`` is
       ``0``, because a zero sum over zero priced events measures nothing.
-    - ``estimated_usd``: the BUD-3 substitute -- a configured per-tool price
+    - ``estimated_usd``: adapter estimates or the BUD-3 substitute -- a configured per-tool price
       times the number of eligible calls. ``None`` when no estimate was ever
       computed; ``0.0`` when the budget detector ran and no configured price
       applied to the recorded calls, which is a result rather than a gap.
@@ -365,7 +365,7 @@ class CostBreakdown:
             over = f" over {self.priced_events} priced event(s)" if self.priced_events else ""
             parts.append(f"${self.captured_usd:.4f} captured{over}")
         if self.estimated_usd is not None:
-            parts.append(f"${self.estimated_usd:.4f} estimated (BUD-3)")
+            parts.append(f"${self.estimated_usd:.4f} estimated")
         if self.baseline_usd is not None:
             parts.append(f"${self.baseline_usd:.4f} configured baseline")
         total = self.total_usd

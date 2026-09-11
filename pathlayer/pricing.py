@@ -103,6 +103,15 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     return table[best_key] if best_key else None
 
 
+def has_price(model: str | None, prices: Mapping[str, ModelPrice] | None = None) -> bool:
+    """Whether ``model`` resolves to a configured price.
+
+    Adapters use this to distinguish an explicit free model from an unknown
+    model whose zero value must remain *unmeasured*, not be presented as free.
+    """
+    return _lookup(model, prices if prices is not None else DEFAULT_PRICES) is not None
+
+
 def cost_of(
     model: str | None,
     input_tokens: int,

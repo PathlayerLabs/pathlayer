@@ -34,7 +34,7 @@ SCHEMA_VERSION = 3
 EVENT_CODEC_VERSION = 1
 # Bump when unchanged configuration can change future decisions in a way full
 # prefix replay cannot expose. Package/OBS-only changes deliberately do not.
-STATE_SEMANTICS_VERSION = 1
+STATE_SEMANTICS_VERSION = 2
 # RES-2 deliberately does not bump this version: its changed semantics are
 # fully visible in the newly persisted RUN_START/RUN_TIMEOUT event prefix. The
 # config fingerprint rejects pre-RES-2 active-resource scopes, while disabled

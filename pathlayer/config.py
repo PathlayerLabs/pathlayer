@@ -379,17 +379,16 @@ class PricingSection:
     makes it the whole table instead, for a deployment that wants to price only
     the models it has vetted and bill everything else at $0.
 
-    Configuration only: nothing in Pathlayer reads this section today. A price
-    table turns *reported token counts* into a cost, and the only adapter that
-    reports them takes its table as a constructor argument, so the caller must
-    pass it explicitly -- ``LangGraphAdapter(sink,
-    prices=config.pricing.effective_prices())``. Until it does, this section
-    changes no cost and no decision. The OpenClaw hooks report no tokens at all,
-    so on that path it can produce no figure whatever the wiring.
+    :meth:`~pathlayer.adapters.langgraph.LangGraphAdapter.from_config` wires
+    this table into LangGraph. OpenClaw can price a reported *total* token
+    counter by splitting it with ``openclaw_input_ratio``; this is an estimate,
+    not provider-reported input/output usage, and is therefore labelled as
+    such in event metadata and reports.
     """
 
     models: dict[str, ModelPrice] = field(default_factory=dict)
     replace_defaults: bool = False
+    openclaw_input_ratio: float = 0.8
 
     def effective_prices(self) -> dict[str, ModelPrice]:
         """The full table to hand to ``cost_of(..., prices=...)``."""
@@ -649,6 +648,11 @@ def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
     """
     section = _Section(data, "pricing")
     replace_defaults = section.bool_("replace_defaults", False)
+    openclaw_input_ratio = section.float_("openclaw_input_ratio", 0.8)
+    if not math.isfinite(openclaw_input_ratio) or not 0.0 <= openclaw_input_ratio <= 1.0:
+        raise ConfigError(
+            "invalid value for 'pricing.openclaw_input_ratio': must be finite and in [0, 1]"
+        )
     models_raw = _as_mapping(section._pop("models", {}), "pricing.models")
     section.finish()
 
@@ -674,7 +678,11 @@ def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
         models[str(model)] = ModelPrice(
             input_usd_per_mtok=input_rate, output_usd_per_mtok=output_rate
         )
-    return PricingSection(models=models, replace_defaults=replace_defaults)
+    return PricingSection(
+        models=models,
+        replace_defaults=replace_defaults,
+        openclaw_input_ratio=openclaw_input_ratio,
+    )
 
 
 def _parse_store(data: Mapping[str, Any]) -> StoreSection:

@@ -298,3 +298,22 @@ def test_fires_on_cost_spike_mutation() -> None:
     signal = BudgetDetector(max_cost_usd=5.0).evaluate(mutated.events)
     assert signal.confidence == 1.0
     assert Policy().decide([signal]) is Action.STOP
+
+
+@pytest.mark.parametrize("amount", [0.0, 1.0])
+def test_adapter_estimate_retains_provenance_without_fallback(amount: float) -> None:
+    detector = BudgetDetector(max_cost_usd=2.0, default_cost_usd=100.0)
+    event = ToolEvent(
+        tool="model",
+        kind=EventKind.LLM_CALL,
+        cost_usd=amount,
+        metadata={"cost_measurement": "estimated_total_tokens"},
+    )
+    state, signal = detector.step(detector.create_state(), event)
+    assert state == BudgetState(estimated_usd=amount)
+    assert detector.accumulate([event]) == state
+    assert detector.evaluate([event]) == signal
+    assert signal.confidence == amount / 2.0
+    assert budget_delta(event) == state  # also used when the detector is disabled
+    if amount:
+        assert "$0.00 captured + $1.00 estimated" in signal.reason

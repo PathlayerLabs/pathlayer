@@ -70,7 +70,8 @@ class CooperativeStopActuator(Actuator):
             self.post_mortem = post_mortem
 
 
-pipeline = build_pipeline(load_config())
+config = load_config()
+pipeline = build_pipeline(config)
 actuator = CooperativeStopActuator()
 adapter = InMemoryAdapter(wire(pipeline, actuator))
 
@@ -324,11 +325,12 @@ from pathlayer.adapters.langgraph import LangGraphAdapter
 from pathlayer.policies import wire
 from pathlayer.policies.langgraph_actuator import LangGraphActuator
 
-pipeline = build_pipeline(load_config())
+config = load_config()
+pipeline = build_pipeline(config)
 actuator = LangGraphActuator()
 actuator.attach()
 sink = wire(pipeline, actuator)
-adapter = LangGraphAdapter(sink)
+adapter = LangGraphAdapter.from_config(sink, config)
 adapter.attach()
 
 try:
@@ -342,6 +344,24 @@ except GraphDrained as stopped:
 finally:
     adapter.detach()
 ```
+
+`from_config()` applies `config.pricing.effective_prices()` to LLM calls.
+`OpenClawAdapter.from_config(sink, config)` provides the same pricing wiring.
+For an OpenClaw `llm_output` carrying only total tokens, Pathlayer estimates
+the input/output split with `pricing.openclaw_input_ratio` (default `0.8`).
+Budget signals and reports identify that cost as estimated; it is not a
+provider invoice. Estimates count toward the configured budget brake, like
+per-tool budget estimates, and can select STOP. The OpenClaw recorder remains
+passive: this decision does not terminate the external agent. Missing token
+counters or unknown prices remain unmeasured; an explicitly configured
+per-call budget estimate may still apply where an event exists.
+State semantics version 2 rejects older durable scopes: estimated token costs
+now belong to the estimated counter, and a known zero estimate no longer
+receives a fallback charge. Start a new state key for runs created with the
+previous semantics; their recorded files remain available for reporting.
+The recorder also pins the effective pricing in the run manifest. Resuming an
+LLM-bearing run with changed or missing pricing provenance is refused explicitly;
+use a new run id instead of repricing previously recorded activity.
 
 State capture is opt-in. To bracket each real tool call with the deterministic
 filesystem collector, configure the adapter with an explicit sensor:

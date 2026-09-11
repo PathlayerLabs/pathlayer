@@ -33,14 +33,19 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from pathlayer import __version__
 from pathlayer.adapters.http_ingest import HttpIngestAdapter
-from pathlayer.adapters.openclaw import SOURCE, translate_openclaw_event
+from pathlayer.adapters.openclaw import (
+    SOURCE,
+    _validate_input_ratio,
+    translate_openclaw_event,
+    translate_openclaw_llm_event,
+)
 from pathlayer.adapters.openclaw_lifecycle import (
     AFTER_TOOL_CALL,
     OpenClawHookKind,
@@ -254,6 +259,7 @@ class OpenClawRunRecorder:
             # artifacts together under runs_root. Explicit store paths retain
             # their normal cwd-relative configuration semantics.
             effective_config = config or PathlayerConfig()
+            _validate_input_ratio(effective_config.pricing.openclaw_input_ratio)
             if effective_config.store.path == StoreSection().path:
                 effective_config = replace(
                     effective_config,
@@ -476,7 +482,7 @@ class OpenClawRunRecorder:
                 # re-arm only after it is released so an immediately overdue
                 # callback can safely finalize/remove this run.
                 active.runtime_sink.start_run()
-            elif hook_kind is OpenClawHookKind.TOOL:
+            elif hook_kind in {OpenClawHookKind.TOOL, OpenClawHookKind.LLM}:
                 # A missing before_agent_run must not disable RES-2. Start at
                 # the first observable tool boundary and make the unmeasured
                 # prefix explicit in logs, matching the generic sink fallback.
@@ -498,6 +504,8 @@ class OpenClawRunRecorder:
                 self._handle_run_start(active, payload, record)
             elif hook_kind is OpenClawHookKind.TOOL:
                 self._handle_tool(active, payload, record)
+            elif hook_kind is OpenClawHookKind.LLM:
+                self._handle_llm(active, payload, record)
             elif hook_kind is OpenClawHookKind.RUN_END:
                 self._handle_run_end(active, payload, record)
             else:
@@ -570,6 +578,7 @@ class OpenClawRunRecorder:
                 "pathlayer_version": __version__,
                 "pathlayer_commit": self._pathlayer_commit,
                 "listener_version": LISTENER_VERSION,
+                "llm_pricing_snapshot": self._pricing_snapshot(),
                 "openclaw_model": _extract_model(payload),
                 "openclaw_provider": _extract_provider(payload),
                 "workspace": _extract_workspace(payload),
@@ -800,11 +809,25 @@ class OpenClawRunRecorder:
                     f"invalid record in {directory.raw_events_path} at line {line_number}"
                 )
             internal_lifecycle = record.get("internal_lifecycle") is True
-            for offset, event in enumerate(
-                _translate_recorded_payload(
-                    record["payload"], internal_lifecycle=internal_lifecycle
+            translated = _translate_recorded_payload(
+                record["payload"], internal_lifecycle=internal_lifecycle
+            )
+            if self._config is not None and record["payload"].get("hook") == "llm_output":
+                if (
+                    directory.read_manifest().get("llm_pricing_snapshot")
+                    != self._pricing_snapshot()
+                ):
+                    raise StateCompatibilityError(
+                        "OpenClaw LLM pricing changed or was not recorded; use a new run id"
+                    )
+                translated.extend(
+                    translate_openclaw_llm_event(
+                        record["payload"],
+                        prices=self._config.pricing.effective_prices(),
+                        input_ratio=self._config.pricing.openclaw_input_ratio,
+                    )
                 )
-            ):
+            for offset, event in enumerate(translated):
                 event.ts = float(len(events))
                 event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
                 proof = proofs_by_event_id.get(event_id)
@@ -1133,33 +1156,76 @@ class OpenClawRunRecorder:
                         },
                         internal_lifecycle=True,
                     )
-            event.ts = float(len(active.events))
-            active.events.append(event)
-            self._advance_cost(active, event)
-            index = len(active.events) - 1
-            if active.pipeline.stopped:
-                self._record_decision(
-                    active, record, event, Action.STOP, index=index, analyzed=False
-                )
-                continue
-            try:
-                action = _process_pipeline(active.pipeline, event, event_id)
-            except StateStoreError as error:
-                logger.exception(
-                    "interrupting OpenClaw run %r after a durable identity conflict",
-                    active.directory.original_run_id,
-                )
-                self._interrupt_active_run(active, error)
+            if not self._process_captured_event(active, record, event, event_id):
                 return
-            if (
-                isinstance(active.pipeline, PersistentPipeline)
-                and not active.pipeline.durable
-                and not active.persistence_reported
-            ):
-                self._record_pipeline_durability(active.directory, active.pipeline)
-                active.persistence_reported = True
-            self._record_decision(active, record, event, action, index=index)
         active.directory.update_manifest(event_count=active.sequence, **self._cost_fields(active))
+
+    def _pricing_snapshot(self) -> dict[str, Any] | None:
+        """Pin the effective rates, including built-ins, for safe raw-journal replay."""
+        if self._config is None:
+            return None
+        return {
+            "input_ratio": self._config.pricing.openclaw_input_ratio,
+            "models": {
+                name: asdict(price)
+                for name, price in self._config.pricing.effective_prices().items()
+            },
+        }
+
+    def _handle_llm(
+        self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]
+    ) -> None:
+        """Record a separately captured OpenClaw LLM counter estimate.
+
+        The adapter accepts only ``llm_output`` with a reported total counter;
+        no tool hook is used to infer model activity. The event is deliberately
+        separate from a tool call so BudgetDetector sees the model spend.
+        """
+        if self._config is None:
+            return
+        estimate = translate_openclaw_llm_event(
+            payload,
+            prices=self._config.pricing.effective_prices(),
+            input_ratio=self._config.pricing.openclaw_input_ratio,
+        )
+        for offset, event in enumerate(estimate):
+            event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
+            if not self._process_captured_event(active, record, event, event_id):
+                return
+        active.directory.update_manifest(event_count=active.sequence, **self._cost_fields(active))
+
+    def _process_captured_event(
+        self, active: _ActiveRun, record: dict[str, Any], event: ToolEvent, event_id: str
+    ) -> bool:
+        """Record a captured event and report persistence degradation on either hook.
+
+        Return false if a durable identity conflict interrupted the run.
+        """
+        event.ts = float(len(active.events))
+        active.events.append(event)
+        self._advance_cost(active, event)
+        index = len(active.events) - 1
+        if active.pipeline.stopped:
+            self._record_decision(active, record, event, Action.STOP, index=index, analyzed=False)
+            return True
+        try:
+            action = _process_pipeline(active.pipeline, event, event_id)
+        except StateStoreError as error:
+            logger.exception(
+                "interrupting OpenClaw run %r after a durable identity conflict",
+                active.directory.original_run_id,
+            )
+            self._interrupt_active_run(active, error)
+            return False
+        if (
+            isinstance(active.pipeline, PersistentPipeline)
+            and not active.pipeline.durable
+            and not active.persistence_reported
+        ):
+            self._record_pipeline_durability(active.directory, active.pipeline)
+            active.persistence_reported = True
+        self._record_decision(active, record, event, action, index=index)
+        return True
 
     def _handle_run_end(
         self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]

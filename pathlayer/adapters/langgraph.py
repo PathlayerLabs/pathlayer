@@ -40,7 +40,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -51,6 +51,9 @@ from pathlayer.adapters.base import Adapter, EventSink, RunAwareEventSink
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
 from pathlayer.state_evidence import StateCapture, StateEvidenceProducer
+
+if TYPE_CHECKING:
+    from pathlayer.config import PathlayerConfig
 
 # Bound on un-paired ``on_tool_start`` calls held in ``_pending``. A start that
 # is never followed by an end/error (cancelled coroutine, interrupted run, a
@@ -222,6 +225,22 @@ class LangGraphAdapter(Adapter):
         self._ts = 0
         self._prices = prices
         self._state_evidence = state_evidence
+
+    @classmethod
+    def from_config(
+        cls,
+        sink: EventSink,
+        config: PathlayerConfig,
+        *,
+        state_evidence: StateEvidenceProducer | None = None,
+    ) -> LangGraphAdapter:
+        """Build an adapter with the configured local model price table.
+
+        This is the official construction path when ``PathlayerConfig.pricing``
+        should affect budget decisions. It deliberately does no remote price
+        lookup: the configuration snapshot is the complete pricing authority.
+        """
+        return cls(sink, prices=config.pricing.effective_prices(), state_evidence=state_evidence)
 
     def attach(self) -> None:
         """Reset capture state (deterministic ``ts`` per attached run)."""

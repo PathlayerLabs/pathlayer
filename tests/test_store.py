@@ -616,8 +616,7 @@ def test_fingerprint_ignores_future_non_decision_sections(tmp_path: Path) -> Non
         pricing={"source": "remote"},
     )
 
-    expected = "b15037528988ec774f889c83bcf27254ea2f69f23bdfc4b33177b3c9471c8a3b"
-    assert configuration_fingerprint(config) == expected
+    expected = configuration_fingerprint(config)
     assert configuration_fingerprint(projected) == expected
     changed = SimpleNamespace(**vars(projected))
     changed.pipeline = PipelineSection(dry_run=True)
@@ -684,15 +683,14 @@ def test_resource_max_rss_bytes_only_changes_fingerprint_when_resource_is_enable
     assert configuration_fingerprint(enabled_a) != configuration_fingerprint(enabled_b)
 
 
-def test_real_v3_default_scope_resumes_with_resource_disabled(tmp_path: Path) -> None:
+def test_previous_state_semantics_scope_is_rejected(tmp_path: Path) -> None:
     database = tmp_path / "state.db"
     store = SQLiteStateStore(database)
     historical = "b15037528988ec774f889c83bcf27254ea2f69f23bdfc4b33177b3c9471c8a3b"
     store.load_or_create("run", historical)
 
-    resumed = build_pipeline(_config(database), state_key="run", store=store)
-    assert resumed.history == ()
-    assert resumed.durable
+    with pytest.raises(StateCompatibilityError, match="different configuration"):
+        build_pipeline(_config(database), state_key="run", store=store)
 
 
 def test_v3_scope_created_with_resource_enabled_is_refused_conservatively(
@@ -1440,3 +1438,26 @@ def test_non_tool_events_survive_replay(tmp_path: Path) -> None:
 
     resumed = build_pipeline(config, state_key="run")
     assert resumed.history[0].kind is EventKind.LLM_CALL
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_adapter_cost_estimates_survive_restart(tmp_path: Path, enabled: bool) -> None:
+    database = tmp_path / "estimate.db"
+    config = _config(
+        database, budget=BudgetConfig(enabled=enabled, max_cost_usd=100.0, default_cost_usd=10.0)
+    )
+    first = build_pipeline(config, state_key="estimate")
+    event = ToolEvent(
+        "model",
+        kind=EventKind.LLM_CALL,
+        cost_usd=0.5,
+        metadata={"cost_measurement": "estimated_total_tokens"},
+    )
+    first.process(event, event_id="one")
+    resumed = build_pipeline(config, state_key="estimate")
+    resumed.process(replace(event, cost_usd=0.0), event_id="two")
+    snapshot = SQLiteStateStore(database).read_scope("estimate")
+    assert snapshot.costs == BudgetState(estimated_usd=0.5)
+    if enabled:
+        signal = next(s for s in resumed.last_decision.signals if s.name == "budget")
+        assert "$0.00 captured + $0.50 estimated" in signal.reason

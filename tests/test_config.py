@@ -1389,6 +1389,14 @@ def test_pricing_zero_rate_is_a_valid_free_model() -> None:
     assert config.pricing.models["local"] == ModelPrice(0.0, 0.0)
 
 
+def test_openclaw_input_ratio_is_configurable_and_bounded() -> None:
+    config = PathlayerConfig.from_mapping({"pricing": {"openclaw_input_ratio": 0.65}})
+    assert config.pricing.openclaw_input_ratio == 0.65
+    for ratio in (-0.1, 1.1, float("inf")):
+        with pytest.raises(ConfigError, match="openclaw_input_ratio"):
+            PathlayerConfig.from_mapping({"pricing": {"openclaw_input_ratio": ratio}})
+
+
 @pytest.mark.parametrize(
     ("section", "message"),
     [

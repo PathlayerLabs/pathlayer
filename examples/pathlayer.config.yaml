@@ -202,16 +202,14 @@ pipeline:
 # by default: the built-in table (pathlayer/pricing.py, common 2025 OpenAI and
 # Anthropic models) applies unchanged.
 #
-# WHAT THIS DOES AND DOES NOT DO. Nothing reads this section automatically yet:
-# the LangGraph adapter takes its price table as a constructor argument, so the
-# code that builds the adapter must pass `config.pricing.effective_prices()` for
-# a configured price to reach `cost_usd`, the budget detector and the report
-# (OBS-2). The OpenClaw hooks report no tokens at all (`after_tool_call` carries
-# toolName/params/result/error/durationMs and nothing else), so on that path this
-# table has nothing to multiply and produces no figure whatever the wiring -- the
-# report says the cost is unmeasured rather than printing $0.00.
-# To account for OpenClaw spend today, use detectors.budget.tool_costs_usd
-# (BUD-3): a known price per tool, times the number of calls.
+# WHAT THIS DOES AND DOES NOT DO. The official adapter factories
+# `LangGraphAdapter.from_config(...)` and `OpenClawAdapter.from_config(...)`
+# make a configured price reach `cost_usd`, the budget detector and the report.
+# `after_tool_call` carries only tool data. OpenClaw's `llm_output` hook can
+# report one total-token counter without an
+# input/output split. Pathlayer applies the ratio below to estimate that split.
+# This is an initial approximation, not a provider invoice: unknown models or
+# missing counters remain unmeasured and are never presented as a zero-cost run.
 #
 # Both rates are required per model: silently defaulting the output rate to 0
 # would under-charge every completion and quietly weaken the budget brake.
@@ -230,9 +228,12 @@ pricing:
   #     output_usd_per_mtok: 25.0
   #
   # true = `models` REPLACES the built-in table instead of extending it, so any
-  # model not listed above is billed at $0. Use it to price only vetted models,
-  # accepting that everything else is invisible to the budget detector.
+  # model not listed above has unmeasured token cost. An explicitly configured
+  # per-tool/default budget estimate may still apply to these events.
   replace_defaults: false
+  # Share of a reported OpenClaw total token count assumed to be input tokens.
+  # Used only for `llm_output` total-only estimates; 0.8 is the default.
+  openclaw_input_ratio: 0.8
 
 store:
   # Used only when build_pipeline(..., state_key="stable-run-id") opts into

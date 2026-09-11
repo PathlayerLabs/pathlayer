@@ -136,6 +136,14 @@ def _end(run_id: str = "run-a", *, success: bool = True) -> dict[str, Any]:
     }
 
 
+def _llm(run_id: str = "run-a", *, total: int = 100) -> dict[str, Any]:
+    return {
+        "hook": "llm_output",
+        "event": {"model": "gpt-4o-mini", "usage": {"total": total}},
+        "ctx": _ctx(run_id),
+    }
+
+
 def test_ctx_run_id_is_canonical() -> None:
     payload = _tool("read", run_id="event-run", tool_call_id="call-9")
     payload["ctx"]["runId"] = "ctx-run"
@@ -612,6 +620,23 @@ def test_intervention_below_stop_is_not_healthy(tmp_path: Path) -> None:
     assert manifest["health_reason"] == "pathlayer intervened below STOP: WARN"
 
 
+def test_llm_total_counter_is_recorded_as_a_separate_cost_estimate(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("run-llm"))
+    recorder.process_payload(_llm("run-llm", total=100))
+    recorder.process_payload(_end("run-llm"))
+
+    run = RunStore(tmp_path).resolve_run("run-llm")
+    assert run is not None
+    trace = load_trace(run.trace_path)
+    assert len(trace.events) == 1
+    event = trace.events[0]
+    assert event.kind is EventKind.LLM_CALL
+    assert event.metadata["cost_measurement"] == "estimated_total_tokens"
+    assert event.metadata["reported_total_tokens"] == 100
+    assert event.cost_usd > 0.0
+
+
 def test_dry_run_would_be_action_is_not_healthy(tmp_path: Path) -> None:
     # Dry-run emits nothing, so only ``would_be_actions`` shows the run was not
     # clean -- claiming healthy here would hide exactly what dry-run is for.
@@ -838,8 +863,9 @@ def test_sqlite_unavailable_during_startup_marks_existing_run_non_durable(
     assert manifest["persistence_error"] == "StateWriteError"
 
 
+@pytest.mark.parametrize("first_hook", ["tool", "llm"])
 def test_runtime_sqlite_failure_marks_manifest_and_keeps_decision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_hook: str
 ) -> None:
     recorder = OpenClawRunRecorder(tmp_path)
     recorder.process_payload(_before("run-degraded"))
@@ -849,7 +875,9 @@ def test_runtime_sqlite_failure_marks_manifest_and_keeps_decision(
         raise StateWriteError("disk full")
 
     monkeypatch.setattr(recorder._state_store, "append_tick", fail_append)
-    recorder.process_payload(_tool("read", run_id="run-degraded"))
+    recorder.process_payload(
+        _llm("run-degraded") if first_hook == "llm" else _tool("read", run_id="run-degraded")
+    )
 
     run = RunStore(tmp_path).resolve_run("run-degraded")
     assert run is not None
@@ -1983,3 +2011,54 @@ def test_decisions_recorded_on_pipeline_action(tmp_path: Path) -> None:
     assert lines
     last = json.loads(lines[-1])
     assert "action" in last
+
+
+def test_restart_preserves_llm_estimates_and_decision_indexes(tmp_path: Path) -> None:
+    first = OpenClawRunRecorder(tmp_path)
+    first.process_payload(_before("llm-restart"))
+    first.process_payload(_llm("llm-restart", total=100))
+    original = first._runs["llm-restart"].events[0]
+
+    restarted = OpenClawRunRecorder(tmp_path)
+    restarted.process_payload(_llm("llm-restart", total=200))
+    active = restarted._runs["llm-restart"]
+    assert len(active.events) == 2
+    assert active.events[0] == original
+    assert active.events[1].cost_usd == pytest.approx(2 * original.cost_usd)
+    restarted.process_payload(_end("llm-restart"))
+    run = RunStore(tmp_path).resolve_run("llm-restart")
+    assert run is not None
+    trace = load_trace(run.trace_path)
+    assert len(trace.events) == 2
+    assert sum(e.cost_usd for e in trace.events) == pytest.approx(3 * original.cost_usd)
+    assert [d["event_index"] for d in _decisions(run)] == [0, 1]
+
+
+@pytest.mark.parametrize("after_stop", [False, True])
+def test_restart_rejects_changed_llm_pricing(tmp_path: Path, after_stop: bool) -> None:
+    from dataclasses import replace
+
+    config = PathlayerConfig(
+        detectors=DetectorsConfig(budget=BudgetConfig(enabled=after_stop, max_cost_usd=0.00001))
+    )
+    first = OpenClawRunRecorder(tmp_path, config=config)
+    first.process_payload(_before("pricing-change"))
+    first.process_payload(_llm("pricing-change"))
+    assert first._runs["pricing-change"].pipeline.stopped is after_stop
+    first.process_payload(_llm("pricing-change"))
+    changed = replace(config, pricing=replace(config.pricing, openclaw_input_ratio=0.1))
+    restarted = OpenClawRunRecorder(tmp_path, config=changed)
+    restarted.process_payload(_llm("pricing-change"))
+    assert "pricing-change" not in restarted._runs
+    run = RunStore(tmp_path).resolve_run("pricing-change")
+    assert run is not None
+    assert run.read_manifest()["status"] == "interrupted"
+
+
+def test_recorder_validates_programmatic_ratio_before_capture(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    config = PathlayerConfig()
+    config = replace(config, pricing=replace(config.pricing, openclaw_input_ratio=5.0))
+    with pytest.raises(ValueError, match="input_ratio"):
+        OpenClawRunRecorder(tmp_path, config=config)

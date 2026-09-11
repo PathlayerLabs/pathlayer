@@ -22,6 +22,7 @@ from langchain_core.tools import tool
 
 from pathlayer import Pipeline
 from pathlayer.adapters.langgraph import LangGraphAdapter, _coerce_result
+from pathlayer.config import PathlayerConfig, PricingSection
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
@@ -31,6 +32,7 @@ from pathlayer.detectors.retry import RetryDetector
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.policies import Action, Actuator, Policy, wire
 from pathlayer.postmortem import PostMortem
+from pathlayer.pricing import ModelPrice
 from pathlayer.validation.traces import Trace, dump_trace, load_trace
 
 
@@ -452,6 +454,17 @@ def _drive_llm(adapter: LangGraphAdapter, response: LLMResult, *, serialized: di
     run_id = uuid4()
     adapter._handler.on_llm_start(serialized, ["prompt"], run_id=run_id)
     adapter._handler.on_llm_end(response, run_id=run_id)
+
+
+def test_from_config_wires_the_configured_price_table() -> None:
+    events: list[ToolEvent] = []
+    adapter = LangGraphAdapter.from_config(
+        events.append,
+        PathlayerConfig(pricing=PricingSection(models={"house": ModelPrice(1.0, 2.0)})),
+    )
+    adapter.attach()
+    _drive_llm(adapter, _chat_result(1_000_000, 1_000_000, "house"), serialized=None)
+    assert events[0].cost_usd == pytest.approx(3.0)
 
 
 def test_root_llm_start_arms_watchdog_before_in_flight_call_finishes() -> None:
