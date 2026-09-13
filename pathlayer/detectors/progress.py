@@ -103,12 +103,14 @@ class AnchorSnapshot:
     :meth:`ProgressAnchor.diagnose` for that same prefix: human-readable notes
     about anything degraded-but-not-fatal at *this* event (a malformed payload
     dropped, a capacity cap reached, a sticky mode reverting) -- empty in the
-    common case, never load-bearing for ``level``/``satisfied``.
+    common case, never load-bearing for ``level``/``satisfied``. ``unavailable``
+    mirrors :meth:`ProgressAnchor.is_unavailable`.
     """
 
     level: float | None
     satisfied: bool
     diagnostics: tuple[str, ...] = ()
+    unavailable: bool = False
 
 
 class AnchorState(ABC):
@@ -173,6 +175,21 @@ class ProgressAnchor(ABC):
         """
         return ()
 
+    def is_unavailable(self, history: Sequence[ToolEvent]) -> bool:
+        """Whether the anchor was measuring and lost its measurement at the last event.
+
+        Not the same as ``measure(history) is None``, which also means "never
+        applicable" (no evidence of this kind at all): an unavailable anchor
+        had a baseline, and its producer reported that it observed nothing
+        this time (ANC-4's ``progress_proof_unobserved``). ``measure`` must
+        then return ``None``. :class:`NoProgressDetector` holds itself silent
+        on such an event whatever its other anchors say: this anchor's
+        progress may be exactly what was covering a co-anchor's flat level, so
+        losing it must never, on its own, stop an agent. Default ``False``.
+        Pure and deterministic, like :meth:`measure`.
+        """
+        return False
+
     def create_state(self) -> Any:
         """Return a fresh incremental state for :meth:`step` (PERF-2).
 
@@ -196,6 +213,7 @@ class ProgressAnchor(ABC):
             level=level,
             satisfied=self.is_satisfied(history),
             diagnostics=self.diagnose(history),
+            unavailable=self.is_unavailable(history),
         )
 
 

@@ -1,0 +1,813 @@
+{
+  "label": "healthy",
+  "description": "ANC-4 (#188): a productive coding agent under a compiled coding contract (tests_improve + file_changes, proofs recorded live by the generated probe). After two functions it breaks calculator.py's syntax for ten consecutive calls (a refactor in progress): the test module cannot be collected, so each of those calls carries a progress_proof_unobserved marker naming the four test checkpoints. With ProofProgressAnchor wired, those calls are gaps and the run completes; with the markers stripped (pre-ANC-4 freeze) the same run STOPs at call 17.",
+  "events": [
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "add",
+        "body": "return None"
+      },
+      "result": "edited add",
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 1,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": false,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 1,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 2,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": false,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "add",
+        "body": "return a + b"
+      },
+      "result": "edited add",
+      "ts": 2,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 3,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 3,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 4,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "subtract",
+        "body": "return None"
+      },
+      "result": "edited subtract",
+      "ts": 4,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 5,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 5,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 6,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "subtract",
+        "body": "return a - b"
+      },
+      "result": "edited subtract",
+      "ts": 6,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 7,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 7,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 8,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": false,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * (b  # draft 0"
+      },
+      "result": "edited multiply",
+      "ts": 8,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 9,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 9,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 10,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * (b  # draft 1"
+      },
+      "result": "edited multiply",
+      "ts": 10,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 11,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 11,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 12,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * (b  # draft 2"
+      },
+      "result": "edited multiply",
+      "ts": 12,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 13,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 13,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 14,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * (b  # draft 3"
+      },
+      "result": "edited multiply",
+      "ts": 14,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 15,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 15,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 16,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * (b  # draft 4"
+      },
+      "result": "edited multiply",
+      "ts": 16,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 17,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 17,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof_unobserved": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "unobserved": [
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ],
+          "reason": "did not report 4 of 5 required checkpoint(s)"
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 18,
+          "checkpoints": {
+            "file_changes:calculator.py": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "multiply",
+        "body": "return a * b"
+      },
+      "result": "edited multiply",
+      "ts": 18,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 19,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": true,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 19,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 20,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": false,
+            "test:tests/test_calculator.py::test_multiply": true,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "edit_function",
+      "args": {
+        "name": "divide",
+        "body": "return a / b"
+      },
+      "result": "edited divide",
+      "ts": 20,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 21,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": true,
+            "test:tests/test_calculator.py::test_multiply": true,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    },
+    {
+      "tool": "run_tests",
+      "result": "tests executed",
+      "ts": 21,
+      "metadata": {
+        "proof_spec": {
+          "schema_version": 1,
+          "task_id": "implement-calculator",
+          "proof_id": "implement-calculator",
+          "scope_id": "implement-calculator",
+          "kind": "checkpoint_set",
+          "required": [
+            "file_changes:calculator.py",
+            "test:tests/test_calculator.py::test_add",
+            "test:tests/test_calculator.py::test_divide",
+            "test:tests/test_calculator.py::test_multiply",
+            "test:tests/test_calculator.py::test_subtract"
+          ]
+        },
+        "progress_proof": {
+          "spec_hash": "sha256:38ce82c6231d7d32014e96dc1851b06fa8d8b2c12178ac8fd8ee342121cddfba",
+          "sequence": 22,
+          "checkpoints": {
+            "file_changes:calculator.py": true,
+            "test:tests/test_calculator.py::test_add": true,
+            "test:tests/test_calculator.py::test_divide": true,
+            "test:tests/test_calculator.py::test_multiply": true,
+            "test:tests/test_calculator.py::test_subtract": true
+          }
+        }
+      }
+    }
+  ]
+}

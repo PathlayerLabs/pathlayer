@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from pathlayer.detectors.progress import (
     is_advancing,
     loop_suppression_anchors,
 )
+from pathlayer.detectors.proof import ProofProgressAnchor, compute_spec_hash, validate_proof_spec
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, Policy
@@ -317,6 +319,106 @@ def test_no_progress_detector_step_matches_batch_with_non_finite_levels() -> Non
         [_NonFiniteAnchor(levels)], window=11, target_rate=0.2, threshold=2.0
     )
     _assert_detector_step_matches_batch(detector, events)
+
+
+def _with_progress_proofs(events: Sequence[ToolEvent], seed: int) -> list[ToolEvent]:
+    """Overlay ANC-1 proofs and ANC-4 unobserved markers on a generated corpus:
+    total and partial outages, markers before any epoch, a second epoch."""
+    rng = random.Random(seed)
+    specs = [
+        {
+            "schema_version": 1,
+            "task_id": "t",
+            "proof_id": "p",
+            "scope_id": f"scope-{index}",
+            "kind": "checkpoint_set",
+            "required": ["a", "b", "c"],
+        }
+        for index in range(2)
+    ]
+    hashes = []
+    for spec in specs:
+        validated = validate_proof_spec(spec)
+        assert validated is not None
+        hashes.append(compute_spec_hash(validated))
+    sequence = 0
+    out: list[ToolEvent] = []
+    for event in events:
+        if event.kind is not EventKind.TOOL_CALL or rng.random() < 0.3:
+            out.append(event)
+            continue
+        index = 0 if rng.random() < 0.9 else 1
+        metadata = {**event.metadata, "proof_spec": specs[index]}
+        roll = rng.random()
+        if roll < 0.55:
+            sequence += 1
+            observed = [c for c in ("a", "b", "c") if rng.random() < 0.8] or ["a"]
+            metadata["progress_proof"] = {
+                "spec_hash": hashes[index],
+                "sequence": sequence,
+                "checkpoints": {c: rng.random() < 0.5 for c in observed},
+            }
+            missing = [c for c in ("a", "b", "c") if c not in observed]
+            if missing:
+                metadata["progress_proof_unobserved"] = {
+                    "spec_hash": hashes[index],
+                    "unobserved": missing,
+                    "reason": "did not report some required checkpoint(s)",
+                }
+        else:
+            metadata["progress_proof_unobserved"] = {
+                "spec_hash": hashes[index],
+                "unobserved": ["a", "b", "c"],
+                "reason": "timed out after 5s",
+            }
+        out.append(replace(event, metadata=metadata))
+    return out
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_no_progress_detector_step_matches_batch_with_proof_anchor_outages(seed: int) -> None:
+    events = _with_progress_proofs(_random_events(seed, 220, malformed=True), seed)
+    detector = NoProgressDetector(
+        [*_anchors(), ProofProgressAnchor()], window=11, target_rate=0.2, threshold=2.0
+    )
+    _assert_detector_step_matches_batch(detector, events)
+
+
+class _BlindableAnchor(ProgressAnchor):
+    """A custom anchor on the batch fallback that reports losing its measurement."""
+
+    name = "custom_blindable"
+
+    def measure(self, history: Sequence[ToolEvent]) -> float | None:
+        if not history or history[-1].tool == "blind":
+            return None
+        ticks = sum(1 for event in history if event.tool == "tick")
+        return float(ticks) if ticks else None
+
+    def is_unavailable(self, history: Sequence[ToolEvent]) -> bool:
+        return (
+            bool(history)
+            and history[-1].tool == "blind"
+            and any(event.tool == "tick" for event in history)
+        )
+
+
+def test_unavailable_custom_anchor_holds_the_detector_on_both_paths() -> None:
+    events = [ToolEvent(tool="run_tests", result={"passed": 1, "failed": 3})]
+    events += [ToolEvent(tool="blind")]  # before any baseline: not unavailable
+    events += [ToolEvent(tool="tick")]
+    events += [ToolEvent(tool="run_tests", result={"passed": 1, "failed": 3}) for _ in range(12)]
+    events += [ToolEvent(tool="blind") for _ in range(3)]
+    events += [ToolEvent(tool="run_tests", result={"passed": 1, "failed": 3}) for _ in range(12)]
+    detector = NoProgressDetector(
+        [TestProgressAnchor(), _BlindableAnchor()], window=11, target_rate=0.2, threshold=2.0
+    )
+    _assert_detector_step_matches_batch(detector, events)
+    state = detector.create_state()
+    for index, event in enumerate(events):
+        state, signal = detector.step(state, event)
+        if event.tool == "blind" and index > 2:
+            assert signal.confidence == 0.0
 
 
 def test_no_progress_detector_step_matches_batch_with_mixed_fast_and_fallback_anchors() -> None:

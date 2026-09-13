@@ -79,6 +79,50 @@ Needs the langgraph extra (`pip install "pathlayer[langgraph]"`):
 python examples/demo_no_progress.py
 ```
 
+## `demo_coding_contract.py` (ANC-4)
+
+The same no-progress story when the agent's tools return plain text, as a shell
+tool would: the default coding anchors have nothing to measure. The operator
+writes a five-line coding contract instead:
+
+```yaml
+task: implement-calculator
+objective: Implement the four calculator operations so their tests pass.
+progress:
+  - type: tests_improve
+    path: tests/test_calculator.py
+  - type: file_changes
+    path: calculator.py
+```
+
+The demo compiles it into a progress-proof bundle, enables it through the
+normal configuration path, and passes the producer to `LangGraphAdapter`. The
+generated probe runs the real tests and checks the real file after every tool
+call of a real compiled `StateGraph`. STOP is enforced through
+`LangGraphActuator`, with production thresholds and the default detectors.
+Five scripted scenarios were fixed before the first run:
+
+| Scenario | With the contract | Without it |
+| --- | --- | --- |
+| productive: a wrong attempt then a fix, per function | no action, 16 calls | no action, 16 calls |
+| stagnant: a different wrong edit every time | STOP at call 11 | no action, 16 calls |
+| oscillating: fixes `add`, breaks it, fixes it again | STOP at call 11 | no action, 16 calls |
+| objective reached, then unrelated notes | no action, 16 calls | no action, 16 calls |
+| stagnant, but the probe cannot import Pathlayer | no action, 0 proofs, 16 warnings | no action, 16 calls |
+
+Every scenario also replays identically from its recorded trace after the
+workspace is deleted, and decides identically through a hand-written low-level
+manifest and probe fed the same checkpoints. The file edit in the stagnant run
+is an observed effect: it counts once, then the unchanged tests are a stall.
+The unavailable probe is fail-open: no proof, no decision change, one explicit
+warning per tool call. `tests/test_anc4_coding_demo.py` asserts this table.
+
+Needs the `langgraph` and `yaml` extras:
+
+```bash
+python examples/demo_coding_contract.py
+```
+
 ## `pathlayer.config.yaml`
 
 Reference configuration (INF-4) documenting every tunable threshold with its

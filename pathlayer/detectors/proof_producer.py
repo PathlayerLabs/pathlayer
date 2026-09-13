@@ -17,28 +17,50 @@ Two failure philosophies, matching two different moments:
 - Capture time (:meth:`ProgressProofProducer.probe`): a probe hiccup (missing
   binary, timeout, garbled stdout) is not a reason to interrupt a live agent
   run that the HTTP ingest path (SEC-3) would otherwise swallow anyway -- it
-  degrades to "no proof this tick", which the ANC-1 anchor already treats as
-  inert by construction.
+  degrades to "nothing observed this tick".
+
+ANC-4 makes that degradation explicit, in two places. Every tick that yields
+no proof, and every proof that omits a required checkpoint, is logged as a
+warning with a fixed category -- never the probe's own output, which can carry
+secrets. And the same fact is written into the event, as a
+``progress_proof_unobserved`` marker naming the required checkpoints the probe
+could not observe and that category: the ANC-1 anchor turns it into a *gap*
+(``level=None`` for that tick) instead of silently keeping its last known
+level, so a probe outage in the middle of a productive run no longer ends in a
+``no_progress`` STOP (see ``pathlayer.detectors.proof``). The producer
+therefore always writes *something* after a probe: a full proof, a partial
+proof plus a marker, or a marker alone.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pathlayer.config import ConfigError
+from pathlayer.config import ConfigError, PathlayerConfig
 from pathlayer.detectors.proof import (
     _PROGRESS_PROOF_KEY,
+    _PROGRESS_PROOF_UNOBSERVED_KEY,
     _PROOF_SPEC_KEY,
+    PROOF_METADATA_KEYS,
     ProofSpec,
     compute_spec_hash,
     validate_proof_spec,
 )
 from pathlayer.events import ToolEvent
+
+logger = logging.getLogger(__name__)
+
+# Bounds the "missing checkpoints" warning on a large contract.
+_MAX_LOGGED_CHECKPOINTS = 5
+
+# What one probe run attaches to an event: ``ToolEvent.metadata`` key -> payload.
+ProofPayloads = dict[str, dict[str, Any]]
 
 
 class ManifestError(ConfigError):
@@ -92,24 +114,78 @@ class ProgressProofProducer:
     _sequence: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
-    def probe(self) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Run the probe once; ``None`` on any failure (never raises).
+    def probe(self) -> ProofPayloads:
+        """Run the probe once and return the metadata payloads to attach (never raises).
 
         Contract: exit code 0 and stdout ``{"checkpoints": {"<id>": bool, ...}}``.
-        Any other exit code, a timeout, unreadable output, or output that is
-        not that shape is treated as "no proof this tick" -- the same
-        no-file/no-command/no-clock/no-LLM discipline ANC-1 enforces inside the
-        detection loop simply means a flaky *producer* must not propagate into
-        one, not that failures are hidden from operators (they are still
-        loggable by the caller if desired). The exception tuple is
-        deliberately wide (``ValueError`` covers ``json.JSONDecodeError`` and a
-        non-UTF-8-decodable ``UnicodeDecodeError`` from ``text=True``, and also
-        the ``timeout=nan`` case ``subprocess.run`` itself raises on): a flaky
-        or misbehaving probe must never propagate past this method.
+        The result always carries ``proof_spec``, then:
+
+        - every required checkpoint observed: a ``progress_proof``;
+        - some observed: a ``progress_proof`` with those, plus a
+          ``progress_proof_unobserved`` marker naming the rest;
+        - none observed -- any other exit code, a timeout, unreadable output,
+          output that is not that shape, or an empty report: the marker alone,
+          naming every required checkpoint.
+
+        The marker's ``reason`` is a fixed category (ANC-4), and the same
+        category is logged as a warning; the probe's own output is never
+        echoed. The exception handling is deliberately wide (``ValueError``
+        covers ``json.JSONDecodeError`` and a non-UTF-8-decodable
+        ``UnicodeDecodeError`` from ``text=True``, and also the ``timeout=nan``
+        case ``subprocess.run`` itself raises on; ``RecursionError`` covers a
+        deeply nested stdout): a flaky or misbehaving probe must never
+        propagate past this method. Only a successful proof consumes a
+        ``sequence`` number.
 
         Runs the subprocess itself outside :attr:`_lock` -- only bumping
         ``_sequence`` needs to be atomic -- so one slow probe cannot serialize
         every concurrent run sharing this producer behind it.
+        """
+        observed = self._observe()
+        payloads: ProofPayloads = {_PROOF_SPEC_KEY: self._proof_spec_payload()}
+        if isinstance(observed, str):
+            _log_no_proof(observed)
+            payloads[_PROGRESS_PROOF_UNOBSERVED_KEY] = self._marker(self.spec.required, observed)
+            return payloads
+        checkpoints = observed
+        missing = tuple(
+            checkpoint for checkpoint in self.spec.required if checkpoint not in checkpoints
+        )
+        if not checkpoints:
+            category = "reported none of the required checkpoints"
+            _log_no_proof(category)
+            payloads[_PROGRESS_PROOF_UNOBSERVED_KEY] = self._marker(missing, category)
+            return payloads
+        if missing:
+            shown = ", ".join(missing[:_MAX_LOGGED_CHECKPOINTS])
+            if len(missing) > _MAX_LOGGED_CHECKPOINTS:
+                shown += ", ..."
+            category = (
+                f"did not report {len(missing)} of {len(self.spec.required)} required checkpoint(s)"
+            )
+            logger.warning(
+                "progress_proof probe %s (%s); no level this tick, their last known values "
+                "are kept",
+                category,
+                shown,
+            )
+            payloads[_PROGRESS_PROOF_UNOBSERVED_KEY] = self._marker(missing, category)
+        with self._lock:
+            self._sequence += 1
+            sequence = self._sequence
+        payloads[_PROGRESS_PROOF_KEY] = {
+            "spec_hash": self.spec_hash,
+            "sequence": sequence,
+            "checkpoints": checkpoints,
+        }
+        return payloads
+
+    def _observe(self) -> dict[str, bool] | str:
+        """The required checkpoints the probe reported, or the failure category.
+
+        Returning the category (a ``str``) instead of storing it on ``self``
+        keeps the probe re-entrant: concurrent runs share one producer and run
+        their probes outside :attr:`_lock`.
         """
         try:
             completed = subprocess.run(
@@ -119,16 +195,27 @@ class ProgressProofProducer:
                 text=True,
                 timeout=self.timeout_seconds,
             )
+        except subprocess.TimeoutExpired:
+            return f"timed out after {self.timeout_seconds:g}s"
+        except subprocess.CalledProcessError as error:
+            return f"exited with status {error.returncode}"
+        except UnicodeDecodeError:
+            return "wrote output that is not UTF-8 text"
+        except OSError:
+            return "could not be launched"
+        except (subprocess.SubprocessError, ValueError):
+            return "could not be run"
+        try:
             payload = json.loads(completed.stdout)
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return None
+        except (ValueError, RecursionError):
+            return "output is not JSON"
         checkpoints = payload.get("checkpoints") if isinstance(payload, dict) else None
         if not isinstance(checkpoints, dict):
-            return None
+            return "output is not the checkpoints JSON contract"
         # All-or-nothing, matching ANC-1's own validate_progress_proof: a probe
-        # bug corrupting *one* entry must reject the whole tick as "no proof",
-        # not silently drop just the bad entry while crediting the rest. Once
-        # every entry is confirmed well-formed, dropping ids outside
+        # bug corrupting *one* entry must reject the whole tick as "nothing
+        # observed", not silently drop just the bad entry while crediting the
+        # rest. Once every entry is confirmed well-formed, dropping ids outside
         # spec.required is a separate, legitimate filter (ANC-1's validator is
         # spec-agnostic by design -- a checkpoints dict may name ids the spec
         # never required).
@@ -136,16 +223,15 @@ class ProgressProofProducer:
             isinstance(checkpoint_id, str) and isinstance(state, bool)
             for checkpoint_id, state in checkpoints.items()
         ):
-            return None
-        filtered = {
+            return "output is not the checkpoints JSON contract"
+        return {
             checkpoint_id: state
             for checkpoint_id, state in checkpoints.items()
             if checkpoint_id in self.spec.required
         }
-        with self._lock:
-            self._sequence += 1
-            sequence = self._sequence
-        proof_spec_payload = {
+
+    def _proof_spec_payload(self) -> dict[str, Any]:
+        return {
             "schema_version": self.spec.schema_version,
             "task_id": self.spec.task_id,
             "proof_id": self.spec.proof_id,
@@ -153,38 +239,36 @@ class ProgressProofProducer:
             "kind": self.spec.kind,
             "required": list(self.spec.required),
         }
-        progress_proof_payload = {
-            "spec_hash": self.spec_hash,
-            "sequence": sequence,
-            "checkpoints": filtered,
-        }
-        return proof_spec_payload, progress_proof_payload
 
-    def attach(self, event: ToolEvent) -> tuple[dict[str, Any], dict[str, Any]] | None:
-        """Probe and, on success, populate ``event.metadata`` with both payloads.
+    def _marker(self, unobserved: tuple[str, ...], reason: str) -> dict[str, Any]:
+        return {"spec_hash": self.spec_hash, "unobserved": list(unobserved), "reason": reason}
+
+    def attach(self, event: ToolEvent) -> ProofPayloads:
+        """Probe and write the resulting payloads into ``event.metadata``.
 
         Writes to ``event.metadata``, not ``event.result``: ``event.result`` is
-        the real tool-call result and must not be overwritten by an unrelated
-        producer, matching ANC-1's ``_find`` lookup
-        (``pathlayer/detectors/proof.py``), which already anticipates an
-        adapter populating these two keys on ``event.metadata``. ``proof_spec``
-        is (re)written on every call, not just the first, so the anchor's
-        spec cache never depends on event ordering.
+        the real tool-call result and the only side ANC-1's ``_find`` never
+        reads (``pathlayer/detectors/proof.py``) -- a proof there would be the
+        agent's own claim. ``proof_spec`` is (re)written on every call, not
+        just the first, so the anchor's spec cache never depends on event
+        ordering. A probe failure writes the ``progress_proof_unobserved``
+        marker instead of nothing, so the anchor sees a gap, not a freeze.
 
-        Returns the applied ``(proof_spec, progress_proof)`` pair (or ``None``
-        on probe failure) so a durable caller can journal exactly what was
-        attached -- replaying a raw hook payload alone can never reproduce a
-        live probe result, so a caller with a durability contract to uphold
-        (``OpenClawRunRecorder``) must persist this return value itself rather
-        than re-deriving it from the event later.
+        Returns exactly the ``{metadata key: payload}`` mapping applied so a
+        durable caller can journal it -- replaying a raw hook payload alone can
+        never reproduce a live probe result, so a caller with a durability
+        contract to uphold (``OpenClawRunRecorder``) must persist this return
+        value itself rather than re-deriving it from the event later.
         """
-        result = self.probe()
-        if result is None:
-            return None
-        proof_spec_payload, progress_proof_payload = result
-        event.metadata[_PROOF_SPEC_KEY] = proof_spec_payload
-        event.metadata[_PROGRESS_PROOF_KEY] = progress_proof_payload
-        return result
+        payloads = self.probe()
+        for key in PROOF_METADATA_KEYS:
+            event.metadata.pop(key, None)
+        event.metadata.update(payloads)
+        return payloads
+
+
+def _log_no_proof(category: str) -> None:
+    logger.warning("progress_proof probe %s; no proof this tick", category)
 
 
 def build_producer(
@@ -206,3 +290,17 @@ def build_producer(
         probe_command=probe_command,
         timeout_seconds=timeout_seconds,
     )
+
+
+def producer_from_config(config: PathlayerConfig) -> ProgressProofProducer | None:
+    """The producer ``config.detectors.progress_proof`` describes, or ``None`` if disabled.
+
+    For integrations that run the probe themselves -- ``LangGraphAdapter``'s
+    ``progress_proof`` argument (ANC-4) -- so they build the exact producer
+    ``build_pipeline`` validated, from the same section. Raises
+    :class:`ManifestError` like :func:`build_producer`.
+    """
+    section = config.detectors.progress_proof
+    if not section.enabled:
+        return None
+    return build_producer(section.manifest_path, section.probe_command, section.timeout_seconds)

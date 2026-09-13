@@ -21,7 +21,7 @@ from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
 from pathlayer.adapters.openclaw_run_store import RunStore
 from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.proof import ProofProgressAnchor
+from pathlayer.detectors.proof import ProofProgressAnchor, validate_unobserved_marker
 from pathlayer.detectors.proof_producer import (
     ManifestError,
     build_producer,
@@ -143,6 +143,14 @@ def test_build_producer_end_to_end(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _assert_unobserved_only(payloads: dict[str, dict[str, object]]) -> None:
+    """A failed probe attaches the spec and a marker naming every required id."""
+    assert set(payloads) == {"proof_spec", "progress_proof_unobserved"}
+    marker = validate_unobserved_marker(payloads["progress_proof_unobserved"])
+    assert marker is not None
+    assert list(marker.unobserved) == payloads["proof_spec"]["required"]
+
+
 def test_probe_success_increments_sequence(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path, required=("done",))
     probe_command = _static_probe(tmp_path, {"done": True})
@@ -150,39 +158,37 @@ def test_probe_success_increments_sequence(tmp_path: Path) -> None:
 
     first = producer.probe()
     second = producer.probe()
-    assert first is not None and second is not None
-    _, first_proof = first
-    _, second_proof = second
-    assert first_proof["sequence"] == 1
-    assert second_proof["sequence"] == 2
-    assert first_proof["checkpoints"] == {"done": True}
+    assert set(first) == set(second) == {"proof_spec", "progress_proof"}
+    assert first["progress_proof"]["sequence"] == 1
+    assert second["progress_proof"]["sequence"] == 2
+    assert first["progress_proof"]["checkpoints"] == {"done": True}
 
 
 def test_probe_nonzero_exit_is_inert(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path)
     script = _probe_script(tmp_path, "import sys; sys.exit(1)")
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 5.0)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_probe_timeout_is_inert(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path)
     script = _probe_script(tmp_path, "import time; time.sleep(5)")
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 0.05)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_probe_malformed_stdout_is_inert(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path)
     script = _probe_script(tmp_path, "print('not json')")
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 5.0)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_probe_missing_binary_is_inert(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path)
     producer = build_producer(str(manifest_path), ("/no/such/binary-anc2",), 5.0)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_probe_non_utf8_stdout_is_inert(tmp_path: Path) -> None:
@@ -192,7 +198,7 @@ def test_probe_non_utf8_stdout_is_inert(tmp_path: Path) -> None:
         tmp_path, "import sys; sys.stdout.buffer.write(b'\\xff\\xfe'); sys.stdout.buffer.flush()"
     )
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 5.0)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_probe_sequence_is_thread_safe(tmp_path: Path) -> None:
@@ -207,9 +213,7 @@ def test_probe_sequence_is_thread_safe(tmp_path: Path) -> None:
     lock = threading.Lock()
 
     def _call() -> None:
-        result = producer.probe()
-        assert result is not None
-        _, progress_proof = result
+        progress_proof = producer.probe()["progress_proof"]
         with lock:
             sequences.append(progress_proof["sequence"])
 
@@ -226,10 +230,7 @@ def test_probe_drops_checkpoints_outside_required(tmp_path: Path) -> None:
     manifest_path = _manifest(tmp_path, required=("done",))
     probe_command = _static_probe(tmp_path, {"done": True, "unrelated": True})
     producer = build_producer(str(manifest_path), probe_command, 5.0)
-    result = producer.probe()
-    assert result is not None
-    _, progress_proof = result
-    assert progress_proof["checkpoints"] == {"done": True}
+    assert producer.probe()["progress_proof"]["checkpoints"] == {"done": True}
 
 
 def test_probe_rejects_whole_payload_on_one_malformed_checkpoint(tmp_path: Path) -> None:
@@ -241,7 +242,7 @@ def test_probe_rejects_whole_payload_on_one_malformed_checkpoint(tmp_path: Path)
         'import json, sys; json.dump({"checkpoints": {"done": True, "broken": "yes"}}, sys.stdout)',
     )
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 5.0)
-    assert producer.probe() is None
+    _assert_unobserved_only(producer.probe())
 
 
 def test_attach_writes_metadata_not_result(tmp_path: Path) -> None:
@@ -258,14 +259,24 @@ def test_attach_writes_metadata_not_result(tmp_path: Path) -> None:
     assert event.metadata["progress_proof"]["checkpoints"] == {"done": True}
 
 
-def test_attach_is_noop_on_probe_failure(tmp_path: Path) -> None:
+def test_attach_writes_an_unobserved_marker_on_probe_failure(tmp_path: Path) -> None:
+    """ANC-4: a failed probe leaves an explicit marker, never silence, so the
+    anchor sees a gap for this tick instead of freezing its last level."""
     manifest_path = _manifest(tmp_path)
     script = _probe_script(tmp_path, "import sys; sys.exit(1)")
     producer = build_producer(str(manifest_path), (sys.executable, str(script)), 5.0)
 
     event = ToolEvent(tool="write_file")
-    producer.attach(event)
-    assert event.metadata == {}
+    attached = producer.attach(event)
+    assert set(event.metadata) == {"proof_spec", "progress_proof_unobserved"}
+    assert event.metadata == attached
+    assert event.metadata["progress_proof_unobserved"] == {
+        "spec_hash": producer.spec_hash,
+        "unobserved": ["done"],
+        "reason": "exited with status 1",
+    }
+    assert validate_unobserved_marker(event.metadata["progress_proof_unobserved"]) is not None
+    assert producer.probe()["progress_proof_unobserved"]["reason"] == "exited with status 1"
 
 
 # --------------------------------------------------------------------------- #
@@ -520,3 +531,127 @@ def test_restore_counts_proof_sidecar_when_manifest_lags(tmp_path: Path) -> None
     records = [json.loads(line) for line in run.raw_events_path.read_text().splitlines()]
     assert [record["sequence"] for record in records] == list(range(1, len(records) + 1))
     assert run.read_manifest()["event_count"] == len(records)
+
+
+def test_failed_probe_marker_is_durably_journaled_and_restored(tmp_path: Path) -> None:
+    """ANC-4: a probe outage leaves a ``progress_proof_unobserved`` marker on
+    the live event. It must reach the sidecar and be restored like a proof,
+    or the resumed run's reconstructed event diverges from the one a live
+    ``PersistentPipeline`` committed (``StateConcurrencyError``)."""
+    runs_root = tmp_path / "runs"
+    counter_path = tmp_path / "counter"
+    manifest_path = _manifest(tmp_path, required=("done",))
+    script = _probe_script(
+        tmp_path,
+        f"""
+        import json, sys
+        path = {str(counter_path)!r}
+        try:
+            n = int(open(path).read())
+        except FileNotFoundError:
+            n = 0
+        open(path, "w").write(str(n + 1))
+        if n >= 1:
+            sys.exit(4)
+        json.dump({{"checkpoints": {{"done": False}}}}, sys.stdout)
+        """,
+    )
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "progress_proof": {
+                    "enabled": True,
+                    "manifest_path": str(manifest_path),
+                    "probe_command": [sys.executable, str(script)],
+                }
+            }
+        }
+    )
+
+    recorder = OpenClawRunRecorder(runs_root, config=config)
+    recorder.process_payload(_before("run-gap"))
+    recorder.process_payload(_tool("run-gap", tool_call_id="call-1"))
+    recorder.process_payload(_tool("run-gap", tool_call_id="call-2"))
+    live = recorder._runs["run-gap"].events
+    assert (
+        "progress_proof" in live[0].metadata and "progress_proof_unobserved" not in live[0].metadata
+    )
+    assert "progress_proof" not in live[1].metadata and "proof_spec" in live[1].metadata
+    assert live[1].metadata["progress_proof_unobserved"]["reason"] == "exited with status 4"
+
+    run = RunStore(runs_root).resolve_run("run-gap")
+    assert run is not None
+    records = [json.loads(line) for line in run.raw_events_path.read_text().splitlines()]
+    sidecars = [r["payload"] for r in records if r.get("hook") == "pathlayer_progress_proof"]
+    assert [s["for_event_id"] for s in sidecars] == ["openclaw:2:0", "openclaw:4:0"]
+    assert sidecars[1]["progress_proof_unobserved"] == live[1].metadata["progress_proof_unobserved"]
+    assert "progress_proof" not in sidecars[1]
+
+    restarted = OpenClawRunRecorder(runs_root, config=config)
+    restarted.startup()
+    assert counter_path.read_text(encoding="utf-8") == "2"  # never re-probed
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest.get("persistence_error") is None
+    assert manifest.get("state_durable") is not False
+
+
+def test_partial_observation_sidecar_carries_both_payloads_and_restores(
+    tmp_path: Path,
+) -> None:
+    """A partial observation journals the proof *and* the marker in one sidecar;
+    restore must re-apply both, or the resumed event diverges from the one a
+    live ``PersistentPipeline`` committed. (A proof-enabled run journaled
+    before ANC-4 is not resumed at all: its fingerprint no longer matches, see
+    ``tests/test_anc4_state_semantics.py``.)"""
+    runs_root = tmp_path / "runs"
+    manifest_path = _manifest(tmp_path, required=("done", "tested"))
+    config = PathlayerConfig.from_mapping(
+        {
+            "detectors": {
+                "progress_proof": {
+                    "enabled": True,
+                    "manifest_path": str(manifest_path),
+                    "probe_command": list(_static_probe(tmp_path, {"done": True})),
+                }
+            }
+        }
+    )
+    recorder = OpenClawRunRecorder(runs_root, config=config)
+    recorder.process_payload(_before("run-partial"))
+    recorder.process_payload(_tool("run-partial"))
+    live = recorder._runs["run-partial"].events[0].metadata
+    assert live["progress_proof"]["checkpoints"] == {"done": True}
+    assert live["progress_proof_unobserved"]["unobserved"] == ["tested"]
+
+    run = RunStore(runs_root).resolve_run("run-partial")
+    assert run is not None
+    records = [json.loads(line) for line in run.raw_events_path.read_text().splitlines()]
+    (sidecar,) = [r["payload"] for r in records if r.get("hook") == "pathlayer_progress_proof"]
+    assert {key: sidecar[key] for key in live if key in sidecar} == {
+        key: live[key] for key in ("proof_spec", "progress_proof", "progress_proof_unobserved")
+    }
+
+    restarted = OpenClawRunRecorder(runs_root, config=config)
+    restarted.startup()
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest.get("persistence_error") is None
+    assert manifest.get("state_durable") is not False
+
+
+def test_attach_replaces_every_proof_key_it_owns(tmp_path: Path) -> None:
+    """The event carries exactly what attach() returned (what a durable caller
+    journals), even when it already held proof keys."""
+    manifest_path = _manifest(tmp_path, required=("done",))
+    producer = build_producer(str(manifest_path), _static_probe(tmp_path, {"done": True}), 5.0)
+    event = ToolEvent(
+        tool="write_file",
+        metadata={
+            "parent_run_id": "p",
+            "progress_proof_unobserved": {"spec_hash": "stale", "unobserved": ["x"], "reason": "r"},
+        },
+    )
+    attached = producer.attach(event)
+    assert set(attached) == {"proof_spec", "progress_proof"}
+    assert event.metadata == {"parent_run_id": "p", **attached}

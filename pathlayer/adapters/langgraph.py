@@ -28,6 +28,16 @@ the (possibly non-thread-safe) downstream sink sees one event at a time and the
 which calls *complete*, which under genuinely parallel tools may differ from the
 order in which they started.
 
+Progress proofs (ANC-4): given a ``progress_proof`` producer (ANC-2), the
+adapter runs its probe once after every ``TOOL_CALL`` ends -- errors included,
+never for progress summaries or LLM calls -- and attaches the proof to that
+event's ``metadata``, as the OpenClaw recorder does. The probe runs inside the
+same lock as emission, so emission order, ``ts`` order and the proof
+``sequence`` order always agree; the price is that the tool callback, and so
+the agent step, waits for the probe. A failing probe yields an event without a
+proof (ANC-2's fail-soft contract); an unexpected producer error is logged and
+never reaches the agent. Replays read the recorded proof and never re-probe.
+
 This module imports ``langchain_core`` and so is an **optional** import: install
 the ``langgraph`` extra (``pip install pathlayer[langgraph]``). It is
 deliberately *not* re-exported from :mod:`pathlayer.adapters`.
@@ -36,6 +46,7 @@ deliberately *not* re-exported from :mod:`pathlayer.adapters`.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -48,9 +59,13 @@ from langchain_core.messages import ToolMessage
 from langchain_core.outputs import LLMResult
 
 from pathlayer.adapters.base import Adapter, EventSink, RunAwareEventSink
+from pathlayer.detectors.proof import PROOF_METADATA_KEYS
+from pathlayer.detectors.proof_producer import ProgressProofProducer
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
 from pathlayer.state_evidence import StateCapture, StateEvidenceProducer
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pathlayer.config import PathlayerConfig
@@ -208,6 +223,10 @@ class LangGraphAdapter(Adapter):
 
     Pass :meth:`as_config` into any ``invoke``/``ainvoke`` call so LangChain
     routes its callbacks to this adapter's handler.
+
+    ``progress_proof`` is the ANC-2 producer to run after every tool call
+    (see the module docstring); build it from a config with
+    :func:`~pathlayer.detectors.proof_producer.producer_from_config`.
     """
 
     def __init__(
@@ -216,6 +235,7 @@ class LangGraphAdapter(Adapter):
         prices: Mapping[str, ModelPrice] | None = None,
         *,
         state_evidence: StateEvidenceProducer | None = None,
+        progress_proof: ProgressProofProducer | None = None,
     ) -> None:
         super().__init__(sink)
         self._handler = _LangChainCaptureHandler(self)
@@ -225,6 +245,7 @@ class LangGraphAdapter(Adapter):
         self._ts = 0
         self._prices = prices
         self._state_evidence = state_evidence
+        self._progress_proof = progress_proof
 
     @classmethod
     def from_config(
@@ -331,7 +352,27 @@ class LangGraphAdapter(Adapter):
             )
             if self._state_evidence is not None and pending.state_capture is not None:
                 event = self._state_evidence.attach_after(event, pending.state_capture)
+            if self._progress_proof is not None and pending.kind is EventKind.TOOL_CALL:
+                self._attach_progress_proof(self._progress_proof, event)
             self.emit(event)
+
+    @staticmethod
+    def _attach_progress_proof(producer: ProgressProofProducer, event: ToolEvent) -> None:
+        """Probe after the tool's effect; a producer error never reaches the agent.
+
+        ``ProgressProofProducer.attach`` is fail-soft by contract (a probe
+        failure attaches an unobserved marker, never raises). This guard
+        covers a regression or a subclass that raises anyway: the event is
+        still emitted, without a partial proof or marker.
+        """
+        try:
+            producer.attach(event)
+        except Exception:
+            for key in PROOF_METADATA_KEYS:
+                event.metadata.pop(key, None)
+            logger.warning(
+                "progress_proof producer raised; event emitted without a proof", exc_info=True
+            )
 
     def _record_llm_start(self, run_id: str, parent_run_id: str | None, model: str | None) -> None:
         self._start_root(parent_run_id)

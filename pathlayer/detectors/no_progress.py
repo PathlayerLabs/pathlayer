@@ -65,6 +65,17 @@ require the agent to already be judged stalled. This never feeds arbitration
 the existing OBS-1 logging, a condition that was previously absorbed with no
 trace at all.
 
+ANC-4 -- a lost measurement holds the detector. An anchor may report
+:meth:`~pathlayer.detectors.progress.ProgressAnchor.is_unavailable` (it was
+measuring, and its producer observed nothing this time -- a probe that timed
+out, tests that can no longer be collected). Its level is then a gap, which
+resets its own patience, and the detector stays silent on that event whatever
+its other anchors say. Dropping the anchor from the optimistic aggregation
+instead would let a co-anchor's long-flat level decide alone the moment the
+measurement fails, stopping an agent whose progress (or reached objective) only
+that anchor could see. Equivalently: a reset anchor contributes zero patience
+to the ``min``. The price is recall during the outage, never precision.
+
 PERF-2 -- incremental fold: ``evaluate`` above stays the pure specification for
 every anchor actually shipped here. :meth:`create_state`/:meth:`step` below are
 a *faster equivalent* implementation of that same contract, verified
@@ -248,6 +259,7 @@ class NoProgressDetector(Detector):
         next_runtimes: list[_AnchorRuntime] = []
         applicable_cusums: list[float] = []
         any_satisfied = False
+        any_unavailable = False
         diagnostics: list[str] = []
         for anchor, runtime in zip(self._anchors, state.runtimes, strict=True):
             new_anchor_state, snapshot = anchor.step(runtime.anchor_state, event)
@@ -257,12 +269,14 @@ class NoProgressDetector(Detector):
                 runtime.entries, runtime.count, self._window, snapshot.level
             )
             next_runtimes.append(_AnchorRuntime(new_anchor_state, new_entries, new_count))
+            if snapshot.unavailable:
+                any_unavailable = True
             if snapshot.level is not None:
                 applicable_cusums.append(self._stagnation_table[stalled])
                 if snapshot.satisfied:
                     any_satisfied = True
         anchor_diagnostics = tuple(diagnostics)
-        if not applicable_cusums or any_satisfied:
+        if not applicable_cusums or any_satisfied or any_unavailable:
             signal = Signal(self.name, confidence=0.0, diagnostics=anchor_diagnostics)
         else:
             cumulative = min(applicable_cusums)
@@ -288,6 +302,10 @@ class NoProgressDetector(Detector):
             for anchor in self._anchors
             for message in anchor.diagnose(history)
         )
+        # ANC-4: an anchor that lost its measurement at this event holds the
+        # detector silent (see the module docstring), whatever the others say.
+        if any(anchor.is_unavailable(history) for anchor in self._anchors):
+            return Signal(self.name, confidence=0.0, diagnostics=diagnostics)
         # An anchor is applicable iff it has an opinion on the full history.
         applicable = [anchor for anchor in self._anchors if anchor.measure(history) is not None]
         if not applicable:

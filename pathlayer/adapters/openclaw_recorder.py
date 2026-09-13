@@ -74,7 +74,7 @@ from pathlayer.adapters.openclaw_run_store import (
 )
 from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
 from pathlayer.detectors.budget import BudgetDetector, BudgetState
-from pathlayer.detectors.proof import _PROGRESS_PROOF_KEY, _PROOF_SPEC_KEY
+from pathlayer.detectors.proof import PROOF_METADATA_KEYS
 from pathlayer.detectors.proof_producer import ProgressProofProducer, build_producer
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
@@ -764,7 +764,10 @@ class OpenClawRunRecorder:
         if not directory.raw_events_path.is_file():
             return 0, []
         lines = directory.raw_events_path.read_text(encoding="utf-8").splitlines()
-        proofs_by_event_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        # Whichever of PROOF_METADATA_KEYS the sidecar carries: a proof, a
+        # proof plus an unobserved marker, or (ANC-4) a marker alone. Sidecars
+        # journaled before the marker existed carry the first two keys only.
+        proofs_by_event_id: dict[str, dict[str, dict[str, Any]]] = {}
         for line in lines:
             try:
                 record = json.loads(line)
@@ -776,14 +779,17 @@ class OpenClawRunRecorder:
             if not isinstance(sidecar, dict):
                 continue
             event_id = sidecar.get("for_event_id")
-            proof_spec_payload = sidecar.get(_PROOF_SPEC_KEY)
-            progress_proof_payload = sidecar.get(_PROGRESS_PROOF_KEY)
-            if (
-                isinstance(event_id, str)
-                and isinstance(proof_spec_payload, dict)
-                and isinstance(progress_proof_payload, dict)
-            ):
-                proofs_by_event_id[event_id] = (proof_spec_payload, progress_proof_payload)
+            # In the sidecar's own order, which is the order attach() wrote the
+            # keys into the live event: the durable event codec preserves
+            # mapping order, so any other order makes the restored event
+            # differ from the committed one (StateConcurrencyError).
+            payloads = {
+                key: value
+                for key, value in sidecar.items()
+                if key in PROOF_METADATA_KEYS and isinstance(value, dict)
+            }
+            if isinstance(event_id, str) and payloads:
+                proofs_by_event_id[event_id] = payloads
 
         sequence = 0
         events: list[ToolEvent] = []
@@ -830,11 +836,9 @@ class OpenClawRunRecorder:
             for offset, event in enumerate(translated):
                 event.ts = float(len(events))
                 event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
-                proof = proofs_by_event_id.get(event_id)
-                if proof is not None:
-                    proof_spec_payload, progress_proof_payload = proof
-                    event.metadata[_PROOF_SPEC_KEY] = proof_spec_payload
-                    event.metadata[_PROGRESS_PROOF_KEY] = progress_proof_payload
+                journaled = proofs_by_event_id.get(event_id)
+                if journaled is not None:
+                    event.metadata.update(journaled)
                 events.append(event)
                 if not pipeline.stopped:
                     _process_pipeline(pipeline, event, event_id)
@@ -1135,25 +1139,20 @@ class OpenClawRunRecorder:
             # nothing reads.
             if self._proof_producer is not None and not active.pipeline.stopped:
                 attached = self._proof_producer.attach(event)
-                if attached is not None:
-                    proof_spec_payload, progress_proof_payload = attached
-                    # A raw-journal replay can never re-derive a live probe
-                    # result (nor should it re-invoke the probe -- see
-                    # _restore_recorded_events). Durably journal exactly what
-                    # was attached as its own sidecar record, correlated by
-                    # event_id, so a resumed run reconstructs the identical
-                    # enriched event a live PersistentPipeline already
-                    # committed -- otherwise the idempotency check in
-                    # store.py's duplicate-tick comparison sees a mismatch and
-                    # raises StateConcurrencyError.
+                # A raw-journal replay can never re-derive a live probe
+                # result (nor should it re-invoke the probe -- see
+                # _restore_recorded_events). Durably journal exactly what was
+                # attached -- a proof, or (ANC-4) the unobserved marker a
+                # failed probe leaves instead -- as its own sidecar record,
+                # correlated by event_id, so a resumed run reconstructs the
+                # identical enriched event a live PersistentPipeline already
+                # committed -- otherwise the idempotency check in store.py's
+                # duplicate-tick comparison sees a mismatch and raises
+                # StateConcurrencyError.
+                if attached:
                     self._append_raw(
                         active,
-                        {
-                            "hook": _PROOF_HOOK,
-                            "for_event_id": event_id,
-                            _PROOF_SPEC_KEY: proof_spec_payload,
-                            _PROGRESS_PROOF_KEY: progress_proof_payload,
-                        },
+                        {"hook": _PROOF_HOOK, "for_event_id": event_id, **attached},
                         internal_lifecycle=True,
                     )
             if not self._process_captured_event(active, record, event, event_id):

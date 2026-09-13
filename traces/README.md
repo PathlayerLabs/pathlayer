@@ -122,6 +122,12 @@ VAL-4/VAL-5 (later).
 | `healthy/rich_new_target_progress.json` | NOP-5: a new red target progresses locally without competing with an older target's absolute score. |
 | `healthy/rich_legacy_revert_recovers.json` | NOP-5 follow-up: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
 
+### `anc4/` (coding-contract probe outage)
+
+| File | Why it must NOT fire |
+| --- | --- |
+| `anc4/probe_outage_mid_run.json` | ANC-4 (#188): a productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the ANC-3 benchmark seals. |
+
 ## Optional rich test-result contract (NOP-5)
 
 Aggregate ``passed``/``failed`` counts remain supported unchanged. A test tool

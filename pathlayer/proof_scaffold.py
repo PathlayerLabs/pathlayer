@@ -57,6 +57,30 @@ def _spec_payload(spec: ProofSpec) -> dict[str, object]:
     }
 
 
+def _validated_spec(
+    *, task_id: str, proof_id: str, scope_id: str, checkpoints: Sequence[str]
+) -> ProofSpec:
+    """Build the V1 ``checkpoint_set`` spec, or raise :class:`ScaffoldError`."""
+    if isinstance(checkpoints, (str, bytes)):
+        raise ScaffoldError("checkpoints must be a sequence of checkpoint ids, not text")
+    raw_spec = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "proof_id": proof_id,
+        "scope_id": scope_id,
+        "kind": "checkpoint_set",
+        "required": list(checkpoints),
+    }
+    spec = validate_proof_spec(raw_spec)
+    if spec is None:
+        raise ScaffoldError("generated proof_spec failed ANC-1 schema validation")
+    return spec
+
+
+def _manifest_json(spec: ProofSpec) -> str:
+    return json.dumps(_spec_payload(spec), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
 def _quoted(value: object) -> str:
     """Return a deterministic string/list literal valid in JSON and Python."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
@@ -188,26 +212,15 @@ def render_progress_proof_scaffold(
         raise ScaffoldError("name must be a non-empty string")
     if not isinstance(objective, str) or not objective:
         raise ScaffoldError("objective must be a non-empty string")
-    if isinstance(checkpoints, (str, bytes)):
-        raise ScaffoldError("checkpoints must be a sequence of checkpoint ids, not text")
-    raw_spec = {
-        "schema_version": 1,
-        "task_id": task_id,
-        "proof_id": name if proof_id is None else proof_id,
-        "scope_id": task_id if scope_id is None else scope_id,
-        "kind": "checkpoint_set",
-        "required": list(checkpoints),
-    }
-    spec = validate_proof_spec(raw_spec)
-    if spec is None:
-        raise ScaffoldError("generated proof_spec failed ANC-1 schema validation")
-
-    manifest_json = (
-        json.dumps(_spec_payload(spec), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    spec = _validated_spec(
+        task_id=task_id,
+        proof_id=name if proof_id is None else proof_id,
+        scope_id=task_id if scope_id is None else scope_id,
+        checkpoints=checkpoints,
     )
     return ScaffoldBundle(
         proof_spec=spec,
-        manifest_json=manifest_json,
+        manifest_json=_manifest_json(spec),
         probe_python=_render_probe(name=name, objective=objective, required=spec.required),
         readme_markdown=_render_readme(
             name=name,
@@ -242,6 +255,16 @@ def write_progress_proof_scaffold(
         proof_id=proof_id,
         scope_id=scope_id,
     )
+    return _install_bundle(output_dir, bundle)
+
+
+def _install_bundle(output_dir: str | Path, bundle: ScaffoldBundle) -> ScaffoldPaths:
+    """Write an already-rendered bundle's three files, refusing any overwrite.
+
+    Shared by the inert ANC-3 scaffold and the ANC-4 coding-contract compiler
+    (``pathlayer.coding_contracts``), so both get the same preflight,
+    exclusive-create and rollback behaviour from one implementation.
+    """
     destination = Path(output_dir)
     targets = ScaffoldPaths(
         manifest=destination / _MANIFEST_NAME,

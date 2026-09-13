@@ -259,6 +259,45 @@ def _exercise_scaffolder_entrypoint() -> None:
         assert "NotImplementedError" in probe.stderr
 
 
+def _exercise_contract_compiler_entrypoint() -> None:
+    """ANC-4: the installed compiler writes a bundle whose probe runs from the install."""
+    executable_name = (
+        "pathlayer-compile-contract.exe" if os.name == "nt" else "pathlayer-compile-contract"
+    )
+    executable = Path(sys.executable).with_name(executable_name)
+    assert executable.is_file(), f"missing installed entry point: {executable}"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "workspace").mkdir()
+        contract = root / "contract.json"
+        contract.write_text(
+            json.dumps(
+                {
+                    "task": "package-smoke",
+                    "objective": "Verify the installed contract compiler.",
+                    "workspace": "workspace",
+                    "progress": [{"type": "file_exists", "path": "out.txt"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            [str(executable), str(contract), "--output-dir", str(root / "bundle")],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        # The self-check ran the generated probe: it imported the installed package.
+        assert "file_exists:out.txt: false" in completed.stdout, completed.stdout
+        probe = subprocess.run(
+            [sys.executable, str(root / "bundle" / "probe.py")],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert json.loads(probe.stdout) == {"checkpoints": {"file_exists:out.txt": False}}
+
+
 def _exercise_missing_yaml_extra() -> None:
     with tempfile.TemporaryDirectory() as directory:
         config = Path(directory) / "config.yaml"
@@ -312,6 +351,7 @@ def main() -> None:
     _exercise_core()
     _exercise_session_report()
     _exercise_scaffolder_entrypoint()
+    _exercise_contract_compiler_entrypoint()
     if args.readme is not None:
         _exercise_readme(args.readme)
     if args.extras == "core":

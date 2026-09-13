@@ -16,13 +16,15 @@ responsible for business truth.
 
 Trust boundary: the proof this anchor consumes must originate outside the
 observed agent's control -- a self-reported claim is falsifiable. This module
-only poses that constraint in the contract and does *structural* integrity
+enforces one structural half of that boundary: both keys are read from
+``ToolEvent.metadata`` only, never from ``ToolEvent.result`` (the agent's own
+tool output, see :func:`_find`), and it does *structural* integrity
 (recomputing ``spec_hash`` from a co-located ``proof_spec`` and cross-checking
 it against what ``progress_proof`` claims); it proves nothing about
-*provenance*. The hash describes the identity of the rule, not the veracity of
-the source. Wiring a concrete producer that genuinely sits outside agent
-control -- and validating a spec fail-fast before a real run -- is ANC-2's job,
-not this one's. ``ProofProgressAnchor`` is therefore **not** wired into
+*provenance* beyond that. The hash describes the identity of the rule, not
+the veracity of the source. Wiring a concrete producer that genuinely sits
+outside agent control -- and validating a spec fail-fast before a real run --
+is ANC-2's job, not this one's. ``ProofProgressAnchor`` is therefore **not** wired into
 :func:`~pathlayer.detectors.progress.coding_anchors` or
 :func:`~pathlayer.detectors.progress.loop_suppression_anchors`: it changes the
 behaviour of zero existing traces until something explicitly constructs and
@@ -49,14 +51,44 @@ currently accepted"), not a test that, once green, stays credited forever.
 
 A malformed or out-of-order proof is *inert*, never sticky: one degraded event
 never erases or resets an established level, mirroring
-``_rich_test_result``'s "a malformed rich claim is inert" convention. The one
-case that *does* reset (to ``None``, a gap) is a genuine epoch transition -- a
-proof for a different ``spec_hash`` than the currently active one -- so
-``NoProgressDetector``'s CUSUM re-baselines instead of comparing two unrelated
-scales. No code change to ``no_progress.py`` is needed for this: its
+``_rich_test_result``'s "a malformed rich claim is inert" convention. Two
+cases *do* emit a gap (a ``None`` level for that one tick), so
+``NoProgressDetector``'s CUSUM re-baselines instead of counting the tick as
+one more step without progress:
+
+- a genuine epoch transition -- a proof for a different ``spec_hash`` than the
+  currently active one -- where the two levels live on unrelated scales;
+- an explicit ``progress_proof_unobserved`` marker (ANC-4): the producer ran
+  its probe and could *not* observe one or more required checkpoints (probe
+  timed out, test module no longer importable, interpreter gone...). Without
+  the marker the anchor kept its last known level and a probe outage of ~10
+  tool calls in the middle of a productive run ended in a STOP -- the
+  "freeze" ANC-4 initially documented as a known limit. A failed measurement
+  must never, on its own, stop an agent: this is the same rule VAL-5's
+  ``StateEvidenceProgressAnchor`` applies to unavailable evidence. The marker
+  carries no ``sequence`` and never switches epoch: the checkpoint ledger is
+  kept intact, a marker for another ``spec_hash`` is inert, and a proof that
+  arrives in the same event (a *partial* observation) is folded into the
+  ledger before the gap is emitted.
+
+A marker for the epoch being measured also flags the snapshot
+``unavailable`` (:meth:`ProofProgressAnchor.is_unavailable`), and
+``NoProgressDetector`` stays silent on that tick whatever its other anchors
+say. A plain gap would drop this anchor from the optimistic aggregation, so
+with ``build_pipeline``'s coding anchors alongside, a long-flat exit-code or
+test level would decide alone the moment the probe failed -- stopping, on
+the first unobserved call, an agent whose progress or reached objective only
+the proof could see. A marker before any epoch (a probe that never worked)
+leaves the anchor merely inapplicable: the other anchors decide as without a
+contract. The price is recall during the outage: an agent that stays stuck
+while its probe keeps failing is left to the other detectors.
+
+A gap changes nothing in ``no_progress.py``'s patience bookkeeping: its
 ``_push_level``/``_cusum`` already treat any anchor's ``None`` as "lost
 baseline, reset" (see their docstrings), and this anchor never emits
-``NaN``/``inf``.
+``NaN``/``inf``. A tick with no producer payload at all (no proof, no marker)
+is unchanged: the last known level is reported, as for any anchor between two
+observations.
 """
 
 from __future__ import annotations
@@ -71,6 +103,9 @@ from pathlayer.store import _canonical_sha256
 
 _PROOF_SPEC_KEY = "proof_spec"
 _PROGRESS_PROOF_KEY = "progress_proof"
+_PROGRESS_PROOF_UNOBSERVED_KEY = "progress_proof_unobserved"
+# Every metadata key the ANC-2 producer may write; adapters strip exactly these.
+PROOF_METADATA_KEYS = (_PROOF_SPEC_KEY, _PROGRESS_PROOF_KEY, _PROGRESS_PROOF_UNOBSERVED_KEY)
 
 _CHECKPOINT_SET_KIND = "checkpoint_set"
 _SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
@@ -90,6 +125,9 @@ _MAX_CHECKPOINT_ID_LENGTH = 256
 _MAX_REQUIRED_CHECKPOINTS = 256
 _MAX_CHECKPOINTS_PER_PROOF = 256
 _MAX_TRACKED_SPEC_HASHES = 256
+_MAX_UNOBSERVED_REASON_LENGTH = 256
+# Bounds the checkpoint ids echoed in one gap diagnostic (OBS-1 logs them).
+_MAX_DIAGNOSED_CHECKPOINTS = 5
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,6 +149,20 @@ class ProgressProof:
     spec_hash: str
     sequence: int
     checkpoints: tuple[tuple[str, bool], ...]
+
+
+@dataclass(slots=True, frozen=True)
+class UnobservedMarker:
+    """Validated ``progress_proof_unobserved`` marker (ANC-4). See module docstring.
+
+    ``unobserved`` names the required checkpoints the probe could not observe
+    this tick; ``reason`` is the producer's fixed-vocabulary category, never
+    the probe's own output.
+    """
+
+    spec_hash: str
+    unobserved: tuple[str, ...]
+    reason: str
 
 
 def validate_proof_spec(raw: Any) -> ProofSpec | None:
@@ -221,6 +273,42 @@ def validate_progress_proof(raw: Any) -> ProgressProof | None:
     )
 
 
+def validate_unobserved_marker(raw: Any) -> UnobservedMarker | None:
+    """Structurally validate a raw ``progress_proof_unobserved`` mapping; ``None`` if invalid.
+
+    Closed schema: exactly ``{spec_hash, unobserved, reason}``. Deliberately
+    carries no ``sequence``: a marker is not a revision of the checkpoint
+    ledger, only a statement that this tick measured nothing for the listed
+    ids. Never raises.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    if set(raw) != {"spec_hash", "unobserved", "reason"}:
+        return None
+    spec_hash = raw["spec_hash"]
+    if not isinstance(spec_hash, str) or not _is_well_formed_spec_hash(spec_hash):
+        return None
+    unobserved = raw["unobserved"]
+    if not isinstance(unobserved, Sequence) or isinstance(unobserved, (str, bytes)):
+        return None
+    if not unobserved or len(unobserved) > _MAX_REQUIRED_CHECKPOINTS:
+        return None
+    seen: set[str] = set()
+    for checkpoint_id in unobserved:
+        if (
+            not isinstance(checkpoint_id, str)
+            or not checkpoint_id
+            or len(checkpoint_id) > _MAX_CHECKPOINT_ID_LENGTH
+            or checkpoint_id in seen
+        ):
+            return None
+        seen.add(checkpoint_id)
+    reason = raw["reason"]
+    if not isinstance(reason, str) or not reason or len(reason) > _MAX_UNOBSERVED_REASON_LENGTH:
+        return None
+    return UnobservedMarker(spec_hash=spec_hash, unobserved=tuple(sorted(seen)), reason=reason)
+
+
 def _is_well_formed_spec_hash(value: str) -> bool:
     if not value.startswith(_SPEC_HASH_ALGORITHM_PREFIX):
         return False
@@ -251,21 +339,21 @@ def compute_spec_hash(spec: ProofSpec) -> str:
 
 
 def _find(event: ToolEvent, key: str) -> Any:
-    """Look up ``key`` in ``event.result``, then ``event.metadata``.
+    """Look up ``key`` in ``event.metadata`` -- and only there.
 
-    Deliberately resolves each key independently rather than picking one
-    whole-mapping "source" the way ``pathlayer.detectors.progress``'s private
-    ``_evidence`` does for a single payload (``test_outcomes``, ``exit_code``,
-    ...): ``proof_spec`` and ``progress_proof`` are two independent keys that
-    may legitimately be attached to different sources by a producer -- e.g. an
-    adapter writing ``progress_proof`` into ``event.metadata`` while the
-    agent's own tool ``result`` carries an unrelated (or non-``Mapping``, e.g.
-    multimodal-list) payload. Resolving per-key means neither half is ever
-    silently dropped just because it landed on the other side of one event.
+    ``event.result`` is the observed agent's own tool output; ``event.metadata``
+    is what an adapter or the ANC-2 producer writes from *outside* the agent's
+    control. Reading the proof from ``result`` (as this helper once did, and
+    before ``metadata``) let a tool that merely returned
+    ``{"progress_proof": {...}}`` replace the producer's observation with a
+    satisfied one and silence ``no_progress`` for the rest of the run -- the
+    ``spec_hash`` it needs is a deterministic function of the manifest. The
+    same boundary ARCH-2 applies to ``pathlayer_state_evidence`` applies here:
+    a self-reported claim is not a proof.
+
+    Each key is still resolved independently (``proof_spec`` and
+    ``progress_proof`` are two independent keys), just never across sources.
     """
-    result = event.result
-    if isinstance(result, Mapping) and key in result:
-        return result[key]
     if key in event.metadata:
         return event.metadata[key]
     return None
@@ -360,85 +448,106 @@ class _ProofAnchorState(AnchorState):
     def advance(self, event: ToolEvent) -> tuple[_ProofAnchorState, AnchorSnapshot]:
         raw_spec = _find(event, _PROOF_SPEC_KEY)
         raw_proof = _find(event, _PROGRESS_PROOF_KEY)
-        if raw_spec is None and raw_proof is None:
+        raw_marker = _find(event, _PROGRESS_PROOF_UNOBSERVED_KEY)
+        if raw_spec is None and raw_proof is None and raw_marker is None:
             return self, self._snapshot()
 
         diagnostics: list[str] = []
+        known_specs, fresh_spec_hash = self._register_spec(raw_spec, diagnostics)
+        active, gap = self._fold_proof(raw_proof, known_specs, fresh_spec_hash, diagnostics)
+        marker_applies = _apply_marker(raw_marker, active, diagnostics)
+        # Only an epoch that was being measured can lose its measurement; a
+        # marker before any epoch (a probe that never worked) leaves the anchor
+        # merely inapplicable, so the other anchors decide as without it.
+        unavailable = marker_applies and active is not None
+
+        new_state = _ProofAnchorState(known_specs=known_specs, active=active)
+        if gap or marker_applies:
+            return new_state, AnchorSnapshot(
+                level=None,
+                satisfied=False,
+                diagnostics=tuple(diagnostics),
+                unavailable=unavailable,
+            )
+        return new_state, new_state._snapshot(diagnostics=tuple(diagnostics))
+
+    def _register_spec(
+        self, raw_spec: Any, diagnostics: list[str]
+    ) -> tuple[tuple[tuple[str, ProofSpec], ...], str | None]:
+        """Cache a valid co-located ``proof_spec``: ``(known_specs, its hash or None)``.
+
+        The hash is returned even when the cache is full or already holds it,
+        so a co-located ``progress_proof`` can still be cross-checked against it.
+        """
         known_specs = self.known_specs
-        fresh_spec_hash: str | None = None
+        if raw_spec is None:
+            return known_specs, None
+        spec = validate_proof_spec(raw_spec)
+        if spec is None:
+            diagnostics.append("malformed proof_spec ignored")
+            return known_specs, None
+        spec_hash = compute_spec_hash(spec)
+        if _lookup_spec(known_specs, spec_hash) is not None:
+            return known_specs, spec_hash
+        if len(known_specs) >= _MAX_TRACKED_SPEC_HASHES:
+            diagnostics.append(
+                f"spec capacity ({_MAX_TRACKED_SPEC_HASHES}) reached; "
+                f"spec_hash {spec_hash!r} ignored"
+            )
+            return known_specs, spec_hash
+        return (*known_specs, (spec_hash, spec)), spec_hash
 
-        if raw_spec is not None:
-            spec = validate_proof_spec(raw_spec)
-            if spec is None:
-                diagnostics.append("malformed proof_spec ignored")
-            else:
-                fresh_spec_hash = compute_spec_hash(spec)
-                if _lookup_spec(known_specs, fresh_spec_hash) is None:
-                    if len(known_specs) >= _MAX_TRACKED_SPEC_HASHES:
-                        diagnostics.append(
-                            f"spec capacity ({_MAX_TRACKED_SPEC_HASHES}) reached; "
-                            f"spec_hash {fresh_spec_hash!r} ignored"
-                        )
-                    else:
-                        known_specs = (*known_specs, (fresh_spec_hash, spec))
-
-        def _settle(
-            active: _ProofEpoch | None, *, gap: bool = False
-        ) -> tuple[_ProofAnchorState, AnchorSnapshot]:
-            new_state = _ProofAnchorState(known_specs=known_specs, active=active)
-            if gap:
-                return new_state, AnchorSnapshot(
-                    level=None, satisfied=False, diagnostics=tuple(diagnostics)
-                )
-            return new_state, new_state._snapshot(diagnostics=tuple(diagnostics))
-
+    def _fold_proof(
+        self,
+        raw_proof: Any,
+        known_specs: tuple[tuple[str, ProofSpec], ...],
+        fresh_spec_hash: str | None,
+        diagnostics: list[str],
+    ) -> tuple[_ProofEpoch | None, bool]:
+        """Fold one ``progress_proof`` into the active epoch: ``(active, gap)``."""
+        active = self.active
         if raw_proof is None:
-            return _settle(self.active)
+            return active, False
 
         proof = validate_progress_proof(raw_proof)
         if proof is None:
             diagnostics.append("malformed progress_proof ignored")
-            return _settle(self.active)
+            return active, False
 
         if fresh_spec_hash is not None and fresh_spec_hash != proof.spec_hash:
             diagnostics.append(
                 "proof_spec/progress_proof spec_hash mismatch ignored "
                 f"(spec hashes to {fresh_spec_hash!r}, proof claims {proof.spec_hash!r})"
             )
-            return _settle(self.active)
+            return active, False
 
         spec = _lookup_spec(known_specs, proof.spec_hash)
         if spec is None:
             diagnostics.append(
                 f"spec_hash {proof.spec_hash!r}: no known proof_spec; progress_proof ignored"
             )
-            return _settle(self.active)
+            return active, False
 
-        active = self.active
         if active is None:
             # True first-ever epoch: report its real baseline immediately, no
             # gap -- there is no prior epoch to lose.
-            new_active = _apply_proof(
-                _ProofEpoch(spec_hash=proof.spec_hash, required=spec.required), proof
-            )
-            return _settle(new_active)
+            fresh = _ProofEpoch(spec_hash=proof.spec_hash, required=spec.required)
+            return _apply_proof(fresh, proof), False
 
         if active.spec_hash != proof.spec_hash:
             # Epoch transition: gap this tick unconditionally so
             # NoProgressDetector's CUSUM resets instead of comparing this
             # epoch's level against the abandoned one's unrelated scale. The
             # new epoch is already active for the *next* tick's baseline.
-            new_active = _apply_proof(
-                _ProofEpoch(spec_hash=proof.spec_hash, required=spec.required), proof
-            )
-            return _settle(new_active, gap=True)
+            fresh = _ProofEpoch(spec_hash=proof.spec_hash, required=spec.required)
+            return _apply_proof(fresh, proof), True
 
         if proof.sequence < active.last_sequence:
             diagnostics.append(
                 f"spec_hash {proof.spec_hash!r}: out-of-order sequence {proof.sequence} "
                 f"(last accepted {active.last_sequence}) ignored"
             )
-            return _settle(active)
+            return active, False
 
         if proof.sequence == active.last_sequence:
             merged = _merge_checkpoints(active.states, active.required, proof.checkpoints)
@@ -448,10 +557,41 @@ class _ProofAnchorState(AnchorState):
                     "with a different checkpoint state; restatement ignored (bump sequence to "
                     "add new facts)"
                 )
-            return _settle(active)
+            return active, False
 
         # proof.sequence > active.last_sequence: genuine advancement.
-        return _settle(_apply_proof(active, proof))
+        return _apply_proof(active, proof), False
+
+
+def _apply_marker(raw_marker: Any, active: _ProofEpoch | None, diagnostics: list[str]) -> bool:
+    """Whether a ``progress_proof_unobserved`` marker applies to this tick (a gap).
+
+    Evaluated against the epoch that is active *after* any co-located proof
+    was folded, so a partial observation (proof + marker in one event) first
+    updates the ledger, then gaps. Never touches the ledger or the epoch: a
+    marker for another ``spec_hash`` is inert, with a diagnostic. With no
+    active epoch the level is ``None`` regardless; the diagnostic still says
+    why nothing was measured.
+    """
+    if raw_marker is None:
+        return False
+    marker = validate_unobserved_marker(raw_marker)
+    if marker is None:
+        diagnostics.append("malformed progress_proof_unobserved ignored")
+        return False
+    if active is not None and active.spec_hash != marker.spec_hash:
+        diagnostics.append(
+            f"spec_hash {marker.spec_hash!r}: progress_proof_unobserved for another epoch ignored"
+        )
+        return False
+    shown = ", ".join(marker.unobserved[:_MAX_DIAGNOSED_CHECKPOINTS])
+    if len(marker.unobserved) > _MAX_DIAGNOSED_CHECKPOINTS:
+        shown += ", ..."
+    diagnostics.append(
+        f"spec_hash {marker.spec_hash!r}: {len(marker.unobserved)} required checkpoint(s) "
+        f"unobserved ({marker.reason}): {shown}; gap this tick"
+    )
+    return True
 
 
 def _proof_snapshot(history: Sequence[ToolEvent]) -> AnchorSnapshot:
@@ -485,6 +625,9 @@ class ProofProgressAnchor(ProgressAnchor):
 
     def diagnose(self, history: Sequence[ToolEvent]) -> tuple[str, ...]:
         return _proof_snapshot(history).diagnostics
+
+    def is_unavailable(self, history: Sequence[ToolEvent]) -> bool:
+        return _proof_snapshot(history).unavailable
 
     def create_state(self) -> _ProofAnchorState:
         return _ProofAnchorState()

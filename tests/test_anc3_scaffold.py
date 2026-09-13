@@ -119,7 +119,9 @@ def test_unimplemented_probe_is_fail_soft_for_real_producer(tmp_path: Path) -> N
         str(paths.manifest), (sys.executable, str(paths.probe)), timeout_seconds=5.0
     )
 
-    assert producer.probe() is None
+    payloads = producer.probe()
+    assert "progress_proof" not in payloads
+    assert payloads["progress_proof_unobserved"]["unobserved"] == ["done"]
 
 
 def test_implemented_generated_probe_emits_anc2_wire_shape(tmp_path: Path) -> None:
@@ -148,9 +150,8 @@ def test_implemented_generated_probe_emits_anc2_wire_shape(tmp_path: Path) -> No
         str(paths.manifest), (sys.executable, str(paths.probe)), timeout_seconds=5.0
     )
     produced = producer.probe()
-    assert produced is not None
-    _, proof = produced
-    assert proof["checkpoints"] == {"accepted": False, "schema_valid": True}
+    assert set(produced) == {"proof_spec", "progress_proof"}
+    assert produced["progress_proof"]["checkpoints"] == {"accepted": False, "schema_valid": True}
 
 
 def test_existing_target_refuses_all_writes(tmp_path: Path) -> None:

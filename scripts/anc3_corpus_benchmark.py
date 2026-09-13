@@ -14,7 +14,7 @@ from typing import Any
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import coding_anchors
-from pathlayer.detectors.proof import ProofProgressAnchor
+from pathlayer.detectors.proof import _PROGRESS_PROOF_KEY, _PROOF_SPEC_KEY, ProofProgressAnchor
 from pathlayer.detectors.proof_producer import build_producer
 from pathlayer.proof_scaffold import write_progress_proof_scaffold
 from pathlayer.validation.replay import ReplayResult, Report, load_traces, score
@@ -187,7 +187,9 @@ def _enrich_trace(
         timeout_seconds=5.0,
     )
     for event in trace.events:
-        if producer.attach(event) is None:
+        # A representative probe observes every checkpoint: an unobserved
+        # marker (a gap) would silently change the measured outcome.
+        if set(producer.attach(event)) != {_PROOF_SPEC_KEY, _PROGRESS_PROOF_KEY}:
             raise BenchmarkError(f"representative probe failed for {relative_path}")
 
 

@@ -221,8 +221,104 @@ paths = write_progress_proof_scaffold(
 
 `proof_id` defaults to `name` and `scope_id` to `task_id`; both APIs and the
 CLI accept explicit overrides. Names and objectives are descriptive only and
-never determine checkpoint values. Pathlayer provides no V1 contract library,
-automatic selection, semantic inference, or ready-made business checks.
+never determine checkpoint values. For coding tasks, the contract library below
+generates a working probe instead of a skeleton; Pathlayer still provides no
+automatic contract selection, semantic inference, or ready-made business checks.
+
+### Coding progress contracts
+
+For coding agents, declare what progress means in a few lines instead of
+writing a probe. JSON works too; YAML needs `pathlayer[yaml]`:
+
+```yaml
+task: fix-login
+objective: Make the login flow pass its tests.
+progress:
+  - type: tests_improve
+    path: tests/test_login.py
+  - type: file_changes
+    path: src/auth.py
+```
+
+```bash
+pathlayer-compile-contract contract.yaml --output-dir /path/owned/by/operator/fix-login
+```
+
+The compiler validates the contract, captures `file_changes` baselines,
+expands `tests_improve` selections to exact test ids, and writes an ordinary
+progress-proof bundle: `proof_spec.json`, a generated `probe.py` and a
+`README.md`. It then runs the probe once to print the current state, and prints
+the `detectors.progress_proof` section to add to your config. A malformed
+contract fails here, before any run. The workspace defaults to the contract
+file's directory.
+
+| Type | Checkpoint is true when | Level |
+| --- | --- | --- |
+| `file_exists` (`path`) | a regular file exists at `path` | objective |
+| `artifact_produced` (`path`, `min_bytes: 1`, optional `sha256`) | that file has at least `min_bytes`, and the given SHA-256 | objective |
+| `test_passes` (`test`) | this exact pytest nodeid passes | objective |
+| `tests_improve` (`tests: [...]` or `path`) | one checkpoint per selected test | progress toward the objective |
+| `command_succeeds` (`id`, `command: [...]`) | the command, run without a shell, exits 0 | objective |
+| `file_changes` (`path`) | the file differs from its content at compile time | observed effect |
+
+Every checkpoint counts once and weighs the same. `no_progress` restarts its
+patience each time the number of true checkpoints reaches a new high, and stays
+silent once all of them are true: the objective is reached. An observed effect
+never reaches the objective on its own, so a contract made only of
+`file_changes` is rejected. A test that is deleted, skipped or flips back and
+forth never counts as new progress.
+
+A check that cannot observe its resource -- pytest missing or timing out, a
+test module that cannot be imported, a directory where a file was expected, the
+probe's time budget exhausted -- is omitted for that tool call rather than
+reported false. Pathlayer logs a warning, keeps the checkpoint's last known
+value for later, and treats that tool call as a *gap*: `no_progress` stays
+silent on it, even if its other signals (test results, exit codes, git diff)
+have been flat for a while, and restarts its patience afterwards. A probe that
+keeps failing in the middle of a run therefore never causes a STOP on its own.
+The price is recall: an agent that stays stuck while its probe keeps failing is
+left to the other detectors.
+
+Tests run once per tool call, in a single pytest session with the installed
+plugins and the project's ini options, except `addopts`, which is ignored so
+that options such as `-x` cannot hide a required test. When the project has its
+own environment, name its interpreter in the contract, relative to the
+workspace or absolute:
+
+```yaml
+python: .venv/bin/python
+```
+
+Pathlayer does not need to be installed there: its small pytest plugin is
+copied next to each session. The compiler checks that this interpreter -- or,
+without `python`, the one running Pathlayer -- can run pytest, and fails before
+the run otherwise. A test module whose imports fail at run time stays
+unobserved. The probe itself runs synchronously after every tool call: locally
+about 60 ms for file checks and about half a second with a small pytest
+selection. The printed configuration uses the interpreter Pathlayer runs in.
+The OpenClaw recorder runs the probe automatically. With LangGraph, pass the
+producer to the adapter:
+
+```python
+from pathlayer.adapters.langgraph import LangGraphAdapter
+from pathlayer.config import build_pipeline, load_config
+from pathlayer.detectors.proof_producer import producer_from_config
+
+config = load_config()  # includes the printed detectors.progress_proof section
+pipeline = build_pipeline(config)
+adapter = LangGraphAdapter(pipeline.sink, progress_proof=producer_from_config(config))
+```
+
+The same vocabulary is available in Python from `pathlayer.coding_contracts`
+(`CodingContract`, `FileExists`, `FileChanges`, `ArtifactProduced`,
+`TestPasses`, `TestsImprove`, `CommandSucceeds`, `write_coding_contract`).
+
+Keep the bundle outside the observed agent's write boundary. Test checkpoints
+execute the workspace's own tests and `conftest.py` files with the workspace on
+the import path, so an agent that can edit that test code -- or add a module
+shadowing one pytest imports, or alter a `.venv` inside the workspace -- can
+forge a passing test: protect it when test checkpoints must be trusted. [`examples/demo_coding_contract.py`](examples/demo_coding_contract.py)
+runs a complete example.
 
 ### Crash-safe run state
 
@@ -428,6 +524,9 @@ validation gate documented in [`AGENTS.md`](AGENTS.md#validation).
   repetition detectors remain silent.
 - [`docs/demo-2.md`](docs/demo-2.md): a non-technical walkthrough of the
   no-progress demo and what it proves.
+- [`examples/demo_coding_contract.py`](examples/demo_coding_contract.py): a
+  five-line coding contract on a real LangGraph agent whose tools return plain
+  text -- productive repetition left alone, stagnation stopped.
 
 The no-progress demo relies on deterministic ground truth from tests. Detecting
 slow burns with no tests, exit codes, code evidence or other objective signal is

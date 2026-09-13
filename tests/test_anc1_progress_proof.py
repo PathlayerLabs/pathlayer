@@ -10,13 +10,14 @@ import pytest
 
 import pathlayer.detectors.proof as proof_module
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
+from pathlayer.detectors.progress import coding_anchors, is_advancing, loop_suppression_anchors
 from pathlayer.detectors.proof import (
     ProofProgressAnchor,
     ProofSpec,
     compute_spec_hash,
     validate_progress_proof,
     validate_proof_spec,
+    validate_unobserved_marker,
 )
 from pathlayer.events import EventKind, ToolEvent
 
@@ -54,18 +55,27 @@ def _proof_dict(
     return {"spec_hash": spec_hash, "sequence": sequence, "checkpoints": dict(checkpoints)}
 
 
+def _unobserved_dict(
+    spec_hash: str, unobserved: tuple[str, ...], reason: str = "timed out after 5s"
+) -> dict[str, object]:
+    return {"spec_hash": spec_hash, "unobserved": list(unobserved), "reason": reason}
+
+
 def _event(
     *,
     spec: Mapping[str, object] | None = None,
     proof: Mapping[str, object] | None = None,
+    unobserved: Mapping[str, object] | None = None,
     tool: str = "report_progress",
 ) -> ToolEvent:
-    payload: dict[str, object] = {}
+    metadata: dict[str, object] = {}
     if spec is not None:
-        payload["proof_spec"] = spec
+        metadata["proof_spec"] = spec
     if proof is not None:
-        payload["progress_proof"] = proof
-    return ToolEvent(tool=tool, result=payload)
+        metadata["progress_proof"] = proof
+    if unobserved is not None:
+        metadata["progress_proof_unobserved"] = unobserved
+    return ToolEvent(tool=tool, metadata=metadata)
 
 
 def _edit(index: int) -> ToolEvent:
@@ -430,7 +440,7 @@ def test_malformed_progress_proof_is_inert_not_reset() -> None:
     assert anchor.measure(history) == 1.0
     malformed = ToolEvent(
         tool="report_progress",
-        result={
+        metadata={
             "progress_proof": {"spec_hash": hash_a, "sequence": "bad", "checkpoints": {"x": True}}
         },
     )
@@ -457,39 +467,52 @@ def test_malformed_proof_spec_is_inert_progress_proof_still_applies() -> None:
     assert "malformed proof_spec ignored" in anchor.diagnose(history)[0]
 
 
-def test_evidence_is_also_read_from_event_metadata() -> None:
+def test_evidence_is_read_from_event_metadata_only() -> None:
+    """``event.result`` is the observed agent's own tool output; a proof there
+    is a self-reported claim, which the contract's trust boundary rules out.
+    Only ``event.metadata`` -- written by an adapter or producer outside the
+    agent's control -- can carry ``proof_spec``/``progress_proof``."""
     spec_a = _spec_dict(required=("x",))
     hash_a = _hash_of(spec_a)
     anchor = ProofProgressAnchor()
-    event = ToolEvent(
+    in_result = ToolEvent(
+        tool="report_progress",
+        result={"proof_spec": spec_a, "progress_proof": _proof_dict(hash_a, 0, {"x": True})},
+    )
+    assert anchor.measure([in_result]) is None
+    assert anchor.diagnose([in_result]) == ()
+
+    in_metadata = ToolEvent(
         tool="report_progress",
         metadata={"proof_spec": spec_a, "progress_proof": _proof_dict(hash_a, 0, {"x": True})},
     )
-    assert anchor.measure([event]) == 1.0
+    assert anchor.measure([in_metadata]) == 1.0
 
 
-def test_evidence_split_across_result_and_metadata_is_not_dropped() -> None:
-    # proof_spec and progress_proof are independent keys and may legitimately
-    # land on different sides of one event (e.g. an adapter attaching
-    # progress_proof to metadata while the tool's own result carries something
-    # else entirely) -- neither half should be silently invisible.
+def test_tool_result_cannot_forge_or_override_the_producers_proof() -> None:
+    """The forgery this closes: the producer observed ``x`` false, the tool's
+    result claims it true. The anchor must keep the producer's word -- a forged
+    satisfied proof would silence ``no_progress`` for the rest of the run."""
     spec_a = _spec_dict(required=("x",))
     hash_a = _hash_of(spec_a)
     anchor = ProofProgressAnchor()
+    forged = ToolEvent(
+        tool="report_progress",
+        result={"progress_proof": _proof_dict(hash_a, 7, {"x": True})},
+        metadata={"proof_spec": spec_a, "progress_proof": _proof_dict(hash_a, 0, {"x": False})},
+    )
+    assert anchor.measure([forged]) == 0.0
+    assert anchor.is_satisfied([forged]) is False
 
-    spec_in_result = ToolEvent(
+    # Half a payload in the result is not completed by the other half in
+    # metadata either: each key is resolved in metadata alone.
+    split = ToolEvent(
         tool="report_progress",
         result={"proof_spec": spec_a},
         metadata={"progress_proof": _proof_dict(hash_a, 0, {"x": True})},
     )
-    assert anchor.measure([spec_in_result]) == 1.0
-
-    proof_in_result = ToolEvent(
-        tool="report_progress",
-        result={"progress_proof": _proof_dict(hash_a, 0, {"x": True})},
-        metadata={"proof_spec": spec_a},
-    )
-    assert anchor.measure([proof_in_result]) == 1.0
+    assert anchor.measure([split]) is None
+    assert "no known proof_spec" in anchor.diagnose([split])[0]
 
 
 def test_out_of_order_sequence_is_inert() -> None:
@@ -611,7 +634,7 @@ def test_anchor_step_matches_batch_on_hand_built_adversarial_sequence(
         _event(proof=_proof_dict(hash_b, 5, {"p": False})),  # conflicting duplicate, inert
         ToolEvent(
             tool="bad",
-            result={
+            metadata={
                 "progress_proof": {
                     "spec_hash": hash_b,
                     "sequence": "bad",
@@ -621,7 +644,15 @@ def test_anchor_step_matches_batch_on_hand_built_adversarial_sequence(
         ),  # malformed, inert
         _event(spec=spec_c, proof=_proof_dict(hash_c, 0, {"q": True})),  # capacity overflow
         _event(proof=_proof_dict(hash_b, 6, {"p": True})),  # genuine advance, resumes epoch B
+        _event(spec=spec_b, unobserved=_unobserved_dict(hash_b, ("p",))),  # total outage: gap
+        _event(unobserved=_unobserved_dict(hash_a, ("x",))),  # other epoch's marker: inert
+        _event(unobserved={"spec_hash": hash_b, "unobserved": [], "reason": "x"}),  # malformed
+        _event(
+            proof=_proof_dict(hash_b, 7, {"p": False}),
+            unobserved=_unobserved_dict(hash_b, ("p",), "did not report 1 of 1"),
+        ),  # partial: ledger updated, still a gap
         _edit(1),
+        _event(proof=_proof_dict(hash_b, 8, {"p": True})),  # fresh baseline after the gap
     ]
     _assert_step_matches_batch(ProofProgressAnchor(), events)
 
@@ -636,11 +667,20 @@ def _random_events(seed: int, count: int) -> list[ToolEvent]:
         roll = rng.random()
         if roll < 0.15:
             events.append(_edit(i))
+        elif roll < 0.22:
+            index = rng.randrange(3)
+            events.append(
+                _event(
+                    unobserved=_unobserved_dict(
+                        hashes[index], (f"c{index}a",) if rng.random() < 0.5 else (f"c{index}b",)
+                    )
+                )
+            )
         elif roll < 0.3:
             events.append(
                 ToolEvent(
                     tool="bad",
-                    result={
+                    metadata={
                         "progress_proof": {
                             "spec_hash": hashes[0],
                             "sequence": "not-an-int",
@@ -687,6 +727,288 @@ def test_state_is_hashable_after_nontrivial_sequence() -> None:
     for event in _random_events(99, 40):
         state, _ = anchor.step(state, event)
     assert hash(state) is not None
+
+
+# --- progress_proof_unobserved: a failed observation is a gap, not a freeze ---
+
+
+def test_valid_unobserved_marker_parses() -> None:
+    marker = validate_unobserved_marker(_unobserved_dict(_ZERO_HASH, ("b", "a")))
+    assert marker is not None
+    assert marker.spec_hash == _ZERO_HASH
+    assert marker.unobserved == ("a", "b")
+    assert marker.reason == "timed out after 5s"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "not a mapping",
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a"]},  # missing reason
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a"], "reason": "r", "extra": 1},
+        {"spec_hash": "sha256:short", "unobserved": ["a"], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": [], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": "abc", "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a", "a"], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a", 1], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": [""], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a"], "reason": ""},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a"], "reason": 3},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a"], "reason": "r" * 257},
+        {"spec_hash": _ZERO_HASH, "unobserved": ["a" * 257], "reason": "r"},
+        {"spec_hash": _ZERO_HASH, "unobserved": [f"c{i}" for i in range(257)], "reason": "r"},
+    ],
+)
+def test_unobserved_marker_rejects_malformed_input(raw: object) -> None:
+    assert validate_unobserved_marker(raw) is None
+
+
+def test_unobserved_marker_is_a_gap_that_keeps_the_ledger() -> None:
+    spec_a = _spec_dict(required=("x", "y"))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [_event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": True}))]
+    assert anchor.measure(history) == 1.0
+
+    history.append(_event(spec=spec_a, unobserved=_unobserved_dict(hash_a, ("x", "y"))))
+    assert anchor.measure(history) is None  # this tick: no level, CUSUM resets
+    assert anchor.is_satisfied(history) is False
+    (diagnostic,) = anchor.diagnose(history)
+    assert "2 required checkpoint(s) unobserved" in diagnostic
+    assert "timed out after 5s" in diagnostic
+    assert "gap" in diagnostic
+
+    history.append(_edit(0))  # a tick without any producer payload: last level is back
+    assert anchor.measure(history) == 1.0
+    assert anchor.diagnose(history) == ()
+
+    history.append(_event(proof=_proof_dict(hash_a, 1, {"y": True})))
+    assert anchor.measure(history) == 2.0  # the ledger was never erased
+    assert anchor.is_satisfied(history) is True
+
+
+def test_partial_proof_with_unobserved_marker_updates_ledger_but_gaps() -> None:
+    spec_a = _spec_dict(required=("x", "y"))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [
+        _event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": False, "y": False})),
+        _event(
+            proof=_proof_dict(hash_a, 1, {"x": True}),
+            unobserved=_unobserved_dict(hash_a, ("y",), "did not report 1 of 2"),
+        ),
+    ]
+    assert anchor.measure(history) is None
+    history.append(_event(proof=_proof_dict(hash_a, 2, {"x": True, "y": False})))
+    assert anchor.measure(history) == 1.0  # x's value from the partial proof was kept
+
+
+def test_unobserved_marker_never_switches_epoch() -> None:
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    spec_b = _spec_dict(scope_id="scope-b", required=("p",))
+    hash_b = _hash_of(spec_b)
+    anchor = ProofProgressAnchor()
+    history = [
+        _event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": True})),
+        _event(spec=spec_b, unobserved=_unobserved_dict(hash_b, ("p",))),
+    ]
+    assert anchor.measure(history) == 1.0  # inert: epoch A stays active and credited
+    (diagnostic,) = anchor.diagnose(history)
+    assert "another epoch" in diagnostic
+    history.append(_event(proof=_proof_dict(hash_a, 1, {"x": True})))
+    assert anchor.measure(history) == 1.0
+    assert anchor.diagnose(history) == ()
+
+
+def test_unobserved_marker_before_any_epoch_is_diagnosed_and_inapplicable() -> None:
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [_event(spec=spec_a, unobserved=_unobserved_dict(hash_a, ("x",)))]
+    assert anchor.measure(history) is None
+    assert "gap" in anchor.diagnose(history)[0]
+    # The spec was still cached: a later proof-only event starts the epoch.
+    history.append(_event(proof=_proof_dict(hash_a, 0, {"x": True})))
+    assert anchor.measure(history) == 1.0
+
+
+def test_malformed_unobserved_marker_is_inert() -> None:
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [
+        _event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": False})),
+        _event(unobserved={"spec_hash": hash_a, "unobserved": [], "reason": "r"}),
+    ]
+    assert anchor.measure(history) == 0.0
+    assert "malformed progress_proof_unobserved ignored" in anchor.diagnose(history)[0]
+
+
+def test_unobserved_marker_in_result_is_invisible() -> None:
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [
+        _event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": False})),
+        ToolEvent(tool="t", result={"progress_proof_unobserved": _unobserved_dict(hash_a, ("x",))}),
+    ]
+    assert anchor.measure(history) == 0.0
+    assert anchor.diagnose(history) == ()
+
+
+def test_unobserved_diagnostic_bounds_the_listed_checkpoints() -> None:
+    required = tuple(f"c{i:02d}" for i in range(8))
+    spec_a = _spec_dict(required=required)
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [_event(spec=spec_a, unobserved=_unobserved_dict(hash_a, required))]
+    (diagnostic,) = anchor.diagnose(history)
+    assert "8 required checkpoint(s) unobserved" in diagnostic
+    assert "c04" in diagnostic and "c05" not in diagnostic and "..." in diagnostic
+
+
+def test_probe_outage_mid_run_never_stops_a_productive_agent() -> None:
+    """The ANC-4 freeze: ten ticks the probe cannot observe used to count as
+    ten steps without progress. With the marker they are gaps."""
+    detector = NoProgressDetector([ProofProgressAnchor()])
+    spec_a = _spec_dict(required=("x", "y", "z", "w"))
+    hash_a = _hash_of(spec_a)
+    history = [_event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": True}))]
+    history.extend(
+        _event(spec=spec_a, unobserved=_unobserved_dict(hash_a, ("x", "y", "z", "w")))
+        for _ in range(20)
+    )
+    confidences = [detector.evaluate(history[:i]).confidence for i in range(1, len(history) + 1)]
+    assert max(confidences) == 0.0
+    # Back online: a fresh baseline, then genuine stagnation is still caught.
+    history.append(_event(proof=_proof_dict(hash_a, 1, {"x": True})))
+    history.extend(_edit(i) for i in range(20))
+    assert detector.evaluate(history).confidence >= 0.9
+
+
+def test_probe_outage_gap_is_never_read_as_advancing() -> None:
+    spec_a = _spec_dict(required=("x", "y"))
+    hash_a = _hash_of(spec_a)
+    anchor = ProofProgressAnchor()
+    history = [
+        _event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": False})),
+        _event(spec=spec_a, unobserved=_unobserved_dict(hash_a, ("x", "y"))),
+    ]
+    assert is_advancing([anchor], history) is False
+    history.append(_event(proof=_proof_dict(hash_a, 1, {"x": True})))
+    assert is_advancing([anchor], history) is False  # a baseline after a gap is not a record
+    history.append(_event(proof=_proof_dict(hash_a, 2, {"x": True, "y": True})))
+    assert is_advancing([anchor], history) is True
+
+
+# --- an outage in the production anchor set (coding anchors + proof anchor) ---
+
+
+def _production_detector() -> NoProgressDetector:
+    """The anchor set ``build_pipeline`` wires when ``progress_proof`` is enabled."""
+    return NoProgressDetector([*coding_anchors(), ProofProgressAnchor()])
+
+
+def _confidences(detector: NoProgressDetector, events: list[ToolEvent]) -> list[float]:
+    state = detector.create_state()
+    confidences = []
+    for event in events:
+        state, signal = detector.step(state, event)
+        confidences.append(signal.confidence)
+    return confidences
+
+
+def _failing_command(metadata: Mapping[str, object]) -> ToolEvent:
+    return ToolEvent(tool="shell", result={"exit_code": 1}, metadata=dict(metadata))
+
+
+def test_outage_after_the_objective_never_unmasks_a_stalled_coding_anchor() -> None:
+    """Objective reached, the agent keeps running a failing command, then the
+    probe dies. The satisfied proof held no_progress silent; its outage must
+    not hand the decision to the exit-code anchor, flat all along. As a plain
+    gap it did: STOP on the very first unobserved call."""
+    spec_a = _spec_dict(required=("x", "y"))
+    hash_a = _hash_of(spec_a)
+    events = [
+        _failing_command(
+            {"proof_spec": spec_a, "progress_proof": _proof_dict(hash_a, i, {"x": True, "y": True})}
+            if i < 15
+            else {
+                "proof_spec": spec_a,
+                "progress_proof_unobserved": _unobserved_dict(hash_a, ("x", "y")),
+            }
+        )
+        for i in range(40)
+    ]
+    assert max(_confidences(_production_detector(), events)) == 0.0
+    # The stall the proof was covering is real: the coding anchors alone fire.
+    assert max(_confidences(NoProgressDetector(coding_anchors()), events)) == 1.0
+
+
+def test_outage_of_an_advancing_proof_holds_then_restarts_patience() -> None:
+    required = tuple(f"c{k}" for k in range(10))
+    spec_a = _spec_dict(required=required)
+    hash_a = _hash_of(spec_a)
+    events = []
+    for i in range(50):
+        if 19 <= i < 30:  # the probe is down for eleven calls
+            metadata: dict[str, object] = {
+                "proof_spec": spec_a,
+                "progress_proof_unobserved": _unobserved_dict(hash_a, required),
+            }
+        else:  # one checkpoint turns true every three calls, until c6
+            checkpoints = {f"c{k}": i >= 3 * k and k < 7 for k in range(10)}
+            metadata = {"proof_spec": spec_a, "progress_proof": _proof_dict(hash_a, i, checkpoints)}
+        events.append(_failing_command(metadata))
+    confidences = _confidences(_production_detector(), events)
+    assert max(confidences[:30]) < 0.9  # no STOP before or during the outage
+    assert confidences[19:30] == [0.0] * 11
+    # Back online at call 31: a fresh baseline, then a full patience again.
+    assert confidences[30] == 0.0
+    assert max(confidences[30:39]) < 0.9
+    assert confidences[39] == pytest.approx(0.9)
+
+
+def test_a_probe_that_never_worked_leaves_the_coding_anchors_in_charge() -> None:
+    """Nothing was ever measured, so there is no measurement to lose: the other
+    anchors decide exactly as without a contract (zero-config outcome)."""
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    events = [
+        _failing_command(
+            {"proof_spec": spec_a, "progress_proof_unobserved": _unobserved_dict(hash_a, ("x",))}
+        )
+        for _ in range(20)
+    ]
+    production = _confidences(_production_detector(), events)
+    assert production == _confidences(NoProgressDetector(coding_anchors()), events)
+    assert max(production) == 1.0
+
+
+def test_unavailable_is_flagged_only_when_an_epoch_was_being_measured() -> None:
+    spec_a = _spec_dict(required=("x",))
+    hash_a = _hash_of(spec_a)
+    spec_b = _spec_dict(scope_id="scope-b", required=("p",))
+    hash_b = _hash_of(spec_b)
+    anchor = ProofProgressAnchor()
+    marker_a = _event(spec=spec_a, unobserved=_unobserved_dict(hash_a, ("x",)))
+    assert anchor.is_unavailable([marker_a]) is False  # no epoch yet: inapplicable only
+
+    history = [_event(spec=spec_a, proof=_proof_dict(hash_a, 0, {"x": False})), marker_a]
+    assert anchor.is_unavailable(history) is True
+    state = anchor.create_state()
+    for event in history:
+        state, snapshot = anchor.step(state, event)
+    assert snapshot.unavailable is True and snapshot.level is None
+
+    for inert in (
+        _edit(0),
+        _event(spec=spec_b, unobserved=_unobserved_dict(hash_b, ("p",))),
+        _event(unobserved={"spec_hash": hash_a, "unobserved": [], "reason": "r"}),
+    ):
+        assert anchor.is_unavailable([*history[:1], inert]) is False
 
 
 # --- NoProgressDetector integration --------------------------------------

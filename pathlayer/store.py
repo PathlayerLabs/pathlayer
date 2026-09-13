@@ -39,6 +39,17 @@ STATE_SEMANTICS_VERSION = 2
 # fully visible in the newly persisted RUN_START/RUN_TIMEOUT event prefix. The
 # config fingerprint rejects pre-RES-2 active-resource scopes, while disabled
 # resource configs preserve their historical fingerprint exactly.
+
+# Versions how an *enabled* progress_proof section reads events, folded into
+# the fingerprint of proof-enabled configurations only (see
+# configuration_fingerprint), so no other scope is invalidated. 2 = ANC-4:
+# proofs are read from ToolEvent.metadata only, never ToolEvent.result, and a
+# progress_proof_unobserved marker holds no_progress silent. Full prefix replay
+# cannot always expose the first change (Kropemann's review on #192): a
+# one-event prefix whose result-side proof only set a baseline decides the same
+# under both readings, yet leaves the anchor in a different state, and the next
+# decision silently changes after a resume.
+PROGRESS_PROOF_SEMANTICS_VERSION = 2
 TERMINAL_STATUSES = frozenset({"completed", "interrupted", "stopped"})
 _VALID_CLOSE_STATUSES = TERMINAL_STATUSES
 _T = TypeVar("_T")
@@ -423,15 +434,21 @@ def configuration_fingerprint(config: Any) -> str:
         progress_proof = detectors.get("progress_proof")
         if isinstance(progress_proof, dict) and progress_proof.get("enabled") is False:
             detectors.pop("progress_proof", None)
-    return _canonical_sha256(
-        {
-            # Keep the same canonical shape as the first INF-1 draft while
-            # explicitly excluding future observability/pricing-only sections.
-            "config": decision_config,
-            "event_codec": EVENT_CODEC_VERSION,
-            "state_semantics": STATE_SEMANTICS_VERSION,
-        }
-    )
+        proof_enabled = isinstance(progress_proof, dict) and progress_proof.get("enabled") is True
+    else:
+        proof_enabled = False
+    payload: dict[str, Any] = {
+        # Keep the same canonical shape as the first INF-1 draft while
+        # explicitly excluding future observability/pricing-only sections.
+        "config": decision_config,
+        "event_codec": EVENT_CODEC_VERSION,
+        "state_semantics": STATE_SEMANTICS_VERSION,
+    }
+    if proof_enabled:
+        # Only an enabled section reads proofs; every other configuration keeps
+        # its exact historical fingerprint (see PROGRESS_PROOF_SEMANTICS_VERSION).
+        payload["progress_proof_semantics"] = PROGRESS_PROOF_SEMANTICS_VERSION
+    return _canonical_sha256(payload)
 
 
 class SQLiteStateStore:
