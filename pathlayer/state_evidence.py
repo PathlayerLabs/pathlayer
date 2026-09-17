@@ -3,15 +3,25 @@
 Collection happens at an adapter's tool boundary. The resulting closed-schema
 records are embedded in ``ToolEvent.metadata`` so the pure pipeline, durable
 store and trace replay can consume the observation without performing I/O.
+
+STATE-1 adds a second way to choose *what* to observe. A producer built with a
+fixed sensor list observes the same resources around every tool call; one built
+with a :class:`StateSensorPlanner` asks the planner, at each boundary, which
+sensors that call's own arguments make observable. A planner that selects
+nothing means "this call claims no state": the event then carries no envelope
+at all, exactly as it would with no producer configured. Planning is the only
+new degree of freedom -- the capture, validation, transport and replay path
+below is the one ARCH-2 already proved.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pathlayer.detectors.state_evidence import StateEvidence, validate_state_evidence
 from pathlayer.events import ToolEvent
@@ -21,6 +31,8 @@ from pathlayer.state_collectors import (
     collect_filesystem_evidence,
     collect_pytest_evidence,
 )
+
+logger = logging.getLogger(__name__)
 
 STATE_EVIDENCE_METADATA_KEY = "pathlayer_state_evidence"
 _ENVELOPE_VERSION = 1
@@ -37,7 +49,11 @@ class StateOutcome(str, Enum):
 
 
 class StateSensor(Protocol):
-    """One explicitly configured resource observed around every tool call."""
+    """One resource observed around a tool call.
+
+    Fixed for the whole run when the producer was built with a sensor list, or
+    chosen for this one call by a :class:`StateSensorPlanner`.
+    """
 
     @property
     def resource_type(self) -> str: ...
@@ -99,12 +115,30 @@ class PytestStateSensor:
         )
 
 
+class StateSensorPlanner(Protocol):
+    """Choose the sensors one tool call's own arguments make observable.
+
+    Called at the ``before`` boundary, inside the adapter's lock, with the tool
+    name and the arguments the framework reported. It must be deterministic
+    (the same call selects the same sensors), must never decide anything about
+    the *outcome* of a call, and returns an empty sequence to abstain.
+    """
+
+    def plan(self, *, tool: str, args: Mapping[str, Any]) -> Sequence[StateSensor]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class StateCapture:
-    """Run-local before observations passed explicitly to the after boundary."""
+    """Run-local before observations passed explicitly to the after boundary.
+
+    ``sensors`` are the sensors this boundary actually planned, so the after
+    capture re-observes exactly those resources even when the next tool call
+    plans different ones.
+    """
 
     tool_event_ref: str
     before: tuple[StateEvidence, ...]
+    sensors: tuple[StateSensor, ...] = field(default=())
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,44 +150,83 @@ class StateEvidenceEnvelope:
 
 
 class StateEvidenceProducer:
-    """Bracket tool calls with a fixed, explicit set of deterministic sensors.
+    """Bracket tool calls with deterministic sensors, fixed or planned per call.
 
     The producer owns no per-run mutable state. A ``StateCapture`` is returned
     to the adapter and stored beside that adapter's pending tool call, which
     prevents concurrent runs from sharing or confusing observations.
+
+    Built with ``sensors``, every tool call observes those same resources.
+    Built with a ``planner`` (STATE-1), each call observes what its own
+    arguments make observable, and a call the planner abstains on carries no
+    evidence at all. A planner is an integration boundary like a sensor: an
+    invalid or raising plan leaves the call unobserved and is logged, never
+    raised into the observed agent.
     """
 
-    def __init__(self, sensors: Sequence[StateSensor]) -> None:
-        self._sensors = tuple(sensors)
-        if not self._sensors:
-            raise ValueError("StateEvidenceProducer requires at least one sensor")
-        if len(self._sensors) > _MAX_SENSORS:
-            raise ValueError(f"StateEvidenceProducer supports at most {_MAX_SENSORS} sensors")
-        identities = [(sensor.resource_type, sensor.resource_id) for sensor in self._sensors]
-        if len(set(identities)) != len(identities):
-            raise ValueError("state sensor resource identities must be unique")
-        for sensor in self._sensors:
-            if _unavailable_record(sensor, tool_event_ref="validation", phase="before") is None:
-                raise ValueError("state sensor identity or collector version is invalid")
+    def __init__(
+        self,
+        sensors: Sequence[StateSensor] | None = None,
+        *,
+        planner: StateSensorPlanner | None = None,
+    ) -> None:
+        if (sensors is None) == (planner is None):
+            raise ValueError("StateEvidenceProducer requires either sensors or a planner")
+        self._planner = planner
+        self._sensors: tuple[StateSensor, ...] = ()
+        if sensors is not None:
+            self._sensors = tuple(sensors)
+            problem = _sensor_problem(self._sensors)
+            if problem is not None:
+                raise ValueError(problem)
 
     def capture_before(self, tool_event_ref: str) -> StateCapture:
-        records = tuple(
-            _capture_safely(sensor, tool_event_ref=tool_event_ref, phase="before")
-            for sensor in self._sensors
-        )
-        return StateCapture(tool_event_ref=tool_event_ref, before=records)
+        """Observe the fixed sensor set. Requires a producer built with sensors.
+
+        :meth:`plan_capture` without the planning step; kept because it is the
+        ARCH-2/VAL-5 entry point and says at the call site that this producer
+        observes the same resources around every call.
+        """
+        return self._capture(tool_event_ref, self._fixed_sensors(), observable=True)
 
     def unavailable_capture(self, tool_event_ref: str) -> StateCapture:
         """Return an explicit abstention for an overlapping tool boundary."""
-        records = tuple(
-            _required_unavailable_record(sensor, tool_event_ref=tool_event_ref, phase="before")
-            for sensor in self._sensors
-        )
-        return StateCapture(tool_event_ref=tool_event_ref, before=records)
+        return self._capture(tool_event_ref, self._fixed_sensors(), observable=False)
+
+    def plan_capture(
+        self,
+        tool_event_ref: str,
+        *,
+        tool: str,
+        args: Mapping[str, Any],
+        observable: bool = True,
+    ) -> StateCapture | None:
+        """Observe what this call makes observable, or ``None`` if it claims nothing.
+
+        The adapter's entry point, for both kinds of producer: on one built
+        with a fixed sensor list ``tool`` and ``args`` are ignored, that list is
+        always observed, and the result is never ``None``.
+
+        ``observable=False`` records the planned resources as explicitly
+        unavailable, for a boundary that overlaps another tool call.
+        """
+        sensors = self._plan(tool, args)
+        if sensors is None:
+            return None
+        return self._capture(tool_event_ref, sensors, observable=observable)
+
+    def unavailable_for(self, capture: StateCapture) -> StateCapture:
+        """Withdraw an in-flight capture, keeping the resources it had planned."""
+        return self._capture(capture.tool_event_ref, capture.sensors, observable=False)
 
     def attach_after(self, event: ToolEvent, capture: StateCapture) -> ToolEvent:
         if event.run_id != capture.tool_event_ref:
             raise ValueError("StateCapture belongs to a different ToolEvent")
+        if len(capture.sensors) != len(capture.before):
+            # Only a hand-built capture can get here: every producer method
+            # records the sensors it observed alongside their observations. Say
+            # so explicitly rather than failing inside the zip below.
+            raise ValueError("StateCapture does not carry the sensors it observed")
         after = tuple(
             _required_unavailable_record(
                 sensor, tool_event_ref=capture.tool_event_ref, phase="after"
@@ -165,7 +238,7 @@ class StateEvidenceProducer:
                 phase="after",
                 before=prior,
             )
-            for sensor, prior in zip(self._sensors, capture.before, strict=True)
+            for sensor, prior in zip(capture.sensors, capture.before, strict=True)
         )
         pairs = zip(capture.before, after, strict=True)
         records = tuple(record for pair in pairs for record in pair)
@@ -177,6 +250,48 @@ class StateEvidenceProducer:
         metadata = dict(event.metadata)
         metadata[STATE_EVIDENCE_METADATA_KEY] = envelope
         return replace(event, metadata=metadata)
+
+    def _fixed_sensors(self) -> tuple[StateSensor, ...]:
+        if not self._sensors:
+            raise ValueError("this producer plans its sensors per tool call")
+        return self._sensors
+
+    def _plan(self, tool: str, args: Mapping[str, Any]) -> tuple[StateSensor, ...] | None:
+        if self._planner is None:
+            return self._sensors
+        try:
+            planned = tuple(self._planner.plan(tool=tool, args=args))
+        except Exception:
+            # A planner reads adapter-supplied tool arguments: untrusted, and
+            # its failure must never reach the observed agent. Leaving the call
+            # unobserved is the abstention the planner itself would have used.
+            logger.warning(
+                "state evidence planner raised; the tool call is left unobserved", exc_info=True
+            )
+            return None
+        if not planned:
+            return None
+        problem = _sensor_problem(planned)
+        if problem is not None:
+            logger.warning(
+                "state evidence planner returned an unusable plan (%s); "
+                "the tool call is left unobserved",
+                problem,
+            )
+            return None
+        return planned
+
+    @staticmethod
+    def _capture(
+        tool_event_ref: str, sensors: tuple[StateSensor, ...], *, observable: bool
+    ) -> StateCapture:
+        records = tuple(
+            _capture_safely(sensor, tool_event_ref=tool_event_ref, phase="before")
+            if observable
+            else _required_unavailable_record(sensor, tool_event_ref=tool_event_ref, phase="before")
+            for sensor in sensors
+        )
+        return StateCapture(tool_event_ref=tool_event_ref, before=records, sensors=sensors)
 
 
 def state_evidence_from_event(event: ToolEvent) -> StateEvidenceEnvelope | None:
@@ -224,6 +339,26 @@ def state_evidence_from_event(event: ToolEvent) -> StateEvidenceEnvelope | None:
     if _outcome(before, after) is not outcome:
         return None
     return StateEvidenceEnvelope(outcome=outcome, records=tuple(records))
+
+
+def _sensor_problem(sensors: tuple[StateSensor, ...]) -> str | None:
+    """Why this sensor set cannot be observed, or ``None`` when it can.
+
+    Shared by the fixed set (validated once, at construction, where a mistake
+    is a configuration error) and every planned set (validated at each call,
+    where a mistake must degrade to an abstention instead of raising).
+    """
+    if not sensors:
+        return "StateEvidenceProducer requires at least one sensor"
+    if len(sensors) > _MAX_SENSORS:
+        return f"StateEvidenceProducer supports at most {_MAX_SENSORS} sensors"
+    identities = [(sensor.resource_type, sensor.resource_id) for sensor in sensors]
+    if len(set(identities)) != len(identities):
+        return "state sensor resource identities must be unique"
+    for sensor in sensors:
+        if _unavailable_record(sensor, tool_event_ref="validation", phase="before") is None:
+            return "state sensor identity or collector version is invalid"
+    return None
 
 
 def _capture_safely(
@@ -307,7 +442,10 @@ def _required_unavailable_record(
     sensor: StateSensor, *, tool_event_ref: str, phase: str
 ) -> StateEvidence:
     record = _unavailable_record(sensor, tool_event_ref=tool_event_ref, phase=phase)
-    assert record is not None  # identities are validated by StateEvidenceProducer.__init__
+    # Identities are validated at construction for a fixed sensor set, and per
+    # call in StateEvidenceProducer._plan for a planned one -- see
+    # _sensor_problem, which both paths share.
+    assert record is not None
     return record
 
 
@@ -333,5 +471,6 @@ __all__ = [
     "StateEvidenceProducer",
     "StateOutcome",
     "StateSensor",
+    "StateSensorPlanner",
     "state_evidence_from_event",
 ]

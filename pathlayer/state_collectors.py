@@ -1,7 +1,10 @@
 """Bounded filesystem and pytest ``StateEvidence`` collectors.
 
-These deterministic helpers are shared by the offline COMP-1 harness and the
-opt-in runtime producer introduced by ARCH-2. They bracket a caller-owned tool
+This module's bytes are one of the inputs COMP-1 hashes into its seal (see
+``benchmarks/comp1/run.py``), so a new collector belongs in
+:mod:`pathlayer.coding_state_collectors` unless it is genuinely part of the
+sealed set. These deterministic helpers are shared by the offline COMP-1
+harness and the opt-in runtime producer introduced by ARCH-2. They bracket a caller-owned tool
 boundary with explicit
 ``before``/``after`` records and deliberately keep the prior observation in
 the call signature: an unavailable past observation can be represented, but

@@ -41,10 +41,15 @@ from pathlayer.detectors.budget import BudgetDetector, BudgetState, budget_delta
 from pathlayer.detectors.canonical import ToolMask, ToolMasks
 from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
-from pathlayer.detectors.progress import coding_anchors, loop_suppression_anchors
+from pathlayer.detectors.progress import ProgressAnchor, coding_anchors, loop_suppression_anchors
 from pathlayer.detectors.proof import ProofProgressAnchor
 from pathlayer.detectors.resource import DURATION_REASON_PREFIX, ResourceDetector
 from pathlayer.detectors.retry import RetryDetector
+from pathlayer.detectors.state_progress import (
+    UNCLAIMED_GAP,
+    UNCLAIMED_HOLD,
+    CodingStateProgressAnchor,
+)
 from pathlayer.events import ToolEvent
 from pathlayer.pipeline import PROGRESS_EVIDENCE_KEY, Pipeline
 from pathlayer.policies import Action, OverrideRule, Policy, SuppressionRule
@@ -318,6 +323,35 @@ class ProgressProofConfig:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ToolRuleConfig:
+    """What one tool call is declared to change (STATE-1).
+
+    ``effect`` is ``write`` (it changes the files named by ``paths``), ``read``
+    (it changes nothing) or ``workspace`` (it changes the workspace, but its
+    arguments do not say where). Validated when the preset is built.
+    """
+
+    effect: str
+    paths: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class StateEvidenceConfig:
+    # Disabled by default: capture and decisions are strictly unchanged until
+    # an operator opts in. Enabled, the coding preset observes the files a tool
+    # call names plus the configured scope (see pathlayer.coding_state).
+    enabled: bool = False
+    preset: str = "coding"
+    workspace: str = "."
+    git: bool = True
+    tests: tuple[str, ...] = ()
+    build_id: str = ""
+    build_command: tuple[str, ...] = ()
+    timeout_seconds: float = 60.0
+    tools: Mapping[str, ToolRuleConfig] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class DetectorsConfig:
     loop: LoopConfig = field(default_factory=LoopConfig)
@@ -326,6 +360,7 @@ class DetectorsConfig:
     no_progress: NoProgressConfig = field(default_factory=NoProgressConfig)
     resource: ResourceConfig = field(default_factory=ResourceConfig)
     progress_proof: ProgressProofConfig = field(default_factory=ProgressProofConfig)
+    state_evidence: StateEvidenceConfig = field(default_factory=StateEvidenceConfig)
 
 
 @dataclass(slots=True)
@@ -437,6 +472,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     nop_raw = _as_mapping(section._pop("no_progress", {}), "detectors.no_progress")
     resource_raw = _as_mapping(section._pop("resource", {}), "detectors.resource")
     progress_proof_raw = _as_mapping(section._pop("progress_proof", {}), "detectors.progress_proof")
+    state_evidence_raw = _as_mapping(section._pop("state_evidence", {}), "detectors.state_evidence")
     section.finish()
 
     loop_s = _Section(loop_raw, "detectors.loop")
@@ -502,6 +538,8 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
     )
     progress_proof_s.finish()
 
+    state_evidence = _parse_state_evidence(state_evidence_raw)
+
     return DetectorsConfig(
         loop=loop,
         retry=retry,
@@ -509,7 +547,50 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
         no_progress=no_progress,
         resource=resource,
         progress_proof=progress_proof,
+        state_evidence=state_evidence,
     )
+
+
+def _parse_state_evidence(data: Mapping[str, Any]) -> StateEvidenceConfig:
+    """Parse ``detectors.state_evidence`` (STATE-1).
+
+    Structure and types only, like every other section: what the values *mean*
+    (a workspace that exists, a git repository, a usable pytest selection) is
+    checked by :func:`pathlayer.coding_state.build_state_producer`, which owns
+    that knowledge and is also reached by the capture side.
+    """
+    section = _Section(data, "detectors.state_evidence")
+    build_raw = _as_mapping(section._pop("build", {}), "detectors.state_evidence.build")
+    tools_raw = _as_mapping(section._pop("tools", {}), "detectors.state_evidence.tools")
+    config = StateEvidenceConfig(
+        enabled=section.bool_("enabled", False),
+        preset=section.str_("preset", "coding"),
+        workspace=section.str_("workspace", "."),
+        git=section.bool_("git", True),
+        tests=tuple(section.str_list("tests", [])),
+        timeout_seconds=section.nonnegative_float("timeout_seconds", 60.0),
+        tools=_parse_tool_rules(tools_raw),
+    )
+    section.finish()
+
+    build_s = _Section(build_raw, "detectors.state_evidence.build")
+    config.build_id = build_s.str_("id", "")
+    config.build_command = tuple(build_s.str_list("command", []))
+    build_s.finish()
+    return config
+
+
+def _parse_tool_rules(data: Mapping[str, Any]) -> dict[str, ToolRuleConfig]:
+    rules: dict[str, ToolRuleConfig] = {}
+    for tool, spec in data.items():
+        where = f"detectors.state_evidence.tools.{tool}"
+        rule_s = _Section(_as_mapping(spec, where), where)
+        rules[str(tool)] = ToolRuleConfig(
+            effect=rule_s.str_("effect", ""),
+            paths=tuple(rule_s.str_list("paths", [])),
+        )
+        rule_s.finish()
+    return rules
 
 
 def _parse_canonicalization(data: Mapping[str, Any]) -> CanonicalizationConfig:
@@ -850,6 +931,15 @@ def build_pipeline(
                     spec.progress_proof.timeout_seconds,
                 )
                 anchors.append(ProofProgressAnchor())
+            if spec.state_evidence.enabled:
+                # STATE-1: an unclaimed call (a read, an unknown tool) is a gap
+                # here, never a stagnant step -- an exploration phase must not
+                # be counted as standing still. The anchor also steps aside for
+                # test results and progress proofs, so an observed effect can
+                # never keep a stalled objective quiet.
+                anchors.append(
+                    CodingStateProgressAnchor(unclaimed=UNCLAIMED_GAP, defer_to_objective=True)
+                )
             detectors.append(
                 NoProgressDetector(
                     anchors,
@@ -932,6 +1022,22 @@ def build_pipeline(
     except ValueError as exc:
         raise ConfigError(f"invalid configuration value: {exc}") from exc
 
+    if spec.state_evidence.enabled:
+        # Same fail-fast contract as progress_proof above: a workspace that does
+        # not exist, is not a git repository, or a rule naming no argument must
+        # fail the build, not silently observe nothing for a whole run. Only
+        # the machine-independent half: the anchors read recorded evidence, so a
+        # pipeline must stay buildable where the observed workspace does not
+        # exist -- replaying a trace elsewhere is supported. The capture side
+        # (state_evidence_producer_from_config) checks the workspace. Outside
+        # the block above on purpose: CodingStateError already *is* a
+        # ConfigError naming the offending key, and re-wrapping it as a generic
+        # "invalid configuration value" would bury that. Local import:
+        # pathlayer.coding_state imports this module for its config types.
+        from pathlayer.coding_state import validate_preset_config
+
+        validate_preset_config(spec.state_evidence)
+
     resolved_logger = logger or logging.getLogger(__name__)
     if not detectors:
         # A pipeline with no detectors can never act -- almost always a config
@@ -950,6 +1056,16 @@ def build_pipeline(
             "detectors.no_progress is disabled: the checkpoint_set anchor has "
             "nowhere to wire, so the configured probe will run on every tool "
             "call for no effect"
+        )
+    if spec.state_evidence.enabled and not spec.no_progress.enabled:
+        # Both consumers of the preset hang off no_progress: its anchor list,
+        # and the loop<-progress suppression that only exists when no_progress
+        # does. Disabled, the preset would collect state around every tool call
+        # for nothing. Warn -- don't fail -- like progress_proof above.
+        resolved_logger.warning(
+            "build_pipeline: detectors.state_evidence is enabled but "
+            "detectors.no_progress is disabled: the coding state anchor has nowhere "
+            "to wire, so the preset will observe state on every tool call for no effect"
         )
     # Audit #117 finding M-1: LOOP-2's n-gram fallback is an uncalibrated
     # heuristic (see pathlayer.detectors.loop module docstring) that is only
@@ -1062,7 +1178,16 @@ def build_pipeline(
             )
     # Same gating as the suppression rule above: the anchors only matter paired
     # with a rule that consumes them, so skip building them otherwise.
-    progress_anchors = loop_suppression_anchors() if suppressions else None
+    progress_anchors: list[ProgressAnchor] | None = None
+    if suppressions:
+        progress_anchors = list(loop_suppression_anchors())
+        if spec.state_evidence.enabled:
+            # STATE-1: here an unclaimed call holds the last level instead of
+            # dropping it. Suppression needs a baseline to compare against, and
+            # a read between two edits must not cost the next edit its evidence
+            # of progress. Holding never suppresses on its own: only a strictly
+            # higher level does.
+            progress_anchors.append(CodingStateProgressAnchor(unclaimed=UNCLAIMED_HOLD))
     pipeline = Pipeline(
         detectors,
         policy,

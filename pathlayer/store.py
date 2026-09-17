@@ -50,6 +50,13 @@ STATE_SEMANTICS_VERSION = 2
 # under both readings, yet leaves the anchor in a different state, and the next
 # decision silently changes after a resume.
 PROGRESS_PROOF_SEMANTICS_VERSION = 2
+
+# Versions how an *enabled* state_evidence section reads events, folded into
+# the fingerprint of preset-enabled configurations only (see
+# configuration_fingerprint). 1 = STATE-1: the coding preset plans resources
+# per tool call, and its anchor credits novelty per observed resource while an
+# unclaimed call is a gap for no_progress and a hold for loop suppression.
+STATE_EVIDENCE_SEMANTICS_VERSION = 1
 TERMINAL_STATUSES = frozenset({"completed", "interrupted", "stopped"})
 _VALID_CLOSE_STATUSES = TERMINAL_STATUSES
 _T = TypeVar("_T")
@@ -435,8 +442,18 @@ def configuration_fingerprint(config: Any) -> str:
         if isinstance(progress_proof, dict) and progress_proof.get("enabled") is False:
             detectors.pop("progress_proof", None)
         proof_enabled = isinstance(progress_proof, dict) and progress_proof.get("enabled") is True
+        # STATE-1's state_evidence section is new in the same way, and treated
+        # the same way: dropped while disabled so every pre-STATE-1 database
+        # keeps its exact fingerprint, retained once enabled so a state
+        # journaled under a different observed scope is rejected rather than
+        # resumed against evidence it never saw.
+        state_evidence = detectors.get("state_evidence")
+        if isinstance(state_evidence, dict) and state_evidence.get("enabled") is False:
+            detectors.pop("state_evidence", None)
+        state_enabled = isinstance(state_evidence, dict) and state_evidence.get("enabled") is True
     else:
         proof_enabled = False
+        state_enabled = False
     payload: dict[str, Any] = {
         # Keep the same canonical shape as the first INF-1 draft while
         # explicitly excluding future observability/pricing-only sections.
@@ -448,6 +465,8 @@ def configuration_fingerprint(config: Any) -> str:
         # Only an enabled section reads proofs; every other configuration keeps
         # its exact historical fingerprint (see PROGRESS_PROOF_SEMANTICS_VERSION).
         payload["progress_proof_semantics"] = PROGRESS_PROOF_SEMANTICS_VERSION
+    if state_enabled:
+        payload["state_evidence_semantics"] = STATE_EVIDENCE_SEMANTICS_VERSION
     return _canonical_sha256(payload)
 
 

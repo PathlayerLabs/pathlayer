@@ -32,9 +32,17 @@ from pathlayer.store import (
     configuration_fingerprint,
 )
 
-# Computed by the code on main before ANC-4 (2370cee) for these exact configs.
-_PRE_ANC4_DEFAULT = "b15037528988ec774f889c83bcf27254ea2f69f23bdfc4b33177b3c9471c8a3b"
-_PRE_ANC4_PROOF = "0577508c4e5ce242771ac8f0c3c5ced6702340e4f52da584e1cdefe56722a52f"
+# Computed by the code on main immediately before ANC-4 and after OBS-2
+# (cd1547a) for these exact configs. The revision matters: these literals were
+# first frozen at 2370cee, before OBS-2 bumped STATE_SEMANTICS_VERSION from 1
+# to 2 for its estimated-cost semantics. That bump deliberately changes every
+# fingerprint, so ANC-4 -- branched before OBS-2 and merged after it -- carried
+# literals describing a version that no longer existed, and both tests below
+# failed on main without either pull request being wrong. Re-freezing them at
+# cd1547a restores what they were always meant to assert: that *ANC-4* left
+# non-proof fingerprints alone.
+_PRE_ANC4_DEFAULT = "8e8d94244f0e3dc94e596c55ecbd2e1f957010c28549623790f8e95355433a65"
+_PRE_ANC4_PROOF = "2aefccef7ddc2afa9e2cf88bcd445de4a2b6fa80514bc0ba4bbe4f3e2c7ef8d5"
 _SECTION = {
     "enabled": True,
     "manifest_path": "proof_spec.json",

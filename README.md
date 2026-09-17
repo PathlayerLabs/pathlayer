@@ -483,6 +483,67 @@ See [VAL-5 integration and measured results](benchmarks/val5/README.md) for the
 bounded runtime GO, configuration and abstentions. Novelty is not proof of task
 success or semantic progress.
 
+### The coding state preset
+
+Naming every resource by hand does not scale to a coding agent that touches a
+different file on every call. The opt-in `coding` preset selects them from the
+arguments of the call itself:
+
+```yaml
+detectors:
+  state_evidence:
+    enabled: true
+    preset: coding
+    workspace: .            # where the tools' paths are resolved
+    git: true               # observe the whole working tree as one resource
+    tests: []               # optional exact pytest nodeids
+    build: {}               # optional {id: check, command: [python, -m, mypy, src]}
+    tools:                  # optional, for tools Pathlayer does not know
+      apply_patch: {effect: workspace}
+      save_code: {effect: write, paths: [target]}
+```
+
+```python
+adapter = LangGraphAdapter.from_config(sink, config)   # capture side
+pipeline = build_pipeline(config)                      # consumer side
+```
+
+What each call is observed on is decided by explicit rules, never by guessing:
+
+| Call | Observed |
+| --- | --- |
+| A known file-writing tool (`write_file`, `move_file`, `file_delete`, `copy_file`) | the named file(s), plus the configured scope |
+| A text-editor call (`command` + `path`) | that `path`, plus the configured scope |
+| A tool declared under `tools` | what the declaration names |
+| A read, or a tool Pathlayer does not know | nothing: the call claims no state |
+| A mutating call whose paths cannot be resolved | the configured scope alone, never an invented file |
+| The same, with no scope configured (`git: false`, no `tests`, no `build`) | nothing |
+
+`tests` and `build` are observed once before and once after every observed
+call, inside the adapter's lock, so the agent waits for them; `timeout_seconds`
+(default 60) bounds each run. Leave them empty unless the selection is fast.
+
+Paths outside the workspace, unusable paths, calls naming more files than can
+be attributed, and two tool calls whose boundaries overlap are abstentions:
+they produce fewer observations, never a fabricated one. A missing observation
+stays a gap and never becomes `unchanged`.
+
+The git resource fingerprints the working tree's *content*, so committing,
+staging or amending is not a change, editing a file is, and `.gitignore` decides
+what counts. Observation never writes to the observed repository.
+
+A configured `build.command` runs with the workspace as its working directory,
+and the observed agent can write there. Name the executable by absolute path,
+or keep it outside the agent's reach: an agent that can plant a binary the
+command resolves to can make Pathlayer run it. This is the same trust boundary
+an ANC-4 probe has.
+
+Two limits worth stating plainly. An observed effect is not success: the anchor
+that feeds `no_progress` stops measuring as soon as test results or ANC-4
+proofs are present, so an effect can never keep a stalled objective quiet.
+And novelty is gameable -- an agent writing fresh junk on every call reaches new
+states -- so pair the preset with a contract when the objective can be stated.
+
 The fragment assumes `graph` and `initial_state` already exist. For WARN to
 reach the model, add `actuator.injection_node()` before the model node.
 SUMMARIZE additionally requires `summary_tool()`, `summary_gate_node(sink)` and

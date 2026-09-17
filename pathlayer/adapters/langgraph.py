@@ -38,6 +38,18 @@ the agent step, waits for the probe. A failing probe yields an event without a
 proof (ANC-2's fail-soft contract); an unexpected producer error is logged and
 never reaches the agent. Replays read the recorded proof and never re-probe.
 
+State evidence (ARCH-2, STATE-1): given a ``state_evidence`` producer, the
+adapter brackets every ``TOOL_CALL`` with a ``before``/``after`` observation
+and embeds the validated envelope in that event's ``metadata``. A producer
+built on a planner (the STATE-1 coding preset) is asked, at each ``before``
+boundary, what this call's own arguments make observable; a call it abstains on
+carries no envelope, exactly like the zero-config path. Two tool calls whose
+boundaries overlap both withdraw to ``unavailable``: a change observed while
+another call was running cannot be attributed to either. Like the probe above,
+sensors run inside the emission lock, so the agent step waits for them -- a
+configured test selection or validation command is paid twice per observed
+call.
+
 This module imports ``langchain_core`` and so is an **optional** import: install
 the ``langgraph`` extra (``pip install pathlayer[langgraph]``). It is
 deliberately *not* re-exported from :mod:`pathlayer.adapters`.
@@ -260,7 +272,19 @@ class LangGraphAdapter(Adapter):
         This is the official construction path when ``PathlayerConfig.pricing``
         should affect budget decisions. It deliberately does no remote price
         lookup: the configuration snapshot is the complete pricing authority.
+
+        It also wires the STATE-1 coding preset when
+        ``detectors.state_evidence`` is enabled, so the capture side and
+        ``build_pipeline``'s consumer side come from the same configuration. An
+        explicit ``state_evidence`` argument wins; with the section disabled
+        (the default) no producer is built and capture is unchanged.
         """
+        if state_evidence is None:
+            # Local import: pathlayer.coding_state imports from pathlayer.config,
+            # which this module already imports for PathlayerConfig.
+            from pathlayer.coding_state import state_evidence_producer_from_config
+
+            state_evidence = state_evidence_producer_from_config(config)
         return cls(sink, prices=config.pricing.effective_prices(), state_evidence=state_evidence)
 
     def attach(self) -> None:
@@ -295,18 +319,21 @@ class LangGraphAdapter(Adapter):
         with self._lock:
             state_capture = None
             if self._state_evidence is not None and kind is EventKind.TOOL_CALL:
+                # Any other tool call still in flight can change the same state,
+                # whether or not *it* is observed: a call the planner abstained
+                # on (a shell command, an unknown tool) is exactly the kind that
+                # might. Overlap therefore withdraws both sides.
                 overlapping = [
-                    item for item in self._pending.values() if item.state_capture is not None
+                    item for item in self._pending.values() if item.kind is EventKind.TOOL_CALL
                 ]
-                if overlapping:
-                    for item in overlapping:
-                        assert item.state_capture is not None
-                        item.state_capture = self._state_evidence.unavailable_capture(
-                            item.state_capture.tool_event_ref
+                for item in overlapping:
+                    if item.state_capture is not None:
+                        item.state_capture = self._state_evidence.unavailable_for(
+                            item.state_capture
                         )
-                    state_capture = self._state_evidence.unavailable_capture(run_id)
-                else:
-                    state_capture = self._state_evidence.capture_before(run_id)
+                state_capture = self._state_evidence.plan_capture(
+                    run_id, tool=tool, args=args, observable=not overlapping
+                )
             self._pending[run_id] = _Pending(
                 tool=tool,
                 args=args,
