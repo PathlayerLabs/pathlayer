@@ -69,7 +69,7 @@ def test_stagnation_is_stopped_only_with_the_contract(results: dict[str, Any]) -
     """Activity without success: calculator.py changes on every call (an observed
     effect worth one step, once) while no test ever passes."""
     stagnant = results["stagnant"]
-    assert stagnant.live_stop == 11
+    assert stagnant.live_stop == 10
     assert stagnant.no_progress_max == pytest.approx(1.0)
     # Without the contract the same stuck agent runs its whole script.
     assert stagnant.baseline_stop is None
@@ -79,7 +79,7 @@ def test_stagnation_is_stopped_only_with_the_contract(results: dict[str, Any]) -
 
 def test_oscillation_never_counts_as_new_progress(results: dict[str, Any]) -> None:
     oscillating = results["oscillating"]
-    assert oscillating.live_stop == 11
+    assert oscillating.live_stop == 10
     assert oscillating.baseline_stop is None
 
 

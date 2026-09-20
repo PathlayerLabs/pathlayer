@@ -99,6 +99,8 @@ def _loop_events() -> list[ToolEvent]:
 
 def _exercise_core() -> None:
     expected_api = {
+        "CodingDiagnostic",
+        "build_coding_diagnostic",
         "ConfigError",
         "PathlayerConfig",
         "PersistentPipeline",

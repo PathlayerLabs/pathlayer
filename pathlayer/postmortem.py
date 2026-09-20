@@ -47,6 +47,213 @@ if TYPE_CHECKING:
     from pathlayer.pipeline import PipelineDecision
 
 
+@dataclass(frozen=True, slots=True)
+class CodingDiagnostic:
+    """Small, user-facing projection for one coding-agent session.
+
+    The raw event metadata remains the durable forensic artefact.  This view
+    deliberately exposes only the facts needed to understand a decision:
+    contract state, the latest observable progress, the resource's latest
+    state, calls since progress, and the detector that actually intervened.
+    It never prints a fingerprint or treats a changed file as task success.
+    """
+
+    contract_state: str
+    last_progress: str | None
+    last_progress_event: int | None
+    state_resources: tuple[str, ...]
+    state_outcome: str | None
+    state_event: int | None
+    calls_since_progress: int | None
+    intervention: str | None
+    intervention_event: int | None
+    intervention_action: str | None = None
+    intervention_reason: str | None = None
+    would_have_action: str | None = None
+    would_have_reason: str | None = None
+    would_have_event: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_state": self.contract_state,
+            "last_progress": self.last_progress,
+            "last_progress_event": self.last_progress_event,
+            "state_resources": list(self.state_resources),
+            "state_outcome": self.state_outcome,
+            "state_event": self.state_event,
+            "calls_since_progress": self.calls_since_progress,
+            "intervention": self.intervention,
+            "intervention_event": self.intervention_event,
+            "intervention_action": self.intervention_action,
+            "intervention_reason": self.intervention_reason,
+            "would_have_action": self.would_have_action,
+            "would_have_reason": self.would_have_reason,
+            "would_have_event": self.would_have_event,
+        }
+
+    def format(self) -> str:
+        lines = [f"contract: {self.contract_state}"]
+        if self.last_progress is None:
+            lines.append("last contract progress: none observed")
+        else:
+            lines.append(
+                f"last contract progress: {self.last_progress} (event {self.last_progress_event})"
+            )
+        if not self.state_resources:
+            lines.append("state evidence: none recorded")
+        else:
+            lines.append(
+                f"state evidence: {', '.join(self.state_resources)} is {self.state_outcome} "
+                f"(event {self.state_event})"
+            )
+        if self.calls_since_progress is None:
+            lines.append("tool calls since contract progress: not applicable")
+        else:
+            lines.append(f"tool calls since contract progress: {self.calls_since_progress}")
+        if self.intervention is None:
+            lines.append("intervention: none")
+        else:
+            lines.append(
+                f"intervention: {self.intervention_action} — {self.intervention_reason} "
+                f"(event {self.intervention_event})"
+            )
+        if self.would_have_action is not None:
+            lines.append(
+                f"would have intervened: {self.would_have_action} — {self.would_have_reason} "
+                f"(event {self.would_have_event})"
+            )
+        return "\n".join(lines)
+
+
+def build_coding_diagnostic(
+    events: Sequence[ToolEvent], ticks: Sequence[TickRecord]
+) -> CodingDiagnostic:
+    """Project recorded coding evidence and decisions without any I/O.
+
+    ``ticks`` may be shorter than ``events`` after an enforced STOP.  Their
+    indexes are the pipeline's zero-based event indexes; duplicate indexes are
+    rejected because their intervention attribution would be ambiguous.
+    """
+    # These modules depend on the pipeline, which imports ``postmortem`` for
+    # the STOP record.  Projection happens after capture, so keeping the
+    # imports here preserves the one-way startup dependency.
+    from pathlayer.detectors.proof import ProofProgressAnchor
+    from pathlayer.state_evidence import state_evidence_from_event
+
+    by_index: dict[int, TickRecord] = {}
+    for tick in ticks:
+        if tick.index in by_index:
+            raise ValueError("coding diagnostic requires unique tick indexes")
+        by_index[tick.index] = tick
+
+    anchor = ProofProgressAnchor()
+    proof_state = anchor.create_state()
+    contract_state = "no contract observed"
+    last_progress: str | None = None
+    last_progress_event: int | None = None
+    state_resources: tuple[str, ...] = ()
+    state_outcome: str | None = None
+    state_event: int | None = None
+    intervention: str | None = None
+    intervention_event: int | None = None
+    calls_since_progress: int | None = None
+    intervention_action: str | None = None
+    intervention_reason: str | None = None
+    would_have_action: str | None = None
+    would_have_reason: str | None = None
+    would_have_event: int | None = None
+
+    for index, event in enumerate(events):
+        prior = proof_state.active
+        proof_state, snapshot = proof_state.advance(event)
+        active = proof_state.active
+        # Use the detector's accepted epoch, sequence, and trust-boundary semantics.
+        previous = (
+            dict(prior.states) if prior and active and prior.spec_hash == active.spec_hash else {}
+        )
+        newly_true = (
+            [
+                checkpoint
+                for checkpoint, value in active.states
+                if value and not previous.get(checkpoint, False)
+            ]
+            if active
+            else []
+        )
+        if active is not None and (prior is None or prior.spec_hash != active.spec_hash):
+            # A new contract epoch makes prior progress and call counts irrelevant.
+            last_progress = None
+            last_progress_event = None
+            calls_since_progress = 0
+        if active is not None:
+            if newly_true:
+                last_progress = newly_true[0]
+                last_progress_event = index
+                calls_since_progress = 0
+            else:
+                assert calls_since_progress is not None
+                calls_since_progress += 1
+        if active is None:
+            contract_state = "unobserved" if proof_state.known_specs else "no contract observed"
+        elif snapshot.level is None:
+            contract_state = "unobserved"
+        else:
+            contract_state = "reached" if snapshot.satisfied else "incomplete"
+
+        envelope = state_evidence_from_event(event)
+        if envelope is not None:
+            pairs = list(zip(envelope.records[::2], envelope.records[1::2], strict=True))
+            matching = [
+                (before, after)
+                for before, after in pairs
+                if (
+                    any(r.status == envelope.outcome.value for r in (before, after))
+                    if envelope.outcome.value in ("unavailable", "collection_failed")
+                    else (before.canonical_fingerprint != after.canonical_fingerprint)
+                    == (envelope.outcome.value == "changed")
+                )
+            ]
+            # state_evidence_from_event has already verified that every envelope
+            # outcome has at least one matching before/after pair.
+            state_resources = tuple(after.resource_id for _, after in matching)
+            state_outcome = envelope.outcome.value
+            state_event = index
+
+        decision_tick = by_index.get(index)
+        if decision_tick is not None and decision_tick.action is not Action.NONE:
+            action = decision_tick.action.name.lower()
+            reason = decision_tick.reason or action
+            if decision_tick.dry_run:
+                if would_have_action is None:
+                    would_have_action = action
+                    would_have_reason = reason
+                    would_have_event = index
+            elif intervention is None:
+                intervention = (
+                    decision_tick.reason.split(":", 1)[0] if decision_tick.reason else action
+                )
+                intervention_event = index
+                intervention_action = action
+                intervention_reason = reason
+
+    return CodingDiagnostic(
+        contract_state=contract_state,
+        last_progress=last_progress,
+        last_progress_event=last_progress_event,
+        state_resources=state_resources,
+        state_outcome=state_outcome,
+        state_event=state_event,
+        calls_since_progress=calls_since_progress,
+        intervention=intervention,
+        intervention_event=intervention_event,
+        intervention_action=intervention_action,
+        intervention_reason=intervention_reason,
+        would_have_action=would_have_action,
+        would_have_reason=would_have_reason,
+        would_have_event=would_have_event,
+    )
+
+
 @dataclass(slots=True)
 class PostMortem:
     action: Action

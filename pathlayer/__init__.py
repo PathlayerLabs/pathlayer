@@ -11,10 +11,12 @@ from pathlayer.adapters.base import RunAwareEventSink
 from pathlayer.config import ConfigError, PathlayerConfig, build_pipeline, load_config
 from pathlayer.pipeline import Pipeline, PipelineDecision, WouldBeAction
 from pathlayer.postmortem import (
+    CodingDiagnostic,
     PostMortem,
     SessionOutcome,
     SessionReport,
     TickRecord,
+    build_coding_diagnostic,
     build_session_report,
 )
 from pathlayer.store import PersistentPipeline, SQLiteStateStore, StateStoreError
@@ -22,6 +24,7 @@ from pathlayer.store import PersistentPipeline, SQLiteStateStore, StateStoreErro
 __version__ = "0.1.0"
 
 __all__ = [
+    "CodingDiagnostic",
     "ConfigError",
     "PathlayerConfig",
     "PersistentPipeline",
@@ -36,6 +39,7 @@ __all__ = [
     "TickRecord",
     "WouldBeAction",
     "__version__",
+    "build_coding_diagnostic",
     "build_pipeline",
     "build_session_report",
     "load_config",

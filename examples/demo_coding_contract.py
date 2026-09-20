@@ -231,17 +231,17 @@ class _AgentState(TypedDict):
 
 def run_live(
     workspace: Path, config: PathlayerConfig, script: Sequence[Call]
-) -> tuple[list[ToolEvent], list[PipelineDecision | None], bool]:
+) -> tuple[list[ToolEvent], list[PipelineDecision], bool]:
     pipeline = build_pipeline(config)
     actuator = LangGraphActuator()
     sink = wire(pipeline, actuator)
     events: list[ToolEvent] = []
-    decisions: list[PipelineDecision | None] = []
+    decisions: list[PipelineDecision] = []
 
     def observe(event: ToolEvent) -> None:
         events.append(event)
         sink(event)
-        decisions.append(pipeline.last_decision)
+        append_new_decision(decisions, pipeline.last_decision)
 
     adapter = LangGraphAdapter(observe, progress_proof=producer_from_config(config))
     adapter.attach()
@@ -297,19 +297,27 @@ def _without_proofs(event: ToolEvent) -> ToolEvent:
     return replace(event, metadata=metadata)
 
 
-def _decide(config: PathlayerConfig, events: Sequence[ToolEvent]) -> list[PipelineDecision | None]:
+def append_new_decision(
+    decisions: list[PipelineDecision], decision: PipelineDecision | None
+) -> None:
+    """Keep one decision per processed tick, ignoring absent or stale snapshots."""
+    if decision is not None and (not decisions or decisions[-1].index != decision.index):
+        decisions.append(decision)
+
+
+def _decide(config: PathlayerConfig, events: Sequence[ToolEvent]) -> list[PipelineDecision]:
     pipeline = build_pipeline(config)
-    decisions = []
+    decisions: list[PipelineDecision] = []
     for event in events:
         pipeline.process(event)
-        decisions.append(pipeline.last_decision)
+        append_new_decision(decisions, pipeline.last_decision)
     return decisions
 
 
-def _first_stop(decisions: Sequence[PipelineDecision | None]) -> int | None:
-    for index, decision in enumerate(decisions, 1):
-        if decision is not None and decision.arbitrated_action is Action.STOP:
-            return index
+def _first_stop(decisions: Sequence[PipelineDecision]) -> int | None:
+    for decision in decisions:
+        if decision.arbitrated_action is Action.STOP:
+            return decision.index
     return None
 
 

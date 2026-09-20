@@ -39,6 +39,7 @@ from pathlayer.config import (
 )
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.budget import BudgetDetector
+from pathlayer.detectors.proof import ProofSpec, compute_spec_hash
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies import Action, Policy
@@ -48,6 +49,7 @@ from pathlayer.postmortem import (
     SessionOutcome,
     SignalObservation,
     TickRecord,
+    build_coding_diagnostic,
     build_session_report,
 )
 from pathlayer.validation.traces import load_trace
@@ -1452,3 +1454,135 @@ def test_recorded_llm_estimate_report_retains_provenance(tmp_path: Path, enabled
     assert report.cost.estimated_usd == pytest.approx(0.0012)
     assert report.cost.total_usd == pytest.approx(0.0012)
     assert "estimated" in report.cost.describe()
+
+
+def test_coding_diagnostic_names_progress_resource_and_intervention() -> None:
+    spec = ProofSpec(
+        schema_version=1,
+        task_id="fix-login",
+        proof_id="login-tests",
+        scope_id="workspace",
+        kind="checkpoint_set",
+        required=("tests/test_login.py::test_login",),
+    )
+    spec_hash = compute_spec_hash(spec)
+    state = {
+        "schema_version": 1,
+        "outcome": "changed",
+        "records": [
+            {
+                "schema_version": 1,
+                "tool_event_ref": "run-1",
+                "phase": "before",
+                "resource_type": "filesystem",
+                "resource_id": "src/auth.py",
+                "status": "observed",
+                "raw_fingerprint": {"sha256": "before"},
+                "canonical_fingerprint": {"sha256": "before"},
+                "delta": None,
+                "collector_version": "filesystem/v1",
+            },
+            {
+                "schema_version": 1,
+                "tool_event_ref": "run-1",
+                "phase": "after",
+                "resource_type": "filesystem",
+                "resource_id": "src/auth.py",
+                "status": "observed",
+                "raw_fingerprint": {"sha256": "after"},
+                "canonical_fingerprint": {"sha256": "after"},
+                "delta": {"changed": True},
+                "collector_version": "filesystem/v1",
+            },
+        ],
+    }
+    events = [
+        ToolEvent(
+            tool="edit",
+            run_id="run-1",
+            metadata={
+                "proof_spec": {
+                    "schema_version": spec.schema_version,
+                    "task_id": spec.task_id,
+                    "proof_id": spec.proof_id,
+                    "scope_id": spec.scope_id,
+                    "kind": spec.kind,
+                    "required": list(spec.required),
+                },
+                "progress_proof": {
+                    "spec_hash": spec_hash,
+                    "sequence": 1,
+                    "checkpoints": {"tests/test_login.py::test_login": True},
+                },
+                "pathlayer_state_evidence": state,
+            },
+        ),
+        ToolEvent(
+            tool="edit",
+            run_id="run-2",
+            metadata={
+                "progress_proof": {
+                    "spec_hash": spec_hash,
+                    "sequence": 2,
+                    "checkpoints": {"tests/test_login.py::test_login": True},
+                }
+            },
+        ),
+    ]
+
+    diagnostic = build_coding_diagnostic(
+        events,
+        [_tick(0), _tick(1, action=Action.STOP, reason="no_progress: contract stalled")],
+    )
+
+    assert diagnostic.to_dict() == {
+        "contract_state": "reached",
+        "last_progress": "tests/test_login.py::test_login",
+        "last_progress_event": 0,
+        "state_resources": ["src/auth.py"],
+        "state_outcome": "changed",
+        "state_event": 0,
+        "calls_since_progress": 1,
+        "intervention": "no_progress",
+        "intervention_event": 1,
+        "intervention_action": "stop",
+        "intervention_reason": "no_progress: contract stalled",
+        "would_have_action": None,
+        "would_have_reason": None,
+        "would_have_event": None,
+    }
+    assert "sha256" not in diagnostic.format()
+    assert "src/auth.py is changed" in diagnostic.format()
+
+
+def test_coding_diagnostic_keeps_unavailable_distinct_from_unchanged() -> None:
+    event = ToolEvent(
+        tool="edit",
+        run_id="run-1",
+        metadata={
+            "pathlayer_state_evidence": {
+                "schema_version": 1,
+                "outcome": "unavailable",
+                "records": [
+                    {
+                        "schema_version": 1,
+                        "tool_event_ref": "run-1",
+                        "phase": phase,
+                        "resource_type": "filesystem",
+                        "resource_id": "src/auth.py",
+                        "status": "unavailable",
+                        "raw_fingerprint": None,
+                        "canonical_fingerprint": None,
+                        "delta": None,
+                        "collector_version": "filesystem/v1",
+                    }
+                    for phase in ("before", "after")
+                ],
+            }
+        },
+    )
+
+    diagnostic = build_coding_diagnostic([event], [_tick(0)])
+
+    assert diagnostic.state_outcome == "unavailable"
+    assert "unavailable" in diagnostic.format()
