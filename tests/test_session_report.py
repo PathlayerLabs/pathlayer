@@ -9,6 +9,7 @@ as carrying none (never "no detector reacted"), and a run nobody saw finish is
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import os
@@ -36,6 +37,7 @@ from pathlayer.config import (
     PathlayerConfig,
     PipelineSection,
     PolicySection,
+    build_pipeline,
 )
 from pathlayer.detectors.base import Detector, Signal
 from pathlayer.detectors.budget import BudgetDetector
@@ -288,6 +290,303 @@ def test_healthy_run_is_completed_with_no_action() -> None:
     assert data["actions"] == []
     assert data["events_analyzed"] == 3
     assert "never left 0.00" in report.format()
+
+
+def test_repeated_signal_is_one_finding_with_its_occurrence_count() -> None:
+    events = [ToolEvent(tool="shell_exec", ts=float(index)) for index in range(3)]
+    ticks = [
+        _tick(
+            index,
+            signals=(SignalObservation("loop", 0.5 + index / 10, f"{index + 2}x repeat"),),
+        )
+        for index in range(3)
+    ]
+
+    report = build_session_report(
+        run_id="run-one-incident",
+        status="completed",
+        ticks=ticks,
+        events_recorded=3,
+        events=events,
+    )
+
+    assert report.to_dict()["findings"] == [
+        {
+            "detector": "loop",
+            "tools": ["shell_exec"],
+            "first_index": 0,
+            "last_index": 2,
+            "occurrences": 3,
+            "peak_confidence": 0.7,
+            "peak_reason": "4x repeat",
+        }
+    ]
+    assert "loop / shell_exec: 3 occurrences" in report.format()
+    # The projection is read-only: the raw record still has each observation.
+    assert [tick.signals[0].reason for tick in ticks] == ["2x repeat", "3x repeat", "4x repeat"]
+
+
+def test_separate_signal_episodes_are_not_merged() -> None:
+    events = [ToolEvent(tool="shell_exec", ts=float(index)) for index in range(5)]
+    ticks = [
+        _tick(0, signals=(SignalObservation("loop", 0.5),)),
+        _tick(1, signals=(SignalObservation("loop", 0.6),)),
+        _tick(2, signals=(SignalObservation("loop", 0.0),)),
+        _tick(3, signals=(SignalObservation("loop", 0.7),)),
+        _tick(4, signals=(SignalObservation("loop", 0.8),)),
+    ]
+
+    report = build_session_report(
+        run_id="run-two-incidents",
+        status="completed",
+        ticks=ticks,
+        events_recorded=5,
+        events=events,
+    )
+
+    assert [
+        (finding.first_index, finding.last_index, finding.occurrences)
+        for finding in report.findings
+    ] == [
+        (0, 1, 2),
+        (3, 4, 2),
+    ]
+
+
+def test_a_missing_or_unusable_tick_also_ends_an_episode() -> None:
+    ticks = [
+        _tick(0, signals=(SignalObservation("loop", 0.5),)),
+        # No tick for event 1: nothing was analyzed there, so nothing joins it.
+        _tick(2, signals=(SignalObservation("loop", 0.6),)),
+        _tick(3, signals=(SignalObservation("loop", float("nan")),)),
+        _tick(4, signals=(SignalObservation("loop", 0.7),)),
+    ]
+
+    report = build_session_report(
+        run_id="run-gaps", status="completed", ticks=ticks, events_recorded=5
+    )
+
+    assert [(finding.first_index, finding.last_index) for finding in report.findings] == [
+        (0, 0),
+        (2, 2),
+        (4, 4),
+    ]
+    # Without a trace there is no tool to name: the detector alone labels it.
+    assert report.findings[0].tools == ()
+    assert "  loop: 1 occurrence (event 0, peak 0.50)" in report.format()
+
+
+def test_a_tool_change_inside_one_episode_labels_it_with_both_tools() -> None:
+    # The boundary is the detector's reading, not the tool: a loop over several
+    # tools is one incident, and both tools name it.
+    ticks = [
+        _tick(0, signals=(SignalObservation("loop", 0.5),)),
+        _tick(1, signals=(SignalObservation("loop", 0.6),)),
+        _tick(2, signals=(SignalObservation("loop", 0.7),)),
+    ]
+    events = [ToolEvent(tool="shell_exec"), ToolEvent(tool="python"), ToolEvent(tool="shell_exec")]
+
+    report = build_session_report(
+        run_id="run-tool-change",
+        status="completed",
+        ticks=ticks,
+        events_recorded=3,
+        events=events,
+    )
+
+    assert [(finding.tools, finding.occurrences) for finding in report.findings] == [
+        (("shell_exec", "python"), 3)
+    ]
+    assert "loop / shell_exec, python: 3 occurrences" in report.format()
+
+
+def test_a_long_episode_names_its_first_tools_and_counts_the_rest() -> None:
+    tools = ["read", "edit", "shell", "grep", "write"]
+    events = [ToolEvent(tool=tool) for tool in tools]
+    ticks = [_tick(index, signals=(SignalObservation("budget", 0.4),)) for index in range(5)]
+
+    report = build_session_report(
+        run_id="run-many-tools",
+        status="completed",
+        ticks=ticks,
+        events_recorded=5,
+        events=events,
+    )
+
+    assert report.findings[0].tools == tuple(tools)
+    assert "budget / read, edit, shell +2 more: 5 occurrences" in report.format()
+
+
+def test_a_sub_threshold_episode_is_not_called_an_incident() -> None:
+    # Healthy counterexample for the wording: a reading that never acted is a
+    # finding, never an incident, and the run still reports no action.
+    ticks = [_tick(0, signals=(SignalObservation("loop", 0.5),))]
+
+    text = build_session_report(
+        run_id="run-sub-threshold", status="completed", ticks=ticks, events_recorded=1
+    ).format()
+
+    assert "findings: 1 episode(s) of non-zero detector readings" in text
+    assert "incident" not in text
+    assert "actions: none arbitrated" in text
+
+
+def test_a_higher_peak_without_a_reason_does_not_keep_a_stale_reason() -> None:
+    ticks = [
+        _tick(0, signals=(SignalObservation("loop", 0.5, "2x repeat"),)),
+        _tick(1, signals=(SignalObservation("loop", 0.9),)),
+    ]
+
+    report = build_session_report(
+        run_id="run-reasonless-peak", status="completed", ticks=ticks, events_recorded=2
+    )
+
+    assert (report.findings[0].peak_confidence, report.findings[0].peak_reason) == (0.9, "")
+
+
+def _dry_run_ticks(events: Sequence[ToolEvent]) -> list[TickRecord]:
+    """Drive the default pipeline in dry-run so every event keeps its tick."""
+    pipeline = build_pipeline(PathlayerConfig(pipeline=PipelineSection(dry_run=True)))
+    return [TickRecord.from_decision(decision) for decision in pipeline.restore_decisions(events)]
+
+
+def _llm(ts: float) -> ToolEvent:
+    return ToolEvent(tool="claude-sonnet", kind=EventKind.LLM_CALL, ts=ts)
+
+
+def test_a_loop_interleaved_with_llm_calls_is_one_finding_on_its_tool() -> None:
+    # The shape of a real OpenClaw run: one LLM_CALL between every tool call.
+    # The loop detector ignores the LLM_CALL but keeps its confidence on that
+    # tick, so a per-event tool key would alternate between the tool and the
+    # model and report one "incident" per event.
+    events: list[ToolEvent] = []
+    for _ in range(12):
+        events.append(_llm(float(len(events))))
+        events.append(ToolEvent(tool="shell_exec", args={"cmd": "ls"}, ts=float(len(events))))
+
+    report = build_session_report(
+        run_id="run-interleaved",
+        status="completed",
+        ticks=_dry_run_ticks(events),
+        events_recorded=len(events),
+        events=events,
+    )
+
+    loops = [finding for finding in report.findings if finding.detector == "loop"]
+    assert len(loops) == 1
+    assert loops[0].tools == ("shell_exec",)
+    assert loops[0].last_index == len(events) - 1
+    assert "claude-sonnet" not in report.format()
+
+
+def test_a_loop_over_two_tools_is_one_finding() -> None:
+    events = [
+        ToolEvent(tool=tool, args={"arg": tool}, ts=float(index))
+        for index, tool in enumerate(["read_file", "shell_exec"] * 10)
+    ]
+
+    report = build_session_report(
+        run_id="run-two-tool-loop",
+        status="completed",
+        ticks=_dry_run_ticks(events),
+        events_recorded=len(events),
+        events=events,
+    )
+
+    loops = [finding for finding in report.findings if finding.detector == "loop"]
+    # Ordered by first appearance in the episode: the loop first fires once the
+    # second block completes, on a shell_exec.
+    assert [finding.tools for finding in loops] == [("shell_exec", "read_file")]
+
+
+def test_a_healthy_agent_alternating_tools_and_llm_calls_has_no_loop_finding() -> None:
+    # Healthy counterexample: varied actions with distinct arguments and model
+    # turns in between. Grouping must not invent an incident here.
+    events: list[ToolEvent] = []
+    for step in range(8):
+        for tool in ("read_file", "edit_file", "run_tests"):
+            events.append(_llm(float(len(events))))
+            events.append(
+                ToolEvent(tool=tool, args={"path": f"src/m{step}.py"}, ts=float(len(events)))
+            )
+
+    report = build_session_report(
+        run_id="run-healthy-varied",
+        status="completed",
+        ticks=_dry_run_ticks(events),
+        events_recorded=len(events),
+        events=events,
+    )
+
+    assert [finding for finding in report.findings if finding.detector == "loop"] == []
+
+
+_GOLDEN_TRACES = sorted(
+    path
+    for folder in ("healthy", "loop")
+    for path in (Path(__file__).resolve().parent.parent / "traces" / folder).glob("*.json")
+)
+
+
+@pytest.mark.parametrize("path", _GOLDEN_TRACES, ids=lambda path: f"{path.parent.name}/{path.stem}")
+def test_findings_partition_each_detectors_active_ticks(path: Path) -> None:
+    events = list(load_trace(path).events)
+    report = build_session_report(
+        run_id=path.stem,
+        status="completed",
+        ticks=_dry_run_ticks(events),
+        events_recorded=len(events),
+        events=events,
+    )
+
+    for activity in report.detectors:
+        findings = [finding for finding in report.findings if finding.detector == activity.name]
+        assert sum(finding.occurrences for finding in findings) == activity.active_ticks
+        # Episodes are disjoint and ordered: none overlaps or touches the next.
+        for earlier, later in itertools.pairwise(findings):
+            assert earlier.last_index + 1 < later.first_index
+
+
+def test_recorded_openclaw_run_groups_findings_like_a_replay_of_its_trace(
+    tmp_path: Path,
+) -> None:
+    from pathlayer.config import PricingSection
+    from pathlayer.pricing import ModelPrice
+
+    config = PathlayerConfig(pricing=PricingSection(models={"model": ModelPrice(1.0, 2.0)}))
+    payloads: list[dict[str, Any]] = []
+    for index in range(_STOP_REPEATS + 2):
+        payloads.append(
+            {
+                "hook": "llm_output",
+                "event": {"runId": "loop-llm", "model": "model", "usage": {"total": 100}},
+                "ctx": _ctx("loop-llm"),
+            }
+        )
+        payloads.append(_tool("read", "loop-llm", f"c{index}"))
+    _record_run(tmp_path, "loop-llm", payloads, config=config)
+    run = _run(tmp_path, "loop-llm")
+
+    report = build_run_report(run)
+
+    # Live: the recorder's own journal. Replay: the trace through a fresh pipeline.
+    events = list(load_trace(run.trace_path).events)
+    assert any(event.kind is EventKind.LLM_CALL for event in events)
+    replayed = build_session_report(
+        run_id="replay",
+        status="completed",
+        ticks=[
+            TickRecord.from_decision(decision)
+            for decision in build_pipeline(config).restore_decisions(events)
+        ],
+        events_recorded=len(events),
+        events=events,
+    )
+    assert report.findings == replayed.findings
+    loops = [finding for finding in report.findings if finding.detector == "loop"]
+    assert [finding.tools for finding in loops] == [("read",)]
+    assert "loop / read:" in report.format()
+    assert " / model" not in report.format()
 
 
 def test_zero_fused_override_stop_does_not_claim_nothing_fired() -> None:

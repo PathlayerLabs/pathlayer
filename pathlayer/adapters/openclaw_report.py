@@ -431,6 +431,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         status=status,
         ticks=ticks,
         events_recorded=events_recorded,
+        events=events if trace_available else None,
         cost=cost,
         stopped=manifest.get("stopped") is True,
         session_key=manifest.get("session_key"),

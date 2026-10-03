@@ -7,9 +7,9 @@ Two records, two moments, one module:
   that step, and a tail of recent events. A run that never stops has none.
 - :class:`SessionReport` (OBS-2) is written *after* a run ends, whether it
   stopped or not: identity and duration, the final outcome, the cost with its
-  provenance, which detectors reacted and how strongly, the actions taken, and
-  the stop reason if there was one. :class:`TickRecord` is the per-event unit it
-  aggregates, projected from the pipeline's canonical
+  provenance, which detectors reacted and how strongly, the grouped findings,
+  the actions taken, and the stop reason if there was one. :class:`TickRecord`
+  is the per-event unit it aggregates, projected from the pipeline's canonical
   :class:`~pathlayer.pipeline.PipelineDecision` (see
   :meth:`TickRecord.from_decision`) and persisted by an adapter.
 
@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pathlayer.detectors.base import Signal
-from pathlayer.events import ToolEvent
+from pathlayer.events import EventKind, ToolEvent
 from pathlayer.policies import Action
 
 if TYPE_CHECKING:
@@ -654,6 +654,44 @@ class ActionTaken:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class IncidentFinding:
+    """One contiguous detector incident in the user-facing report.
+
+    The durable journal deliberately keeps one raw signal observation per
+    event. This projection groups only adjacent positive observations from the
+    same detector, so it never changes the detector's evidence and cannot join
+    episodes separated by a silent or missing tick.
+
+    The episode boundary is the detector's own reading, never the tool of the
+    event it was read on: an action detector keeps its confidence across an
+    interleaved ``LLM_CALL`` it ignores, and a loop over several tools is one
+    incident, so keying on the tool would split one incident into many.
+    ``tools`` only labels the episode with the distinct ``TOOL_CALL`` tools of
+    its span, in order of first appearance; it is empty when no trace is
+    available or the span holds no tool call.
+    """
+
+    detector: str
+    tools: tuple[str, ...]
+    first_index: int
+    last_index: int
+    occurrences: int
+    peak_confidence: float
+    peak_reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "detector": self.detector,
+            "tools": list(self.tools),
+            "first_index": self.first_index,
+            "last_index": self.last_index,
+            "occurrences": self.occurrences,
+            "peak_confidence": self.peak_confidence,
+            "peak_reason": self.peak_reason,
+        }
+
+
 def _confidence(value: float) -> str:
     """Render a confidence at two decimals, never rounding a real reading to zero.
 
@@ -746,6 +784,70 @@ def _actions_taken(ticks: Sequence[TickRecord]) -> tuple[ActionTaken, ...]:
     return tuple(taken)
 
 
+# How many of an episode's tools the text report names before "+N more".
+_FINDING_TOOLS_SHOWN = 3
+
+
+def _incident_findings(
+    ticks: Sequence[TickRecord], events: Sequence[ToolEvent] | None
+) -> tuple[IncidentFinding, ...]:
+    """Group repeated positive signals without altering the raw tick stream.
+
+    A finding is intentionally conservative: positive observations must be on
+    consecutive event indexes and from the same detector. A silent tick, an
+    unusable reading, or a missing tick ends it, so two separate episodes stay
+    distinct even when a detector later reports the same motif again. The tool
+    of each event only labels the episode (see :class:`IncidentFinding`): only
+    ``TOOL_CALL`` events name a tool, so an interleaved ``LLM_CALL`` neither
+    splits the episode nor lends it the model's name.
+
+    Every usable positive reading lands in exactly one finding, so a detector's
+    ``occurrences`` sum to its :attr:`DetectorActivity.active_ticks`.
+    """
+    event_tools = {
+        index: event.tool
+        for index, event in enumerate(events or ())
+        if event.kind is EventKind.TOOL_CALL
+    }
+    findings: list[IncidentFinding] = []
+    latest_by_detector: dict[str, int] = {}
+    for tick in ticks:
+        tool = event_tools.get(tick.index)
+        for signal in tick.signals:
+            if not _is_usable(signal.confidence) or signal.confidence <= 0.0:
+                continue
+            position = latest_by_detector.get(signal.name)
+            if position is not None and findings[position].last_index + 1 == tick.index:
+                previous = findings[position]
+                peaked = signal.confidence > previous.peak_confidence
+                tools = previous.tools
+                if tool is not None and tool not in tools:
+                    tools = (*tools, tool)
+                findings[position] = IncidentFinding(
+                    detector=previous.detector,
+                    tools=tools,
+                    first_index=previous.first_index,
+                    last_index=tick.index,
+                    occurrences=previous.occurrences + 1,
+                    peak_confidence=signal.confidence if peaked else previous.peak_confidence,
+                    peak_reason=signal.reason if peaked else previous.peak_reason,
+                )
+            else:
+                findings.append(
+                    IncidentFinding(
+                        detector=signal.name,
+                        tools=() if tool is None else (tool,),
+                        first_index=tick.index,
+                        last_index=tick.index,
+                        occurrences=1,
+                        peak_confidence=signal.confidence,
+                        peak_reason=signal.reason,
+                    )
+                )
+                latest_by_detector[signal.name] = len(findings) - 1
+    return tuple(findings)
+
+
 def _peak_fused(ticks: Sequence[TickRecord]) -> TickRecord | None:
     """The tick with the highest *recorded* fused score, earliest first on a tie.
 
@@ -787,6 +889,7 @@ class SessionReport:
     ticks_with_signals: int = 0
     cost: CostBreakdown = field(default_factory=CostBreakdown)
     detectors: tuple[DetectorActivity, ...] = ()
+    findings: tuple[IncidentFinding, ...] = ()
     peak_fused: float | None = None
     peak_fused_index: int | None = None
     peak_fused_ts: float | None = None
@@ -829,6 +932,7 @@ class SessionReport:
             "ticks_with_signals": self.ticks_with_signals,
             "cost": self.cost.to_dict(),
             "detectors": [activity.to_dict() for activity in self.detectors],
+            "findings": [finding.to_dict() for finding in self.findings],
             "peak_fused": self.peak_fused,
             "peak_fused_index": self.peak_fused_index,
             "peak_fused_ts": self.peak_fused_ts,
@@ -860,6 +964,7 @@ class SessionReport:
             f"cost: {self.cost.describe()}",
         ]
         lines.extend(self._detector_lines())
+        lines.extend(self._finding_lines())
         lines.append(self._fused_line())
         lines.extend(self._action_lines())
         if self.stop_reason:
@@ -938,6 +1043,36 @@ class SessionReport:
             )
         return f"fused score: peaked at {peak} {where}"
 
+    def _finding_lines(self) -> list[str]:
+        if not self.findings:
+            return ["findings: none"]
+        # An episode is any unbroken run of non-zero readings, including one that
+        # never reached an action threshold: the header must not call it an
+        # incident, and the actions section says what was actually done.
+        lines = [f"findings: {len(self.findings)} episode(s) of non-zero detector readings"]
+        for finding in self.findings:
+            label = finding.detector
+            if finding.tools:
+                # A long episode (a budget detector over hours) can cover every
+                # tool the agent has; to_dict keeps the full list.
+                shown = finding.tools[:_FINDING_TOOLS_SHOWN]
+                hidden = len(finding.tools) - len(shown)
+                label += " / " + ", ".join(shown) + (f" +{hidden} more" if hidden else "")
+            occurrence = "occurrence" if finding.occurrences == 1 else "occurrences"
+            span = (
+                f"event {finding.first_index}"
+                if finding.first_index == finding.last_index
+                else f"events {finding.first_index}-{finding.last_index}"
+            )
+            detail = (
+                f"  {label}: {finding.occurrences} {occurrence} "
+                f"({span}, peak {_confidence(finding.peak_confidence)})"
+            )
+            if finding.peak_reason:
+                detail += f" -- {finding.peak_reason}"
+            lines.append(detail)
+        return lines
+
     def _action_lines(self) -> list[str]:
         if not self.actions:
             return ["actions: none arbitrated"]
@@ -979,6 +1114,7 @@ def build_session_report(
     status: str,
     ticks: Sequence[TickRecord],
     events_recorded: int,
+    events: Sequence[ToolEvent] | None = None,
     cost: CostBreakdown | None = None,
     stopped: bool = False,
     session_key: str | None = None,
@@ -992,7 +1128,9 @@ def build_session_report(
 
     Pure: no I/O, no clock. ``ticks`` are the events that were actually
     analyzed, in order; events recorded past a passive STOP have no tick (no
-    detector ran for them) and are counted only in ``events_recorded``.
+    detector ran for them) and are counted only in ``events_recorded``. Optional
+    ``events`` labels findings with the observed tool and is never modified or
+    used to recompute detector output.
     ``stopped`` is what the run's own record says, so a STOP is still reported
     for a run whose journal was truncated before the STOP tick was written.
     """
@@ -1022,6 +1160,7 @@ def build_session_report(
         ticks_with_signals=sum(1 for tick in ordered if tick.signals),
         cost=cost if cost is not None else CostBreakdown(),
         detectors=_detector_activity(ordered),
+        findings=_incident_findings(ordered, events),
         peak_fused=peak.fused if peak is not None else None,
         peak_fused_index=peak.index if peak is not None else None,
         peak_fused_ts=peak.ts if peak is not None else None,

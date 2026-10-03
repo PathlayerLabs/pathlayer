@@ -230,6 +230,17 @@ killed mid-line is still reported, with a note saying the truncated line was
 dropped; a journal corrupted elsewhere is refused instead of summarised, and that
 run keeps no `report.json` (the failure is logged and the sweep continues).
 
+Repeated alerts are grouped into findings (OBS-3). A finding is one unbroken
+run of non-zero readings from the same detector, shown once with its
+occurrence count, event span, and peak confidence, and labelled with the tool
+calls it covered, for example `loop / shell_exec: 15 occurrences (events 3-17,
+peak 1.00)`. A model turn between two tool calls does not split it. A silent or
+missing reading ends it, so the detector firing again later is reported as a
+second finding. A finding does not mean Pathlayer acted: a reading below every
+action threshold still forms one, and `actions` lists what was actually
+arbitrated. This grouping affects only how the report presents the run:
+`decisions.jsonl` and `trace.json` still hold every event and every reading.
+
 `pathlayer-report` prints it back, rebuilding it from the run directory
 (`manifest.json`, `decisions.jsonl`, `trace.json`, `final.json`) rather than from
 any live state, so an `interrupted` run is reportable too:
