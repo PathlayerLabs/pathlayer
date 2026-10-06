@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
-from pathlayer.policies.actions import Action
+from pathlayer.policies.actions import Action, action_name
 from pathlayer.policies.actuation import ActuationContext
 from pathlayer.postmortem import PostMortem
 
@@ -71,7 +71,6 @@ class LoggingActuator(Actuator):
         self._logger = logger if logger is not None else logging.getLogger(__name__)
 
     def apply(self, action: Action, post_mortem: PostMortem | None) -> None:
-        reason = post_mortem.reason if post_mortem is not None else action.name.lower()
-        self._logger.warning(
-            "actuator: %s (%s) -- no real effect (LoggingActuator)", action.name, reason
-        )
+        name = action_name(action)
+        reason = post_mortem.reason if post_mortem is not None else name.lower()
+        self._logger.warning("actuator: %s (%s) -- no real effect (LoggingActuator)", name, reason)

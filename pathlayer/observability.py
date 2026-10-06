@@ -18,6 +18,7 @@ from typing import Any
 
 from pathlayer.detectors.base import Signal
 from pathlayer.policies import Action
+from pathlayer.policies.actions import action_name
 
 LOGGER_NAME = "pathlayer"
 
@@ -75,14 +76,14 @@ def log_decision(
         "decision",
         index,
         ts,
-        action=action.name,
+        action=action_name(action),
         fused=fused,
         signals=[{"name": s.name, "confidence": s.confidence} for s in signals],
     )
 
 
 def log_action(logger: logging.Logger, action: Action, *, index: int, ts: float) -> None:
-    _emit(logger, "action", index, ts, action=action.name)
+    _emit(logger, "action", index, ts, action=action_name(action))
 
 
 def log_would_be_action(logger: logging.Logger, action: Action, *, index: int, ts: float) -> None:
@@ -92,4 +93,4 @@ def log_would_be_action(logger: logging.Logger, action: Action, *, index: int, t
     so an offline reader can tell what Pathlayer would have done from what it
     actually did.
     """
-    _emit(logger, "would_be_action", index, ts, action=action.name)
+    _emit(logger, "would_be_action", index, ts, action=action_name(action))

@@ -78,7 +78,7 @@ from pathlayer.detectors.proof import PROOF_METADATA_KEYS
 from pathlayer.detectors.proof_producer import ProgressProofProducer, build_producer
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
-from pathlayer.policies.actions import Action
+from pathlayer.policies.actions import Action, action_name
 from pathlayer.postmortem import TickRecord
 from pathlayer.resource_sampling import sample_rss_bytes
 from pathlayer.runtime import Scheduler, WatchdogEventSink, stamp_rss, wrap_with_rss_sampling
@@ -1361,7 +1361,7 @@ class OpenClawRunRecorder:
             "event_index": index,
             "event_ts": event.ts,
             "tool": event.tool,
-            "action": action.name,
+            "action": action_name(action),
             "stopped": active.pipeline.stopped,
             "analyzed": analyzed,
         }

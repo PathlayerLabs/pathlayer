@@ -49,6 +49,7 @@ from pathlayer.adapters.openclaw_run_store import (
 from pathlayer.detectors.budget import BudgetDetector, BudgetState, budget_delta
 from pathlayer.events import ToolEvent
 from pathlayer.policies import Action
+from pathlayer.policies.actions import action_from_export, action_name
 from pathlayer.postmortem import (
     COMPLETED_STATUS,
     CostBreakdown,
@@ -97,7 +98,7 @@ def tick_columns(tick: TickRecord) -> dict[str, Any]:
     return {
         SIGNALS_COLUMN: [signal.to_dict() for signal in tick.signals],
         FUSED_COLUMN: tick.fused,
-        ARBITRATED_COLUMN: tick.action.name,
+        ARBITRATED_COLUMN: action_name(tick.action),
         DRY_RUN_COLUMN: tick.dry_run,
         REASON_COLUMN: tick.reason,
     }
@@ -202,9 +203,13 @@ def _tick_from_decision(record: dict[str, Any]) -> TickRecord | None:
     raw_signals = record.get(SIGNALS_COLUMN) or []
     if not isinstance(raw_signals, list):
         raise ValueError("signals in a decision record must be a list")
-    name = str(record.get(ARBITRATED_COLUMN) or record.get("action") or Action.NONE.name)
-    if name not in Action.__members__:
-        raise ValueError(f"unknown arbitrated action {name!r} in a decision record")
+    raw_action = record.get(ARBITRATED_COLUMN)
+    if raw_action is None:
+        raw_action = record.get("action", Action.NONE.name)
+    try:
+        action = action_from_export(raw_action, field="arbitrated action")
+    except ValueError as exc:
+        raise ValueError(f"unknown arbitrated action {raw_action!r} in a decision record") from exc
     index = _optional_float(record.get("event_index"))
     ts = _optional_float(record.get("event_ts"))
     if index is None or ts is None:
@@ -218,7 +223,7 @@ def _tick_from_decision(record: dict[str, Any]) -> TickRecord | None:
         ts=ts,
         signals=signals,
         fused=_optional_float(record.get(FUSED_COLUMN)),
-        action=Action[name],
+        action=action,
         reason=str(record.get(REASON_COLUMN) or ""),
         dry_run=bool(record.get(DRY_RUN_COLUMN, False)),
     )

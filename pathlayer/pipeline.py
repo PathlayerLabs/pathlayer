@@ -58,6 +58,7 @@ from pathlayer.observability import (
     log_would_be_action,
 )
 from pathlayer.policies import Action, Policy
+from pathlayer.policies.actions import action_name
 from pathlayer.policies.actuation import ActuationContext, EventSnapshot
 from pathlayer.policies.base import HysteresisState
 from pathlayer.postmortem import PostMortem
@@ -160,6 +161,23 @@ class PipelineDecision:
     arbitrated_action: Action
     emitted_action: Action
     dry_run: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        """Export one decision without leaking ``Action``'s numeric enum value."""
+        return {
+            "index": self.index,
+            "ts": self.ts,
+            "signals": [
+                {"name": signal.name, "confidence": signal.confidence, "reason": signal.reason}
+                for signal in self.signals
+            ],
+            "evidence": dict(self.evidence),
+            "fused": self.fused,
+            "reason": self.reason,
+            "arbitrated_action": action_name(self.arbitrated_action),
+            "emitted_action": action_name(self.emitted_action),
+            "dry_run": self.dry_run,
+        }
 
 
 @dataclass(slots=True, frozen=True)

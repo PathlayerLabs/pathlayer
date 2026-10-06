@@ -27,7 +27,7 @@ from pathlayer.detectors.base import Signal
 from pathlayer.detectors.budget import BudgetState
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline, PipelineDecision
-from pathlayer.policies.actions import Action
+from pathlayer.policies.actions import Action, action_name
 from pathlayer.policies.actuation import ActuationContext, EventSnapshot
 
 SCHEMA_VERSION = 3
@@ -371,7 +371,7 @@ def _stored_integer(value: Any, field: str, *, minimum: int = 0) -> int:
 
 
 def _stored_action(value: Any, field: str) -> Action:
-    """Validate an action name read from SQLite."""
+    """Validate the canonical action name written by the SQLite store."""
     if not isinstance(value, str):
         raise StateCorruptionError(f"invalid stored {field}")
     try:
@@ -1091,8 +1091,8 @@ class SQLiteStateStore:
                     event_ts,
                     decision.fused,
                     evidence,
-                    decision.arbitrated_action.name,
-                    decision.emitted_action.name,
+                    action_name(decision.arbitrated_action),
+                    action_name(decision.emitted_action),
                     int(decision.dry_run),
                     decision.reason,
                 ),

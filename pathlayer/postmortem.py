@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from pathlayer.detectors.base import Signal
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.policies import Action
+from pathlayer.policies.actions import action_from_export, action_name
 
 if TYPE_CHECKING:
     # Import-time only: the pipeline imports this module, so the projection
@@ -265,7 +266,7 @@ class PostMortem:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "action": self.action.name,
+            "action": action_name(self.action),
             "reason": self.reason,
             "stopped_at_index": self.stopped_at_index,
             "events_processed": self.events_processed,
@@ -420,7 +421,7 @@ class TickRecord:
             ts=float(data["ts"]),
             signals=tuple(SignalObservation.from_dict(entry) for entry in raw_signals),
             fused=None if raw_fused is None else float(raw_fused),
-            action=Action[str(data.get("action", Action.NONE.name))],
+            action=action_from_export(data.get("action", Action.NONE.name)),
             reason=str(data.get("reason") or ""),
             dry_run=bool(data.get("dry_run", False)),
         )
@@ -431,7 +432,7 @@ class TickRecord:
             "ts": self.ts,
             "signals": [signal.to_dict() for signal in self.signals],
             "fused": self.fused,
-            "action": self.action.name,
+            "action": action_name(self.action),
             "reason": self.reason,
             "dry_run": self.dry_run,
         }
@@ -646,7 +647,7 @@ class ActionTaken:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "action": self.action.name,
+            "action": action_name(self.action),
             "index": self.index,
             "ts": self.ts,
             "reason": self.reason,

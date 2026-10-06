@@ -386,7 +386,7 @@ def test_pytest_timeout_terminates_descendants(tmp_path: Path) -> None:
         "def test_spawn():\n"
         "    subprocess.Popen([sys.executable, '-c', "
         '"import time; from pathlib import Path; '
-        "Path('descendant-started').write_text('started'); time.sleep(1); "
+        "Path('descendant-started').write_text('started'); time.sleep(3); "
         "Path('descendant-survived').write_text('alive')\"])\n"
         "    time.sleep(10)\n",
         encoding="utf-8",
@@ -397,10 +397,10 @@ def test_pytest_timeout_terminates_descendants(tmp_path: Path) -> None:
         tool_event_ref="call-edit-target",
         resource_id="spawn-test",
         phase="before",
-        timeout_seconds=0.5,
+        timeout_seconds=1.5,
     )
     assert started.exists()
-    time.sleep(1.1)
+    time.sleep(3.1)
     assert evidence.status == "collection_failed"
     assert not marker.exists()
 
