@@ -26,7 +26,9 @@ DEFAULT_RUNS_ROOT = Path("/var/lib/pathlayer/runs")
 # Manifest statuses a run never leaves: it has an ``ended_at`` and its files are
 # final. Reopening such a run would restart the sequence counter at 1 and
 # overwrite ``trace.json`` / ``final.json`` with the state of an empty run, so
-# both the recorder (any further hook) and the startup sweep skip them.
+# both the recorder (any further hook) and the startup sweep skip them. The one
+# exception is ``late.jsonl`` (OBS-5): a cost hook that lost the race with
+# ``agent_end`` is appended there, and the derived ``report.json`` rebuilt.
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "interrupted"})
 
 
@@ -126,6 +128,11 @@ class RunDirectory:
     def report_path(self) -> Path:
         """End-of-session report (OBS-2), written once the run is finalized."""
         return self.root / "report.json"
+
+    @property
+    def late_events_path(self) -> Path:
+        """Append-only annex of cost hooks that arrived after the run ended (OBS-5)."""
+        return self.root / "late.jsonl"
 
     def read_manifest(self) -> dict[str, Any]:
         raw: Any = json.loads(self.manifest_path.read_text(encoding="utf-8"))

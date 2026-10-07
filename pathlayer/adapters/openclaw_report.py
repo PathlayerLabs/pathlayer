@@ -34,12 +34,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pathlayer.adapters.openclaw import translate_openclaw_llm_event
+from pathlayer.adapters.openclaw_lifecycle import (
+    BEFORE_AGENT_RUN,
+    LLM_OUTPUT,
+    extract_openclaw_run_id,
+)
 from pathlayer.adapters.openclaw_run_store import (
     RunDirectory,
     RunStore,
@@ -52,12 +59,18 @@ from pathlayer.policies import Action
 from pathlayer.policies.actions import action_from_export, action_name
 from pathlayer.postmortem import (
     COMPLETED_STATUS,
+    TRIGGER_ABSENT,
+    UNATTRIBUTED_MISSING_RUN_ID,
+    CostAttribution,
     CostBreakdown,
+    CostShare,
     SessionReport,
     SignalObservation,
     TickRecord,
+    UnattributedCost,
     build_session_report,
 )
+from pathlayer.pricing import ModelPrice
 from pathlayer.validation.traces import load_trace
 
 # Manifest keys carrying the two cost components a report cannot recompute from
@@ -130,8 +143,8 @@ def cost_manifest_fields(detector: BudgetDetector, state: BudgetState) -> dict[s
     }
 
 
-def _read_decisions(path: Path) -> tuple[list[dict[str, Any]], bool]:
-    """Parse ``decisions.jsonl``, tolerating a torn final line.
+def _read_journal(path: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Parse one append-only JSONL journal, tolerating a torn final line.
 
     Returns the usable records and whether a truncated last line was dropped.
 
@@ -282,6 +295,7 @@ def _build_cost(
     *,
     completed: bool,
     legacy_journal: bool,
+    events_from_journal: bool = False,
 ) -> CostBreakdown:
     """Assemble the cost section, naming what nothing measured.
 
@@ -298,6 +312,11 @@ def _build_cost(
     one journaled by a listener that never wrote those keys at all
     (``legacy_journal``), proves nothing either way, and the gap is reported as
     indeterminate rather than blamed on a detector that may well have been on.
+
+    ``events_from_journal`` marks events read back from ``events.raw.jsonl``
+    because the run never wrote a ``trace.json`` (OBS-5): its model calls were
+    captured all the same, and leaving them out would report a spend that
+    happened as unmeasured.
     """
     estimated = _optional_float(manifest.get(ESTIMATED_COST_KEY))
     baseline = _optional_float(manifest.get(BASELINE_COST_KEY))
@@ -325,6 +344,11 @@ def _build_cost(
             # Older manifests contain only BUD-3 per-call fallback estimates.
             estimated += adapter_estimate
     reasons: list[str] = []
+    if events_from_journal:
+        reasons.append(
+            "trace.json is absent: the LLM cost was read back from the raw hook journal "
+            "at the prices pinned when the run was recorded"
+        )
     if not trace_available:
         reasons.append("no trace.json, so no event cost could be read back")
     elif not priced:
@@ -378,10 +402,170 @@ def _build_cost(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Cost attribution (OBS-5)
+# --------------------------------------------------------------------------- #
+
+
+def _record_payload(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _pinned_rate(value: Any) -> float | None:
+    """A pinned rate or ratio component, or ``None`` unless it is a finite number >= 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    rate = float(value)
+    return rate if math.isfinite(rate) and rate >= 0.0 else None
+
+
+def _pinned_pricing(manifest: dict[str, Any]) -> tuple[dict[str, ModelPrice], float] | None:
+    """The price table this run was recorded with, or ``None`` if none is usable.
+
+    Never the current configuration: repricing an old run with today's table
+    would report a figure nobody computed when the call was made. A snapshot
+    with any rate that is not a finite number ``>= 0`` (negative, ``NaN``,
+    infinite, a string) is unusable as a whole: pricing with it would print a
+    negative or ``NaN`` cost, so its calls stay counted but unmeasured.
+    """
+    snapshot = manifest.get("llm_pricing_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    ratio = _pinned_rate(snapshot.get("input_ratio"))
+    models = snapshot.get("models")
+    if ratio is None or ratio > 1.0 or not isinstance(models, dict):
+        return None
+    prices: dict[str, ModelPrice] = {}
+    for name, raw in models.items():
+        if not isinstance(raw, dict):
+            return None
+        input_rate = _pinned_rate(raw.get("input_usd_per_mtok"))
+        output_rate = _pinned_rate(raw.get("output_usd_per_mtok"))
+        if input_rate is None or output_rate is None:
+            return None
+        prices[str(name)] = ModelPrice(input_rate, output_rate)
+    return prices, ratio
+
+
+def _llm_events(
+    payload: dict[str, Any], pricing: tuple[dict[str, ModelPrice], float] | None
+) -> list[ToolEvent]:
+    """The cost event(s) of one ``llm_output`` payload, exactly as recording made them.
+
+    Empty when nothing can be computed -- no pinned price table, an invalid one,
+    or no usable token counter -- which the callers report as unmeasured.
+    """
+    if pricing is None:
+        return []
+    prices, ratio = pricing
+    try:
+        return translate_openclaw_llm_event(payload, prices=prices, input_ratio=ratio)
+    except ValueError:
+        return []
+
+
+def _share_of(events: Sequence[ToolEvent]) -> CostShare:
+    """Cost one payload contributed, via the same fold as the budget detector (#162)."""
+    if not events:
+        return CostShare(unmeasured_events=1)
+    share = CostShare()
+    for event in events:
+        delta = budget_delta(event)
+        if delta.priced_events or event.metadata.get("cost_measurement") == (
+            "estimated_total_tokens"
+        ):
+            share = share.plus(
+                CostShare(
+                    measured_usd=delta.captured_usd,
+                    estimated_usd=delta.estimated_usd,
+                    costed_events=1,
+                )
+            )
+        else:
+            share = share.plus(CostShare(unmeasured_events=1))
+    return share
+
+
+def _source_trigger(payload: dict[str, Any]) -> str:
+    """``ctx.trigger`` verbatim (``cron``, ``heartbeat``, ...), never inferred."""
+    ctx = payload.get("ctx")
+    trigger = ctx.get("trigger") if isinstance(ctx, dict) else None
+    if isinstance(trigger, str) and trigger.strip():
+        return trigger
+    return TRIGGER_ABSENT
+
+
+def build_cost_attribution(run: RunDirectory) -> CostAttribution:
+    """Attribute every cost hook this run directory recorded (OBS-5).
+
+    Read from the hook journals -- ``events.raw.jsonl`` and the ``late.jsonl``
+    annex -- because only the raw payload says whether the *source* named the
+    run, and what it gave as a trigger. ``llm_output`` is the only OpenClaw hook
+    that carries a cost; tool calls carry none and BUD-3 per-tool estimates are
+    configuration, not captured cost, so neither appears here. Each payload is
+    re-translated at the prices pinned in the manifest, the very translation the
+    recorder applied live, so the figures match ``trace.json`` for a run that
+    has one.
+    """
+    manifest = run.read_manifest()
+    pricing = _pinned_pricing(manifest)
+    raw, _ = _read_journal(run.raw_events_path)
+    late, _ = _read_journal(run.late_events_path)
+    turn_started = any(_record_payload(record).get("hook") == BEFORE_AGENT_RUN for record in raw)
+    attributed = late_share = without_start = CostShare()
+    unattributed: dict[str, CostShare] = {}
+    entries = [(record, False) for record in raw] + [(record, True) for record in late]
+    for record, is_late in entries:
+        payload = _record_payload(record)
+        if payload.get("hook") != LLM_OUTPUT:
+            continue
+        share = _share_of(_llm_events(payload, pricing))
+        if extract_openclaw_run_id(payload) is None:
+            trigger = _source_trigger(payload)
+            unattributed[trigger] = unattributed.get(trigger, CostShare()).plus(share)
+            continue
+        attributed = attributed.plus(share)
+        if is_late:
+            late_share = late_share.plus(share)
+        if not turn_started:
+            without_start = without_start.plus(share)
+    return CostAttribution(
+        attributed=attributed,
+        late=late_share,
+        without_turn_start=without_start,
+        unattributed=tuple(
+            UnattributedCost(reason=UNATTRIBUTED_MISSING_RUN_ID, trigger=trigger, share=share)
+            for trigger, share in sorted(unattributed.items())
+        ),
+        runs=1,
+    )
+
+
+def build_store_cost_attribution(runs: Sequence[RunDirectory]) -> CostAttribution:
+    """One attribution over several runs: unattributed cost lives in its own directories."""
+    total = CostAttribution()
+    for run in runs:
+        total = total.merged(build_cost_attribution(run))
+    return total
+
+
+def _journal_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[ToolEvent]:
+    """The LLM cost events of a run that never wrote ``trace.json``, from its raw journal."""
+    pricing = _pinned_pricing(manifest)
+    records, _ = _read_journal(run.raw_events_path)
+    return [
+        event
+        for record in records
+        if _record_payload(record).get("hook") == LLM_OUTPUT
+        for event in _llm_events(_record_payload(record), pricing)
+    ]
+
+
 def build_run_report(run: RunDirectory) -> SessionReport:
     """Rebuild the session report of one recorded run from its directory alone."""
     manifest = run.read_manifest()
-    decisions, truncated_journal = _read_decisions(run.decisions_path)
+    decisions, truncated_journal = _read_journal(run.decisions_path)
     ticks = [tick for tick in (_tick_from_decision(record) for record in decisions) if tick]
     final = _read_json_object(run.final_path)
 
@@ -409,13 +593,35 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
     analyzed = [record for record in decisions if record.get("analyzed", True)]
     legacy = [record for record in analyzed if _is_legacy_decision(record)]
+    # OBS-5 reads the hook journals as well. They only add to the report, so a
+    # corrupt one costs the attribution, never the rest of the report.
+    attribution: CostAttribution | None
+    try:
+        cost_events = events if trace_available else _journal_llm_events(run, manifest)
+        attribution = build_cost_attribution(run)
+    except ValueError:
+        cost_events = events
+        attribution = None
+        notes.append(
+            "a hook journal (events.raw.jsonl or late.jsonl) is corrupt: the cost "
+            "attribution is unavailable for this run"
+        )
+    from_journal = not trace_available and bool(cost_events)
     cost = _build_cost(
         manifest,
-        events,
-        trace_available,
+        cost_events,
+        trace_available or from_journal,
         completed=completed,
         legacy_journal=bool(legacy),
+        events_from_journal=from_journal,
     )
+    late = attribution.late if attribution is not None else CostShare()
+    if late.costed_events or late.unmeasured_events:
+        notes.append(
+            f"{late.costed_events + late.unmeasured_events} model call(s) reached Pathlayer after "
+            "this run had ended: they are attributed to it below, but were never analyzed and "
+            "are not part of the cost figure above"
+        )
     if legacy:
         notes.append(
             f"{len(legacy)} of {len(analyzed)} analyzed line(s) were journaled before OBS-2: "
@@ -438,6 +644,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         events_recorded=events_recorded,
         events=events if trace_available else None,
         cost=cost,
+        cost_attribution=attribution,
         stopped=manifest.get("stopped") is True,
         session_key=manifest.get("session_key"),
         agent_id=manifest.get("agent_id"),
@@ -528,6 +735,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="as_json",
         help="print the structured report instead of the human-readable summary",
     )
+    parser.add_argument(
+        "--cost-attribution",
+        action="store_true",
+        help=(
+            "show captured LLM cost over the selected runs split into attributed to a run "
+            "and unattributed, by reason"
+        ),
+    )
     args = parser.parse_args(argv)
 
     modes = [args.run_id is not None, args.last, args.today, args.all]
@@ -537,10 +752,21 @@ def main(argv: list[str] | None = None) -> int:
     store = RunStore(args.runs_root or runs_root_from_env())
     try:
         runs = _select_runs(store, run_id=args.run_id, last=args.last, today=args.today)
-        reports = [build_run_report(run) for run in runs]
+        if args.cost_attribution:
+            attribution = build_store_cost_attribution(runs)
+        else:
+            reports = [build_run_report(run) for run in runs]
     except (LookupError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    if args.cost_attribution:
+        if args.as_json:
+            print(json.dumps(attribution.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(f"cost attribution over {attribution.runs} run(s), from llm_output hooks")
+            print("\n".join(attribution.describe_lines()))
+        return 0
 
     if args.as_json:
         payload: Any = reports[0].to_dict() if len(reports) == 1 else [r.to_dict() for r in reports]

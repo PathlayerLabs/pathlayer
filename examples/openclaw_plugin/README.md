@@ -8,7 +8,7 @@ plugin forwards hook payloads; Python translates them and runs detectors.
 
 ```
 OpenClaw Gateway (Node)
-  └── pathlayer-plugin (before_agent_run, after_tool_call, agent_end)
+  └── pathlayer-plugin (before_agent_run, llm_output, after_tool_call, agent_end)
         └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
               └── record.py  OR  listen.py (demo)
                     └── OpenClawRunRecorder  OR  print ToolEvents
@@ -16,7 +16,8 @@ OpenClaw Gateway (Node)
 
 - **`listen.py`** — print-only demo listener (unchanged behaviour).
 - **`record.py`** — production per-run recorder (durable directories).
-- **`pathlayer/adapters/openclaw.py`** — translates `after_tool_call` → `ToolEvent`.
+- **`pathlayer/adapters/openclaw.py`** — translates `after_tool_call` → `ToolEvent`,
+  and `llm_output` → a separate `LLM_CALL` event carrying an estimated cost.
 - **`pathlayer/adapters/openclaw_recorder.py`** — one pipeline per `ctx.runId`.
 
 Run identity: **`ctx.runId`** (fallback: `event.runId`). `event.toolCallId` is
@@ -209,7 +210,13 @@ than as `0.00`. The report names how many lines are in that older format.
 
 Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
 `agent_end` or a late tool call for such a run is logged and dropped, never
-replayed onto the run directory.
+replayed onto the run directory. The one exception is a late `llm_output`
+(OBS-5). OpenClaw dispatches `llm_output` and `agent_end` fire-and-forget, the
+plugin forwards each without waiting, and the ingest server handles requests
+concurrently, so the last model call of a run can arrive after its `agent_end`.
+That payload is appended to the run's `late.jsonl` annex and `report.json` is
+rebuilt; it never reaches a detector, and every other file of the run stays
+byte-for-byte as it was.
 
 ```bash
 RUN=run-abc123   # original ctx.runId from manifest.json
@@ -253,6 +260,52 @@ pathlayer-report --all      # one line per recorded run
 pathlayer-report --last --json   # the structured report instead of the summary
 ```
 
+### Captured, attributed and unattributed cost (OBS-5)
+
+`--cost-attribution` replaces the per-run output with one cost split over the
+selected runs. It needs a run selection like the other modes:
+
+```bash
+pathlayer-report --all --cost-attribution          # every recorded run
+pathlayer-report --today --cost-attribution --json # structured, today's runs
+```
+
+```
+cost attribution over 12 run(s), from llm_output hooks
+captured: $0.4210 over 61 event(s), 2 unmeasured
+attributed to a run: $0.3468 over 50 event(s), 2 unmeasured
+  of which received after the run ended: $0.0081 over 1 event(s)
+unattributed: $0.0742 over 11 event(s)
+  missing_run_id_in_source (trigger cron): $0.0611 over 9 event(s)
+  missing_run_id_in_source (trigger absent): $0.0131 over 2 event(s)
+```
+
+- **Captured** is every `llm_output` Pathlayer journaled, priced at the table
+  pinned in the run's manifest when it was recorded, never at today's config. It
+  always equals attributed plus unattributed. `llm_output` is the only OpenClaw
+  hook that carries a cost; BUD-3 per-tool estimates are configuration, not
+  captured cost, and are left out.
+- **Attributed** means the source named the run (`ctx.runId`, else
+  `event.runId`). Two subsets are shown as evidence and are never moved
+  elsewhere: calls *received after the run ended* (see above), and calls in a run
+  whose `before_agent_run` was never recorded.
+- **Unattributed** has a single reason, `missing_run_id_in_source`: the hook
+  named no run. Pathlayer never attaches such a cost to a run by session or by
+  timing, because that would invent a causality the source did not report. It is
+  grouped by the source's own `ctx.trigger` (`cron`, `heartbeat`, ...), or
+  `absent` when the source gave none.
+- **Unmeasured** calls (unknown model, no usable `usage.total`, no pinned price
+  table) are counted and never priced.
+
+What the split cannot see: a payload the plugin failed to forward within its
+300 ms timeout, or one sent while no listener was running, never reaches
+Pathlayer, so no figure here accounts for it.
+
+A single-run report also prints its own attribution, and a run that never wrote a
+`trace.json` (an `orphan-*` directory, or a run cut before `agent_end`) now
+reports the LLM cost read back from its raw hook journal instead of reporting it
+as unmeasured.
+
 Runs are listed in chronological order of their recorded start, ties broken by
 run id, so the output is deterministic. Add `--runs-root` to point at another
 recordings root (default: `$PATHLAYER_RUNS_DIR`, else `/var/lib/pathlayer/runs`).
@@ -265,8 +318,12 @@ run run-abc123 (session sess-1, agent agent-1)
 outcome: stopped -- Pathlayer halted the run
 status: completed   2026-08-10T12:30:58+00:00 -> 2026-08-10T12:30:59+00:00, 4.2s
 events: 8 recorded, 5 analyzed
-cost: not measured -- no recorded event carried a cost: the OpenClaw hooks report
-  no tokens and no price, so nothing on this path measures spend
+cost: $0.0123 effective = $0.0123 estimated [... $0.012300 estimated from total
+  tokens and an input/output ratio]
+cost attribution:
+  captured: $0.0123 over 4 event(s)
+  attributed to a run: $0.0123 over 4 event(s)
+  unattributed: no costed event
 detectors: 3 wired, 1 reacted over 5 recorded tick(s)
   loop         peak 0.94 on event 4 (t=4.0), non-zero on 4 of 5 tick(s) -- 5x repeat
   no_progress  silent on all 5 tick(s)
@@ -286,14 +343,15 @@ nobody saw finish is never filed as `completed`.
 absent rather than as zero — and, symmetrically, a figure that *was* computed is
 reported even when it comes out at zero:
 
-- **Cost.** The OpenClaw hooks carry no token counts and no price
-  (`after_tool_call` gives `toolName`, `params`, `result`, `error`,
-  `durationMs`), so nothing on this path measures spend and the report says so.
-  Configuring the `pricing` section changes nothing here — a price table needs
-  token counts to multiply. The one substitute available today is
+- **Cost.** Tool hooks carry no cost. Model spend comes from `llm_output`: when
+  it reports a model and a non-negative `usage.total`, the total is split into
+  input and output with `pricing.openclaw_input_ratio` (default 0.8) and priced
+  with the `pricing` table. That is an *estimate*, never an invoice-grade
+  measurement, and the report labels it as such. An unknown model or a missing
+  counter leaves that call unmeasured rather than free. The other substitute is
   `detectors.budget.tool_costs_usd` (BUD-3): a known price per tool times the
-  number of calls, reported as an *estimate*, separately from captured cost. That
-  estimate is persisted on every tool call, not only at `agent_end`, so a run
+  number of calls, also reported as an estimate, separately from captured cost.
+  That estimate is persisted on every tool call, not only at `agent_end`, so a run
   killed mid-flight keeps what it had already spent. A BUD-3 estimate of `$0.00`
   is a measured zero and is reported as such; only a run that recorded no estimate
   at all is reported as unmeasured, and if that run never reached its end the
@@ -348,7 +406,8 @@ commit run directories into git.
 - Passive observer only — Pathlayer does **not** block OpenClaw tool calls yet,
   so a STOP is recorded and stops analysis without ending the OpenClaw run.
 - No retention: run directories accumulate until you archive or delete them.
-- Only the three forwarded hooks are recorded; LLM cost hooks are not wired.
+- Only the four forwarded hooks are recorded. Model cost is an estimate from
+  `usage.total` and a configured input/output ratio, not a provider invoice.
 - Hook payload shapes follow the public OpenClaw docs and may differ slightly
   on your gateway version — inspect `events.raw.jsonl` when in doubt.
 - `ts` on ToolEvents reflects HTTP arrival order, not wall-clock time.

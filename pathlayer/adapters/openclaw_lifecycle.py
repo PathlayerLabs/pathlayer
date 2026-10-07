@@ -57,7 +57,9 @@ def extract_openclaw_run_id(payload: Any) -> str | None:
     """Return the canonical run identifier for one OpenClaw agent run.
 
     Priority: ``ctx.runId`` then ``event.runId``. ``event.toolCallId`` is
-    **never** used as a run identifier.
+    **never** used as a run identifier. A blank ``ctx.runId`` counts as absent:
+    it would otherwise shadow a valid ``event.runId`` and then be refused as a
+    run directory name, losing the payload before anything is journaled.
     """
     if not isinstance(payload, dict):
         return None
@@ -99,7 +101,9 @@ def sanitize_run_id_for_path(run_id: str, *, max_length: int = 120) -> str:
 
 
 def _first_str(*values: Any) -> str | None:
+    """The first present value as a string; ``None`` and blank strings are absent."""
     for value in values:
-        if value is not None:
-            return str(value)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        return str(value)
     return None

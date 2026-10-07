@@ -585,6 +585,164 @@ class CostBreakdown:
         return line
 
 
+# OBS-5: the one reason a captured cost is left unattributed. It is a property of
+# the source telemetry -- the hook carried neither ``ctx.runId`` nor
+# ``event.runId`` -- so nothing Pathlayer could do would recover the turn without
+# inventing it. Association losses Pathlayer itself caused are fixed at capture
+# instead of being given a reason here.
+UNATTRIBUTED_MISSING_RUN_ID = "missing_run_id_in_source"
+# What an unattributed cost is grouped by when the source said nothing about the
+# trigger. Recorded as-is: the absence of ``ctx.trigger`` is not "user".
+TRIGGER_ABSENT = "absent"
+
+
+@dataclass(frozen=True, slots=True)
+class CostShare:
+    """One slice of captured cost, keeping provenance and what nothing measured.
+
+    ``measured_usd`` is a positive cost the source priced itself;
+    ``estimated_usd`` an adapter estimate (OpenClaw's total-token estimate,
+    a computed zero for a configured free model included). ``costed_events``
+    counts the events behind those figures and ``unmeasured_events`` the
+    cost-bearing events nothing could price -- unknown model, no usable token
+    counter, no pinned price table. They are counted, never priced: a dollar
+    figure for them would be invented.
+    """
+
+    measured_usd: float = 0.0
+    estimated_usd: float = 0.0
+    costed_events: int = 0
+    unmeasured_events: int = 0
+
+    @property
+    def total_usd(self) -> float | None:
+        """``None`` when no event was costed: a sum over nothing measures nothing."""
+        if not self.costed_events:
+            return None
+        return self.measured_usd + self.estimated_usd
+
+    def plus(self, other: CostShare) -> CostShare:
+        return CostShare(
+            measured_usd=self.measured_usd + other.measured_usd,
+            estimated_usd=self.estimated_usd + other.estimated_usd,
+            costed_events=self.costed_events + other.costed_events,
+            unmeasured_events=self.unmeasured_events + other.unmeasured_events,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_usd": self.total_usd,
+            "measured_usd": self.measured_usd,
+            "estimated_usd": self.estimated_usd,
+            "costed_events": self.costed_events,
+            "unmeasured_events": self.unmeasured_events,
+        }
+
+    def describe(self) -> str:
+        total = self.total_usd
+        line = (
+            f"${total:.4f} over {self.costed_events} event(s)"
+            if total is not None
+            else "no costed event"
+        )
+        if self.unmeasured_events:
+            line += f", {self.unmeasured_events} unmeasured"
+        return line
+
+
+@dataclass(frozen=True, slots=True)
+class UnattributedCost:
+    """Captured cost no turn can be named for, with the source's own trigger."""
+
+    reason: str
+    trigger: str
+    share: CostShare
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"reason": self.reason, "trigger": self.trigger, **self.share.to_dict()}
+
+
+@dataclass(frozen=True, slots=True)
+class CostAttribution:
+    """Where every captured cost-bearing event landed: a turn, or none (OBS-5).
+
+    A cost is *attributed* when the source named its run (``runId``). Two
+    subsets of it are reported as evidence, never as a reason to move the cost:
+
+    - ``late``: it reached Pathlayer after the run had already ended. The hooks
+      are fire-and-forget on both sides, so the last model call can lose the
+      race with ``agent_end``; it still belongs to the run the source named.
+    - ``without_turn_start``: the source named the run, but no
+      ``before_agent_run`` was ever recorded for it.
+
+    Everything else is ``unattributed``, grouped by reason and by the source's
+    own ``trigger``. Invariant: ``captured == attributed + unattributed``.
+    """
+
+    attributed: CostShare = field(default_factory=CostShare)
+    late: CostShare = field(default_factory=CostShare)
+    without_turn_start: CostShare = field(default_factory=CostShare)
+    unattributed: tuple[UnattributedCost, ...] = ()
+    runs: int = 0
+
+    @property
+    def unattributed_total(self) -> CostShare:
+        total = CostShare()
+        for entry in self.unattributed:
+            total = total.plus(entry.share)
+        return total
+
+    @property
+    def captured(self) -> CostShare:
+        return self.attributed.plus(self.unattributed_total)
+
+    def merged(self, other: CostAttribution) -> CostAttribution:
+        """Sum two attributions, regrouping unattributed cost by reason and trigger."""
+        groups: dict[tuple[str, str], CostShare] = {}
+        for entry in (*self.unattributed, *other.unattributed):
+            key = (entry.reason, entry.trigger)
+            groups[key] = groups.get(key, CostShare()).plus(entry.share)
+        return CostAttribution(
+            attributed=self.attributed.plus(other.attributed),
+            late=self.late.plus(other.late),
+            without_turn_start=self.without_turn_start.plus(other.without_turn_start),
+            unattributed=tuple(
+                UnattributedCost(reason=reason, trigger=trigger, share=share)
+                for (reason, trigger), share in sorted(groups.items())
+            ),
+            runs=self.runs + other.runs,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "runs": self.runs,
+            "captured": self.captured.to_dict(),
+            "attributed": self.attributed.to_dict(),
+            "late": self.late.to_dict(),
+            "without_turn_start": self.without_turn_start.to_dict(),
+            "unattributed": self.unattributed_total.to_dict(),
+            "unattributed_by_reason": [entry.to_dict() for entry in self.unattributed],
+        }
+
+    def describe_lines(self) -> list[str]:
+        """Captured, attributed and unattributed, each on its own line."""
+        lines = [
+            f"captured: {self.captured.describe()}",
+            f"attributed to a run: {self.attributed.describe()}",
+        ]
+        if self.late.costed_events or self.late.unmeasured_events:
+            lines.append(f"  of which received after the run ended: {self.late.describe()}")
+        if self.without_turn_start.costed_events or self.without_turn_start.unmeasured_events:
+            lines.append(
+                "  of which in a run whose start was never recorded: "
+                f"{self.without_turn_start.describe()}"
+            )
+        lines.append(f"unattributed: {self.unattributed_total.describe()}")
+        for entry in self.unattributed:
+            lines.append(f"  {entry.reason} (trigger {entry.trigger}): {entry.share.describe()}")
+        return lines
+
+
 @dataclass(frozen=True, slots=True)
 class DetectorActivity:
     """What one detector did across a whole run.
@@ -889,6 +1047,8 @@ class SessionReport:
     events_analyzed: int = 0
     ticks_with_signals: int = 0
     cost: CostBreakdown = field(default_factory=CostBreakdown)
+    # OBS-5; ``None`` when the adapter does not know which hooks carry a cost.
+    cost_attribution: CostAttribution | None = None
     detectors: tuple[DetectorActivity, ...] = ()
     findings: tuple[IncidentFinding, ...] = ()
     peak_fused: float | None = None
@@ -932,6 +1092,9 @@ class SessionReport:
             "events_analyzed": self.events_analyzed,
             "ticks_with_signals": self.ticks_with_signals,
             "cost": self.cost.to_dict(),
+            "cost_attribution": (
+                self.cost_attribution.to_dict() if self.cost_attribution is not None else None
+            ),
             "detectors": [activity.to_dict() for activity in self.detectors],
             "findings": [finding.to_dict() for finding in self.findings],
             "peak_fused": self.peak_fused,
@@ -964,6 +1127,9 @@ class SessionReport:
             f"events: {self.events_recorded} recorded, {self.events_analyzed} analyzed",
             f"cost: {self.cost.describe()}",
         ]
+        if self.cost_attribution is not None:
+            lines.append("cost attribution:")
+            lines.extend(f"  {line}" for line in self.cost_attribution.describe_lines())
         lines.extend(self._detector_lines())
         lines.extend(self._finding_lines())
         lines.append(self._fused_line())
@@ -1117,6 +1283,7 @@ def build_session_report(
     events_recorded: int,
     events: Sequence[ToolEvent] | None = None,
     cost: CostBreakdown | None = None,
+    cost_attribution: CostAttribution | None = None,
     stopped: bool = False,
     session_key: str | None = None,
     agent_id: str | None = None,
@@ -1160,6 +1327,7 @@ def build_session_report(
         events_analyzed=len(ordered),
         ticks_with_signals=sum(1 for tick in ordered if tick.signals),
         cost=cost if cost is not None else CostBreakdown(),
+        cost_attribution=cost_attribution,
         detectors=_detector_activity(ordered),
         findings=_incident_findings(ordered, events),
         peak_fused=peak.fused if peak is not None else None,

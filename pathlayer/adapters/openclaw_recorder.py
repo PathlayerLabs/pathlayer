@@ -6,7 +6,12 @@ Three properties this module owes its callers, all of them load-bearing:
   (:data:`~pathlayer.adapters.openclaw_run_store.TERMINAL_STATUSES`) any further
   hook for that ``runId`` -- a duplicated ``agent_end``, a late tool call -- is
   ignored instead of reopening it. Reopening would restart the sequence counter
-  and rewrite ``trace.json`` / ``final.json`` from an empty in-memory run.
+  and rewrite ``trace.json`` / ``final.json`` from an empty in-memory run. One
+  thing is kept rather than ignored (OBS-5): an ``llm_output`` that lost the
+  race with ``agent_end`` -- both hooks are fire-and-forget, so their arrival
+  order is not guaranteed. It is appended to the run's ``late.jsonl`` annex and
+  the derived ``report.json`` rebuilt; it never reaches a detector, and every
+  other file of the run stays byte-for-byte as it was.
 - **A passive STOP ends analysis, not observation.** Pathlayer is a passive
   observer of OpenClaw (V1 never blocks a tool call), so events keep arriving
   after a STOP. They stay normalized, ordered and written to ``trace.json``;
@@ -136,6 +141,14 @@ class _ActiveRun:
     runtime_records: dict[EventKind, tuple[dict[str, Any], ToolEvent, int]] = field(
         default_factory=dict
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _FinishedRun:
+    """A terminal run a payload was addressed to, and the lock its producer held."""
+
+    directory: RunDirectory
+    lock: Any = None
 
 
 def _hook_part(payload: dict[str, Any], key: str) -> dict[str, Any]:
@@ -298,6 +311,9 @@ class OpenClawRunRecorder:
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
         self._orphan_counters: dict[str, int] = {}
+        # Serializes late.jsonl appends and the report rebuilt after each. A leaf
+        # lock: nothing else is ever acquired while it is held.
+        self._late_lock = threading.Lock()
 
     @property
     def runs_root(self) -> Path:
@@ -471,10 +487,14 @@ class OpenClawRunRecorder:
         if run_id is None:
             run_id = self._orphan_run_id(payload)
         active = self._get_or_create_run(run_id, payload, hook_kind)
+        if isinstance(active, _FinishedRun):
+            self._record_late_cost(active, payload, hook_kind)
+            return
         if active is None:
             return
         with active.lock:
             if active.completed:
+                self._record_late_cost(_FinishedRun(active.directory), payload, hook_kind)
                 return
             assert active.runtime_sink is not None
             if any(event.kind is EventKind.RUN_START for event in active.pipeline.history):
@@ -488,6 +508,7 @@ class OpenClawRunRecorder:
                 # prefix explicit in logs, matching the generic sink fallback.
                 active.runtime_sink.start_run(fallback=True)
             if active.completed:
+                self._record_late_cost(_FinishedRun(active.directory), payload, hook_kind)
                 return
             # OpenClaw processes tool hooks itself rather than forwarding them
             # through WatchdogEventSink.__call__. Preserve the same delayed-
@@ -498,6 +519,7 @@ class OpenClawRunRecorder:
             # controlled interruption does not append past its terminal state.
             active.runtime_sink.check_deadline()
             if active.completed:
+                self._record_late_cost(_FinishedRun(active.directory), payload, hook_kind)
                 return
             record = self._append_raw(active, payload)
             if hook_kind is OpenClawHookKind.RUN_START:
@@ -527,6 +549,39 @@ class OpenClawRunRecorder:
         adapter.attach()
         return adapter
 
+    def _record_late_cost(
+        self, finished: _FinishedRun, payload: dict[str, Any], hook_kind: OpenClawHookKind
+    ) -> None:
+        """Keep a cost hook addressed to an already finished run (OBS-5).
+
+        Only ``llm_output`` carries a cost; any other late hook is still ignored.
+        The payload goes to the append-only ``late.jsonl`` annex -- never to the
+        raw journal, the trace, the decisions or a detector -- so the run keeps
+        its immutable record and the report can still attribute the spend to the
+        run the source named. Taking the run's own lock first waits out an
+        ``agent_end`` still finalizing, so the rebuilt report sees its files.
+        """
+        if hook_kind is not OpenClawHookKind.LLM:
+            return
+        if finished.lock is not None:
+            with finished.lock:
+                self._append_late(finished.directory, payload)
+        else:
+            self._append_late(finished.directory, payload)
+
+    def _append_late(self, directory: RunDirectory, payload: dict[str, Any]) -> None:
+        with self._late_lock:
+            append_jsonl(
+                directory.late_events_path,
+                {
+                    "received_at": utc_now_iso(),
+                    "after_status": directory.read_manifest().get("status"),
+                    "hook": payload.get("hook"),
+                    "payload": payload,
+                },
+            )
+            _write_report(directory)
+
     def _orphan_run_id(self, payload: dict[str, Any]) -> str:
         context = extract_openclaw_context(payload)
         key = context.session_key or "unknown"
@@ -536,13 +591,14 @@ class OpenClawRunRecorder:
 
     def _get_or_create_run(
         self, run_id: str, payload: dict[str, Any], hook_kind: OpenClawHookKind
-    ) -> _ActiveRun | None:
-        """Return the active run for ``run_id``, or ``None`` if it is finished.
+    ) -> _ActiveRun | _FinishedRun | None:
+        """Return the active run for ``run_id``, or say it is finished.
 
         Three cases: a run this process is already recording (returned as is), a
         run directory left behind by an earlier listener (re-attached, resuming
         its sequence rather than restarting at 1), and a terminal run (never
-        reopened -- ``None``).
+        reopened -- a :class:`_FinishedRun`). ``None`` when the run could not be
+        opened at all.
         """
         with self._lock:
             active = self._runs.get(run_id)
@@ -550,7 +606,7 @@ class OpenClawRunRecorder:
                 status = active.directory.read_manifest().get("status")
                 if status in TERMINAL_STATUSES:
                     self._runs.pop(run_id, None)
-                    return None
+                    return _FinishedRun(active.directory, active.lock)
                 return active
             existing = self._store.resolve_run(run_id)
             if existing is not None:
@@ -628,7 +684,7 @@ class OpenClawRunRecorder:
 
     def _reattach(
         self, existing: RunDirectory, run_id: str, payload: dict[str, Any]
-    ) -> _ActiveRun | None:
+    ) -> _ActiveRun | _FinishedRun | None:
         """Adopt an on-disk run directory this process is not yet recording.
 
         A terminal run is never adopted: it keeps its files and its sequence,
@@ -643,13 +699,13 @@ class OpenClawRunRecorder:
         status = manifest.get("status")
         if status in TERMINAL_STATUSES:
             logger.warning(
-                "ignoring %r hook for finished run %r (status=%s): "
-                "a terminal run is never reopened",
+                "%r hook for finished run %r (status=%s): a terminal run is never "
+                "reopened; only a cost hook is kept, in its late annex",
                 payload.get("hook"),
                 run_id,
                 status,
             )
-            return None
+            return _FinishedRun(existing)
         logger.debug("re-attaching to unfinished run %r (status=%s)", run_id, status)
         persistence_reported = manifest.get("state_durable") is False
         if persistence_reported:
