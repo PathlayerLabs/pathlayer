@@ -21,30 +21,73 @@ API key, or network call. Progress detection is strongest when an agent
 produces objective evidence such as test results, exit codes, or changes in
 Git diff size.
 
+## See Pathlayer in action
+
+**A code change is not necessarily progress.** Pathlayer uses independently
+checked test results to distinguish productive retries from repeated activity
+that does not advance a task.
+
+The [coding contract demonstration](examples/demo_coding_contract.py) runs a
+scripted LangGraph coding agent with real file edits and test checks. It
+compares execution with and without an external progress contract:
+
+| Scenario | What the demo tests |
+| --- | --- |
+| Productive retries | Repeated edits and tests with measurable improvements should continue. |
+| Stagnation | Edits that do not improve tests can trigger a STOP. |
+| Unavailable evidence | Missing proof is treated as an observation gap, not as failure. |
+| Deterministic replay | Recorded events are replayed and compared with live decisions. |
+
+Run it from a source checkout using the [installation steps below](#install):
+
+```bash
+python examples/demo_coding_contract.py
+```
+
+The output compares **with contract** and **without contract** for each
+scenario, including STOP decisions, evidence gaps, and replay agreement.
+The demo runs a reproducible coding-agent workflow through LangGraph, using real
+file operations and test results to validate Pathlayer's detection, intervention,
+and replay capabilities. It runs entirely locally, with no LLM API or network dependency.
+
+For a simpler loop example, see
+[`demo_loop.py`](examples/demo_loop.py). For graded
+WARN → SUMMARIZE → STOP intervention, see
+[`demo_no_progress.py`](examples/demo_no_progress.py).
+
 ## Install
 
-When a release is available on PyPI, install it with:
+Pathlayer is currently alpha software. The most direct way to try the demos
+is from a local source checkout (Python 3.10+):
 
 ```bash
-pip install pathlayer
+git clone https://github.com/Kropemann/Pathlayer.git
+cd Pathlayer
+python -m pip install -e ".[dev]"
+python examples/demo_coding_contract.py
 ```
 
-Optional integrations are installed separately:
+Repository access is required while the source repository is private. The
+development extra includes the dependencies needed for the demos; for an
+application integration, install only the optional extras you need:
 
 ```bash
-pip install "pathlayer[yaml]"       # YAML configuration
-pip install "pathlayer[langgraph]"  # LangGraph capture and actuation
+python -m pip install -e ".[langgraph,yaml]"
 ```
 
-To test an unreleased source checkout, build and install its wheel instead:
+For a packaged source installation instead of editable mode, build a wheel
+and install it:
 
 ```bash
 uv build
-pip install dist/pathlayer-*.whl
+python -m pip install dist/pathlayer-*.whl
 ```
 
-Pathlayer requires Python 3.10 or later; release CI currently tests Python
-3.10, 3.11 and 3.12.
+Once a release is published to PyPI, the package can be installed with
+`pip install pathlayer` (and optional extras such as
+`pathlayer[langgraph]`).
+
+Release CI currently tests Python 3.10, 3.11, and 3.12.
 
 ## Quickstart
 
