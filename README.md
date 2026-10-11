@@ -1,17 +1,25 @@
 # Pathlayer
 
-> Runtime guardrails for AI agents. Open source, local-first, with no LLM in
-> the detection loop.
+> Runtime guardrails for reliable and efficient AI agents.
 
-Pathlayer observes an agent while it runs, detects loops, repeated failures,
-missing progress and cost explosions, then selects a graded action:
+AI agents can waste time, tokens, and compute when they get stuck in loops,
+repeat failed actions, or continue executing without meaningful progress.
+
+Pathlayer is an open-source, local-first runtime layer that detects unproductive
+agent behavior and intervenes before more resources are wasted. Unlike
+LLM-based monitoring, Pathlayer uses deterministic detectors and external
+progress evidence, including filesystem changes and test results, without
+requiring another LLM in the detection loop.
+
+Pathlayer observes agents during execution, detects loops, repeated failures,
+missing progress, and cost overruns, then selects a graded action:
 `warn -> summarize -> fallback -> escalate -> stop`. LangGraph currently
-enforces WARN, SUMMARIZE and STOP; FALLBACK and ESCALATE are planned.
+enforces WARN, SUMMARIZE, and STOP; FALLBACK and ESCALATE are planned.
 
-Pathlayer is alpha software. Its detectors are deterministic and run locally,
-without a cloud account, API key or network call. Progress detection is
-strongest when an agent produces objective evidence such as test results, exit
-codes or changes in Git diff size.
+Pathlayer is alpha software. Its detectors run locally without a cloud account,
+API key, or network call. Progress detection is strongest when an agent
+produces objective evidence such as test results, exit codes, or changes in
+Git diff size.
 
 ## Install
 
