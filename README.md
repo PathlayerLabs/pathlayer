@@ -347,18 +347,22 @@ the run otherwise. A test module whose imports fail at run time stays
 unobserved. The probe itself runs synchronously after every tool call: locally
 about 60 ms for file checks and about half a second with a small pytest
 selection. The printed configuration uses the interpreter Pathlayer runs in.
-The OpenClaw recorder runs the probe automatically. With LangGraph, pass the
-producer to the adapter:
+The OpenClaw recorder runs the probe automatically. With LangGraph,
+`LangGraphAdapter.from_config` wires the producer whenever the section is
+enabled:
 
 ```python
 from pathlayer.adapters.langgraph import LangGraphAdapter
 from pathlayer.config import build_pipeline, load_config
-from pathlayer.detectors.proof_producer import producer_from_config
 
 config = load_config()  # includes the printed detectors.progress_proof section
 pipeline = build_pipeline(config)
-adapter = LangGraphAdapter(pipeline.sink, progress_proof=producer_from_config(config))
+adapter = LangGraphAdapter.from_config(pipeline.sink, config)
 ```
+
+When constructing `LangGraphAdapter` directly, pass
+`progress_proof=producer_from_config(config)` (from
+`pathlayer.detectors.proof_producer`); omit it to capture without the probe.
 
 The same vocabulary is available in Python from `pathlayer.coding_contracts`
 (`CodingContract`, `FileExists`, `FileChanges`, `ArtifactProduced`,

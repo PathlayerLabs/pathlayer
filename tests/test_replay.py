@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pathlayer.config import build_pipeline
 from pathlayer.detectors.canonical import ToolMask
 from pathlayer.detectors.loop import LoopDetector
@@ -151,17 +153,19 @@ def test_load_traces_single_file_and_dir() -> None:
     assert len(many) >= 4
 
 
-def test_load_traces_skips_non_pipeline_subdirs_when_scanning_root() -> None:
-    # Scanning traces/ must exclude the anchor-only experiment and synthetic
-    # generated corpora so an aggregate pipeline score is not polluted (#97 M-1).
+@pytest.mark.parametrize("subdir", ["nop4_experiment", "val7"])
+def test_load_traces_skips_non_pipeline_subdirs_when_scanning_root(subdir: str) -> None:
+    # Scanning traces/ must exclude the anchor-only experiment, synthetic
+    # generated corpora (#97 M-1) and VAL-7 session-only traces, which need
+    # session_stitching enabled, so an aggregate pipeline score is not polluted.
     def keys(traces: list[Trace]) -> set[tuple[str, str]]:
         return {(t.label, t.description) for t in traces}
 
     scanned = keys(load_traces(_TRACES_DIR))
-    experiment = keys(load_traces(_TRACES_DIR / "nop4_experiment"))
-    assert experiment, "expected nop4_experiment fixtures to exist"
-    # None of the experiment traces leak into a full-tree scan.
-    assert experiment.isdisjoint(scanned)
+    excluded = keys(load_traces(_TRACES_DIR / subdir))
+    assert excluded, f"expected {subdir} fixtures to exist"
+    # None of the excluded traces leak into a full-tree scan.
+    assert excluded.isdisjoint(scanned)
 
 
 def test_load_traces_loads_excluded_dir_when_targeted_directly() -> None:

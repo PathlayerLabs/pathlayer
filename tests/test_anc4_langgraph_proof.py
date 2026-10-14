@@ -42,7 +42,6 @@ from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.proof import (
     _PROGRESS_PROOF_KEY,
     _PROOF_SPEC_KEY,
-    PROOF_METADATA_KEYS,
     ProofProgressAnchor,
     ProofSpec,
 )
@@ -298,7 +297,8 @@ def test_a_raising_producer_never_breaks_the_observed_run(
         assert _tool("edit_again").invoke({}, config=adapter.as_config()) == "ok"
 
     assert [event.tool for event in events] == ["edit", "edit_again"]
-    assert all(key not in event.metadata for event in events for key in PROOF_METADATA_KEYS)
+    assert all("progress_proof_unobserved" in event.metadata for event in events)
+    assert all("progress_proof" not in event.metadata for event in events)
     assert any("progress_proof" in record.getMessage() for record in caplog.records)
 
 

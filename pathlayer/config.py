@@ -395,6 +395,8 @@ class PipelineSection:
     # action is emitted and the run never halts -- the observe-only mode for
     # tuning before trusting enforcement.
     dry_run: bool = False
+    # Appended to preserve the existing positional constructor contract.
+    session_stitching: bool = False
 
 
 @dataclass(slots=True)
@@ -713,10 +715,13 @@ def _parse_policy(data: Mapping[str, Any]) -> PolicySection:
 
 def _parse_pipeline(data: Mapping[str, Any]) -> PipelineSection:
     section = _Section(data, "pipeline")
+    session_stitching = section.bool_("session_stitching", False)
     recent_history = section.int_("recent_history", 10)
     dry_run = section.bool_("dry_run", False)
     section.finish()
-    return PipelineSection(recent_history=recent_history, dry_run=dry_run)
+    return PipelineSection(
+        recent_history=recent_history, dry_run=dry_run, session_stitching=session_stitching
+    )
 
 
 def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
@@ -1188,6 +1193,18 @@ def build_pipeline(
             # of progress. Holding never suppresses on its own: only a strictly
             # higher level does.
             progress_anchors.append(CodingStateProgressAnchor(unclaimed=UNCLAIMED_HOLD))
+    if config.pipeline.session_stitching:
+        from pathlayer.detectors.session import SessionAwareDetector
+
+        # Session context only ever holds identical failures (continuity_key):
+        # RET-1 owns that reading. LoopDetector stays per run, so successful
+        # repetitions across turns can never stop an agent.
+        detectors = [
+            SessionAwareDetector(detector, tool_masks)
+            if isinstance(detector, RetryDetector)
+            else detector
+            for detector in detectors
+        ]
     pipeline = Pipeline(
         detectors,
         policy,

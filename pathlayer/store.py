@@ -421,6 +421,10 @@ def configuration_fingerprint(config: Any) -> str:
         name: _fingerprint_value(getattr(config, name))
         for name in ("detectors", "canonicalization", "policy", "pipeline")
     }
+    pipeline_config = decision_config.get("pipeline")
+    if isinstance(pipeline_config, dict) and pipeline_config.get("session_stitching") is False:
+        # Disabled VAL-7 preserves historical fingerprints byte-for-byte.
+        pipeline_config.pop("session_stitching", None)
     # RES-2/RES-3 each add one decision-relevant field. When the resource
     # detector is disabled neither can affect replay, so omit both inactive
     # fields and preserve the exact historical fingerprint of v3/default
@@ -461,6 +465,10 @@ def configuration_fingerprint(config: Any) -> str:
         "event_codec": EVENT_CODEC_VERSION,
         "state_semantics": STATE_SEMANTICS_VERSION,
     }
+    if isinstance(pipeline_config, dict) and pipeline_config.get("session_stitching") is True:
+        from pathlayer.detectors.session import SESSION_VERSION
+
+        payload["session_stitching_semantics"] = SESSION_VERSION
     if proof_enabled:
         # Only an enabled section reads proofs; every other configuration keeps
         # its exact historical fingerprint (see PROGRESS_PROOF_SEMANTICS_VERSION).

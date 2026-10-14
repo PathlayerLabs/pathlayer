@@ -81,12 +81,14 @@ from pathlayer.config import PathlayerConfig, StoreSection, build_pipeline
 from pathlayer.detectors.budget import BudgetDetector, BudgetState
 from pathlayer.detectors.proof import PROOF_METADATA_KEYS
 from pathlayer.detectors.proof_producer import ProgressProofProducer, build_producer
+from pathlayer.detectors.session import SESSION_METADATA_KEY
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action, action_name
 from pathlayer.postmortem import TickRecord
 from pathlayer.resource_sampling import sample_rss_bytes
 from pathlayer.runtime import Scheduler, WatchdogEventSink, stamp_rss, wrap_with_rss_sampling
+from pathlayer.session import SessionJournal
 from pathlayer.store import (
     PersistentPipeline,
     SQLiteStateStore,
@@ -97,6 +99,7 @@ from pathlayer.store import (
     StateIncompleteError,
     StateStoreError,
     StateWriteError,
+    configuration_fingerprint,
 )
 from pathlayer.validation.traces import UNKNOWN_LABEL, Trace, trace_to_dict
 
@@ -111,6 +114,7 @@ _LIFECYCLE_HOOK = "pathlayer_lifecycle"
 # run's idempotency check (store.py's duplicate-tick comparison) sees a
 # mismatched event and raises StateConcurrencyError.
 _PROOF_HOOK = "pathlayer_progress_proof"
+_CAPTURE_METADATA_KEYS = (*PROOF_METADATA_KEYS, SESSION_METADATA_KEY)
 
 
 @dataclass(slots=True)
@@ -267,6 +271,7 @@ class OpenClawRunRecorder:
         self._state_store: SQLiteStateStore | None = None
         self._state_init_error: StateStoreError | None = None
         self._proof_producer: ProgressProofProducer | None = None
+        self._session_journal: SessionJournal | None = None
         if pipeline_factory is None:
             # A recorder without an explicit config keeps all of its durable
             # artifacts together under runs_root. Explicit store paths retain
@@ -280,6 +285,12 @@ class OpenClawRunRecorder:
                 )
             build_pipeline(effective_config)  # fail fast before hooks are swallowed
             self._config = effective_config
+            if effective_config.pipeline.session_stitching:
+                self._session_journal = SessionJournal(
+                    effective_config.store.path + ".sessions",
+                    fingerprint=configuration_fingerprint(effective_config),
+                    tool_masks=effective_config.canonicalization.tool_masks,
+                )
             if effective_config.detectors.progress_proof.enabled:
                 # Same fail-fast boundary as build_pipeline above: a malformed
                 # manifest must reject the recorder at construction, not the
@@ -336,6 +347,18 @@ class OpenClawRunRecorder:
         detector that may well have been enabled.
         """
         try:
+            if self._session_journal is not None:
+                for run in self._store.list_runs():
+                    manifest = run.read_manifest()
+                    key = manifest.get("session_key")
+                    if manifest.get("status") not in TERMINAL_STATUSES and isinstance(key, str):
+                        # The interrupted suffix may contain unobserved work.
+                        # Existing frozen decisions still replay; future turns
+                        # must not bridge that unknown suffix, so the window
+                        # restarts after it.
+                        self._session_journal.mark_gap(
+                            source=SOURCE, session_key=key, reason="interrupted_run"
+                        )
             if self._state_init_error is not None:
                 for run in self._store.list_runs():
                     if run.read_manifest().get("status") not in TERMINAL_STATUSES:
@@ -842,10 +865,10 @@ class OpenClawRunRecorder:
             payloads = {
                 key: value
                 for key, value in sidecar.items()
-                if key in PROOF_METADATA_KEYS and isinstance(value, dict)
+                if key in _CAPTURE_METADATA_KEYS and isinstance(value, dict)
             }
             if isinstance(event_id, str) and payloads:
-                proofs_by_event_id[event_id] = payloads
+                proofs_by_event_id.setdefault(event_id, {}).update(payloads)
 
         sequence = 0
         events: list[ToolEvent] = []
@@ -895,6 +918,23 @@ class OpenClawRunRecorder:
                 journaled = proofs_by_event_id.get(event_id)
                 if journaled is not None:
                     event.metadata.update(journaled)
+                if self._session_journal is not None and SESSION_METADATA_KEY not in event.metadata:
+                    session_key = directory.read_manifest().get("session_key")
+                    if isinstance(session_key, str):
+                        recovered = self._session_journal.lookup(
+                            source=SOURCE,
+                            session_key=session_key,
+                            run_id=directory.original_run_id,
+                            event_id=event_id,
+                        )
+                        if recovered is not None:
+                            event = recovered
+                        elif event.kind is EventKind.TOOL_CALL:
+                            self._session_journal.mark_gap(
+                                source=SOURCE,
+                                session_key=session_key,
+                                reason="unrecovered_capture",
+                            )
                 events.append(event)
                 if not pipeline.stopped:
                     _process_pipeline(pipeline, event, event_id)
@@ -948,7 +988,11 @@ class OpenClawRunRecorder:
         active.directory.update_manifest(
             status="started",
             event_count=active.sequence,
-            session_key=hook_ctx.get("sessionKey"),
+            # Fixed when the run directory is created and never rebound by a
+            # later hook: VAL-7 keys the session journal on this value, so a
+            # run must not change session mid-way (before VAL-7 the start hook
+            # overwrote it with its own ctx.sessionKey).
+            session_key=active.directory.read_manifest().get("session_key"),
             agent_id=hook_ctx.get("agentId"),
             openclaw_model=_extract_model(payload),
             openclaw_provider=_extract_provider(payload),
@@ -1257,6 +1301,26 @@ class OpenClawRunRecorder:
         Return false if a durable identity conflict interrupted the run.
         """
         event.ts = float(len(active.events))
+        if self._session_journal is not None and event.kind is EventKind.TOOL_CALL:
+            session_key = active.directory.read_manifest().get("session_key")
+            if isinstance(session_key, str) and session_key:
+                event = self._session_journal.capture(
+                    event,
+                    source=SOURCE,
+                    session_key=session_key,
+                    run_id=active.directory.original_run_id,
+                    event_id=event_id,
+                    linked=event.metadata.get("session_key") == session_key,
+                )
+                self._append_raw(
+                    active,
+                    {
+                        "hook": _PROOF_HOOK,
+                        "for_event_id": event_id,
+                        SESSION_METADATA_KEY: event.metadata[SESSION_METADATA_KEY],
+                    },
+                    internal_lifecycle=True,
+                )
         active.events.append(event)
         self._advance_cost(active, event)
         index = len(active.events) - 1

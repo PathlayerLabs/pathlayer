@@ -75,6 +75,7 @@ from pathlayer.detectors.proof import PROOF_METADATA_KEYS
 from pathlayer.detectors.proof_producer import ProgressProofProducer
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
 from pathlayer.pricing import ModelPrice, cost_of
+from pathlayer.session import SessionJournal, _identity
 from pathlayer.state_evidence import StateCapture, StateEvidenceProducer
 
 logger = logging.getLogger(__name__)
@@ -248,6 +249,9 @@ class LangGraphAdapter(Adapter):
         *,
         state_evidence: StateEvidenceProducer | None = None,
         progress_proof: ProgressProofProducer | None = None,
+        session_journal: SessionJournal | None = None,
+        session_key: str | None = None,
+        logical_run_id: str | None = None,
     ) -> None:
         super().__init__(sink)
         self._handler = _LangChainCaptureHandler(self)
@@ -258,6 +262,14 @@ class LangGraphAdapter(Adapter):
         self._prices = prices
         self._state_evidence = state_evidence
         self._progress_proof = progress_proof
+        self._session_journal = session_journal
+        self._session_key = session_key
+        self._logical_run_id = logical_run_id
+        if session_journal is not None:
+            if session_key is None or logical_run_id is None:
+                raise ValueError("session stitching requires session_key and logical_run_id")
+            _identity(session_key)
+            _identity(logical_run_id)
 
     @classmethod
     def from_config(
@@ -266,6 +278,8 @@ class LangGraphAdapter(Adapter):
         config: PathlayerConfig,
         *,
         state_evidence: StateEvidenceProducer | None = None,
+        session_key: str | None = None,
+        logical_run_id: str | None = None,
     ) -> LangGraphAdapter:
         """Build an adapter with the configured local model price table.
 
@@ -278,6 +292,17 @@ class LangGraphAdapter(Adapter):
         ``build_pipeline``'s consumer side come from the same configuration. An
         explicit ``state_evidence`` argument wins; with the section disabled
         (the default) no producer is built and capture is unchanged.
+
+        Likewise it wires the ANC-4 progress-proof producer
+        (:func:`~pathlayer.detectors.proof_producer.producer_from_config`)
+        whenever ``detectors.progress_proof`` is enabled, independently of
+        ``pipeline.session_stitching``: the probe then runs after every tool
+        call. There is no override argument; construct the adapter directly
+        to capture without it.
+
+        With ``pipeline.session_stitching`` enabled, ``session_key`` and
+        ``logical_run_id`` are required and identify the caller's session and
+        logical run (see ``docs/session-stitching.md``).
         """
         if state_evidence is None:
             # Local import: pathlayer.coding_state imports from pathlayer.config,
@@ -285,7 +310,27 @@ class LangGraphAdapter(Adapter):
             from pathlayer.coding_state import state_evidence_producer_from_config
 
             state_evidence = state_evidence_producer_from_config(config)
-        return cls(sink, prices=config.pricing.effective_prices(), state_evidence=state_evidence)
+        from pathlayer.detectors.proof_producer import producer_from_config
+        from pathlayer.store import configuration_fingerprint
+
+        journal = None
+        if config.pipeline.session_stitching:
+            if session_key is None or logical_run_id is None:
+                raise ValueError("session stitching requires session_key and logical_run_id")
+            journal = SessionJournal(
+                config.store.path + ".sessions",
+                fingerprint=configuration_fingerprint(config),
+                tool_masks=config.canonicalization.tool_masks,
+            )
+        return cls(
+            sink,
+            prices=config.pricing.effective_prices(),
+            state_evidence=state_evidence,
+            progress_proof=producer_from_config(config),
+            session_journal=journal,
+            session_key=session_key,
+            logical_run_id=logical_run_id,
+        )
 
     def attach(self) -> None:
         """Reset capture state (deterministic ``ts`` per attached run)."""
@@ -381,6 +426,15 @@ class LangGraphAdapter(Adapter):
                 event = self._state_evidence.attach_after(event, pending.state_capture)
             if self._progress_proof is not None and pending.kind is EventKind.TOOL_CALL:
                 self._attach_progress_proof(self._progress_proof, event)
+            if self._session_journal is not None:
+                assert self._session_key is not None and self._logical_run_id is not None
+                event = self._session_journal.capture(
+                    event,
+                    source="langgraph",
+                    session_key=self._session_key,
+                    run_id=self._logical_run_id,
+                    event_id=run_id,
+                )
             self.emit(event)
 
     @staticmethod
@@ -390,13 +444,21 @@ class LangGraphAdapter(Adapter):
         ``ProgressProofProducer.attach`` is fail-soft by contract (a probe
         failure attaches an unobserved marker, never raises). This guard
         covers a regression or a subclass that raises anyway: the event is
-        still emitted, without a partial proof or marker.
+        still emitted with an unavailable marker, never a partial proof.
+
+        The ``{"reason": "producer_failed"}`` marker is deliberately outside
+        ANC-4's closed ``{spec_hash, unobserved, reason}`` schema (no spec is
+        known once the producer raised): ``validate_unobserved_marker`` rejects
+        it, so ``ProofProgressAnchor`` behaves exactly as without a marker. Its
+        mere presence makes VAL-7's ``continuity_key`` abstain, so a failed
+        probe can never let unchanged state evidence stitch the call.
         """
         try:
             producer.attach(event)
         except Exception:
             for key in PROOF_METADATA_KEYS:
                 event.metadata.pop(key, None)
+            event.metadata["progress_proof_unobserved"] = {"reason": "producer_failed"}
             logger.warning(
                 "progress_proof producer raised; event emitted without a proof", exc_info=True
             )

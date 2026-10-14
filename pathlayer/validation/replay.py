@@ -271,9 +271,12 @@ def score(
 #   some are 16x-identical edits that legitimately trip the LoopDetector in the
 #   full pipeline, inflating the FP rate with traces never meant for it.
 # - ``generated``: synthetic VAL-5 output, not hand-labeled golden traces.
+# - ``val7``: concluding turns whose frozen cross-run context only counts with
+#   ``pipeline.session_stitching`` enabled; the default replay would score the
+#   failing one as a miss (test_session_stitching.py replays them correctly).
 # They are skipped only when discovered *beneath* the scan root, so pointing
 # load_traces directly at one of them still loads it (the experiment test does).
-_NON_PIPELINE_SUBDIRS = frozenset({"nop4_experiment", "generated"})
+_NON_PIPELINE_SUBDIRS = frozenset({"nop4_experiment", "generated", "val7"})
 
 
 def load_traces(path: str | Path) -> list[Trace]:
