@@ -94,7 +94,7 @@ def test_post_mortem_to_dict_shape(trace: Callable[[str], list[ToolEvent]]) -> N
 
 def test_post_mortem_recent_history_carries_forensic_fields() -> None:
     # recent_history must surface cost/kind/ts/error so a budget or retry stop is
-    # diagnosable from the JSON alone, not just tool+args (audit F-3 / #97 M-3).
+    # diagnosable from the JSON alone, not just tool+args (audit findings F-3 / M-3).
     events = [
         ToolEvent(
             tool="call_llm",

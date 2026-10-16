@@ -318,7 +318,7 @@ def _validated_timeout(timeout_seconds: float) -> float:
     would otherwise be accepted by the configuration and then turn every
     observation into a ``collection_failed`` at run time -- a whole run
     observing nothing, reported as a degraded collector rather than as the
-    configuration mistake it is (Kropemann's review on #193).
+    configuration mistake it is (Kropemann's review).
     """
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise CodingStateError(

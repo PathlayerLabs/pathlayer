@@ -103,7 +103,7 @@ def test_fuse_is_bounded_by_one() -> None:
 
 def test_fuse_clamps_confidence_above_one() -> None:
     # A custom detector emitting confidence > 1 must not push fused past 1.0
-    # (audit #104 M-1): clamp to 1.0, do not raise.
+    # (audit finding M-1, 2026-07-01): clamp to 1.0, do not raise.
     assert Policy().fuse([Signal("custom", confidence=2.0)]) == pytest.approx(1.0)
 
 
@@ -251,7 +251,7 @@ def test_dominant_signal_none_without_actionable() -> None:
 
 
 def test_dominant_signal_treats_nan_confidence_as_inert_regardless_of_order() -> None:
-    # Audit issue #108: an unnormalized NaN fails every comparison, so a plain
+    # Audit finding (2026-07-01): an unnormalized NaN fails every comparison, so a plain
     # `max(key=lambda s: weight * s.confidence)` picks based on list order
     # instead of the real weighted score. Both orderings must agree, and must
     # never name the NaN signal over a real one.
@@ -671,8 +671,8 @@ def test_override_signal_none_without_trigger() -> None:
 
 
 def test_override_signal_tie_break_clamps_out_of_range_confidence() -> None:
-    # Audit issue #108's normalization gap, exercised on override_signal's
-    # tie-break: since ARB-5 (#134) _triggered_overrides normalizes NaN to 0.0,
+    # The 2026-07-01 audit's normalization gap, exercised on override_signal's
+    # tie-break: since ARB-5 _triggered_overrides normalizes NaN to 0.0,
     # so a NaN-confidence signal is excluded here by falling below the 0.5
     # threshold (not by NaN failing every comparison). A finite out-of-range
     # confidence still reaches the tie-break and must be clamped to [0, 1]
@@ -696,7 +696,7 @@ def test_override_signal_tie_break_clamps_out_of_range_confidence() -> None:
 
 
 def test_override_normalizes_confidence_before_threshold() -> None:
-    # ARB-5 (#134): _triggered_overrides normalizes Signal.confidence before the
+    # ARB-5: _triggered_overrides normalizes Signal.confidence before the
     # `>= threshold` check, like fusion/ladder/post-mortem. A custom detector
     # emitting a stray value (NaN or out-of-range) must be treated as its clamped
     # [0, 1] equivalent, not compared raw. At a 0.0 threshold, both NaN and a
@@ -1030,7 +1030,7 @@ def test_pipeline_stops_once_progress_evidence_goes_stale() -> None:
 
 
 def test_suppression_also_guards_a_real_loop2_ngram_confidence() -> None:
-    # Non-regression (LOOP-2, #18): the suppression rule keys off the signal
+    # Non-regression (LOOP-2): the suppression rule keys off the signal
     # *name* ("loop"), not its internal source. Same guarantee must hold when
     # the confidence comes from the real LoopDetector's n-gram fallback, not
     # just the exact-repeat component exercised above. Cycle is (open_file,

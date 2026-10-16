@@ -210,7 +210,7 @@ def test_extended_churn_reaches_stop() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# CLI: before/after output carries the required numeric evidence (#44 DoD).
+# CLI: before/after output carries the required numeric evidence (DEMO-2 DoD).
 # --------------------------------------------------------------------------- #
 
 

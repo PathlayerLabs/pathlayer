@@ -707,7 +707,7 @@ def test_enabling_the_preset_changes_the_durable_fingerprint(tmp_path: Path) -> 
     [
         ({"preset": "browser"}, "unknown state evidence preset"),
         # A budget the collectors cannot spend would turn every observation
-        # into a collection_failed at run time (Kropemann's review on #193).
+        # into a collection_failed at run time (Kropemann's review).
         ({"timeout_seconds": 0}, "timeout_seconds"),
         ({"tests": ["-k", "x"]}, "invalid pytest nodeid"),
         ({"tests": ["a::b", "a::b"]}, "must not repeat"),

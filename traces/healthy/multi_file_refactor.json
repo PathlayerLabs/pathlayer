@@ -1,6 +1,6 @@
 {
   "label": "healthy",
-  "description": "Legitimate repetitive-but-productive refactor: the same read -> edit -> run_tests shape repeats across many files, but every read/edit targets a genuinely different file, so no n-gram of length >= 2 ever recurs (each occurrence carries a distinct path). Adversarial fixture for LOOP-2 (#18): a naive frequency-based coverage score that ignored argument identity would false-positive here; guards against that regression.",
+  "description": "Legitimate repetitive-but-productive refactor: the same read -> edit -> run_tests shape repeats across many files, but every read/edit targets a genuinely different file, so no n-gram of length >= 2 ever recurs (each occurrence carries a distinct path). Adversarial fixture for LOOP-2: a naive frequency-based coverage score that ignored argument identity would false-positive here; guards against that regression.",
   "metadata": { "curated_by": "LOOP-2", "issue": 18 },
   "events": [
     { "tool": "read_file", "args": { "path": "src/module_0.py" } },

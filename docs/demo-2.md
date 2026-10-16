@@ -76,8 +76,8 @@ Il faut Python 3.10+ installé.
 
 ```bash
 # 1. Récupérer le projet
-git clone https://github.com/Kropemann/Pathlayer.git
-cd Pathlayer
+git clone https://github.com/PathlayerLabs/pathlayer.git
+cd pathlayer
 
 # 2. Créer un environnement isolé et installer Pathlayer (+ le support LangGraph)
 python -m venv .venv
@@ -98,7 +98,7 @@ ci-dessus.
 Elle démontre le cas d'un agent qui produit un **signal de progrès mesurable**
 (ici : le résultat des tests). Elle ne prétend pas attraper un agent bloqué qui
 n'a *aucun* repère objectif (ni tests, ni suivi de code, ni code de sortie). Ce
-cas plus difficile est suivi séparément (issue ANC-1, #135).
+cas plus difficile est suivi séparément (ANC-1).
 
 ---
 

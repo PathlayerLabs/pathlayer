@@ -15,7 +15,7 @@ drive the **existing** detectors through the **existing** ``Pipeline`` + default
                      signal is **actionable**: the default ``Policy`` STOPs on it.
                      Success suppression keeps a *green* suite from being stopped,
                      but here the suite stays red, so the run is halted.
-* (d) BUDGET      -- captured ``LLM_CALL`` cost (issue #77) drives
+* (d) BUDGET      -- captured ``LLM_CALL`` cost drives
                      ``BudgetDetector`` to STOP once spend crosses the ceiling,
                      while loop/no_progress stay silent (varied tools, no test
                      evidence), proving the STOP is on budget alone.
@@ -318,7 +318,7 @@ def test_rich_test_stall_from_real_adapter_stops_on_no_progress() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# (d) BUDGET -- model spend is now captured (issue #77): the adapter emits
+# (d) BUDGET -- model spend is now captured: the adapter emits
 #     priced LLM_CALL events, so BudgetDetector stops on real model cost.
 # --------------------------------------------------------------------------- #
 
@@ -342,7 +342,7 @@ def _drive_llm_cost(adapter: LangGraphAdapter, output_tokens: int, model: str = 
 
 
 def test_budget_stops_on_captured_llm_cost() -> None:
-    # Issue #77: model spend is now captured. Each LLM call costs $1
+    # ADP-0 bis: model spend is now captured. Each LLM call costs $1
     # (100k gpt-4o output tokens at $10/1M), interleaved with *varied* edits that
     # carry no test/exit evidence -> loop and no_progress stay silent, so the only
     # detector that can STOP is budget. The default ceiling ($5, stop at 90%) is

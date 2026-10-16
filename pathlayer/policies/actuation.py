@@ -79,7 +79,7 @@ class EventSnapshot:
     Deliberately excludes ``args``/``result``/``metadata``: an actuator may
     inject this context into the agent's own prompt (e.g. a WARN
     ``SystemMessage``), and those fields can carry secrets, PII or file contents
-    (same concern as the HTTP error leak tracked by SEC-3, #133). Only these
+    (same concern as the HTTP error leak tracked by SEC-3). Only these
     scalars -- safe to surface to the agent -- are exposed.
     """
 

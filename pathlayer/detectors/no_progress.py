@@ -89,7 +89,7 @@ itself is complexity, not behaviour: ``evaluate`` re-derives every anchor's
 level from scratch and calls :func:`progress_series` (itself ``window`` calls to
 ``measure``, each rescanning its prefix) on *every* tick, i.e. O(window * n) per
 tick / O(window * n^2) total over a run of length n -- measured at 15-16x
-slower on a 4,000-event OpenClaw reproduction (issue #76). ``step`` instead
+slower on a 4,000-event OpenClaw reproduction. ``step`` instead
 folds each anchor's ``(level, satisfied)`` via :meth:`ProgressAnchor.step` (O(1)
 amortized for the three built-in coding anchors, O(n) only for a
 non-conforming custom anchor -- see ``pathlayer.detectors.progress``) and

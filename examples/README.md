@@ -65,7 +65,7 @@ summarized or stopped.
 Scope: this demonstrates the differentiator on an agent that emits a
 **deterministic ground-truth signal** (test results). It does not claim to catch
 slow burns with *no* tests, git or exit code -- that native-signal-free case is
-tracked separately by ANC-1 (#135).
+tracked separately by ANC-1.
 
 The demo runs tools through the idiomatic `langgraph.prebuilt.ToolNode`. A
 `ToolNode` wraps each result in a `ToolMessage`; the ADP-0 adapter unwraps that

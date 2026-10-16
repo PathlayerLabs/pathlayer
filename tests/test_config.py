@@ -551,7 +551,7 @@ def test_build_pipeline_wraps_loop_steepness_range_error_as_config_error() -> No
 def test_build_pipeline_warns_when_ngram_cap_meets_stop_threshold(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Audit #117 finding M-1: raising the LOOP-2 cap to/above stop_threshold
+    # Audit finding M-1 (2026-07-07): raising the LOOP-2 cap to/above stop_threshold
     # removes one of the two guards that keep the uncalibrated n-gram fallback
     # from ever solo-stopping on its own.
     config = PathlayerConfig.from_mapping(
@@ -577,7 +577,7 @@ def test_build_pipeline_does_not_warn_when_ngram_cap_stays_below_stop_threshold(
 def test_build_pipeline_does_not_warn_when_loop_is_advisory(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Copilot review on PR #119: an advisory `loop` can never act at all
+    # Copilot review: an advisory `loop` can never act at all
     # (Policy._actionable excludes it unconditionally), so neither M-1 guard
     # is even relevant -- warning here would be actively misleading.
     config = PathlayerConfig.from_mapping(
@@ -594,7 +594,7 @@ def test_build_pipeline_does_not_warn_when_loop_is_advisory(
 def test_build_pipeline_does_not_warn_when_loop_weight_keeps_cap_below_threshold(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Copilot review on PR #119: Policy.fuse() combines a lone actionable
+    # Copilot review: Policy.fuse() combines a lone actionable
     # signal as weight * confidence, so a down-weighted loop needs a higher
     # raw confidence to reach stop_threshold than the raw cap suggests.
     config = PathlayerConfig.from_mapping(
@@ -730,7 +730,7 @@ def test_build_pipeline_does_not_warn_about_budget_estimate_when_advisory(
 def test_build_pipeline_warns_when_loop_enabled_without_no_progress(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Audit #117 finding M-1: without no_progress, the loop<-progress
+    # Audit finding M-1 (2026-07-07): without no_progress, the loop<-progress
     # suppression that protects traces/healthy/repeated_checkpoint_pair.json
     # is never wired.
     config = PathlayerConfig.from_mapping({"detectors": {"no_progress": {"enabled": False}}})
@@ -1243,7 +1243,7 @@ def test_no_loop_suppression_when_loop_advisory() -> None:
 
 
 def test_f1a_repetitive_but_passing_no_longer_stops() -> None:
-    # End-to-end regression pin for the bug this fix resolves (issue #113): a
+    # End-to-end regression pin for the bug this fix resolves: a
     # test suite re-run with identical args, passed count climbing, must not be
     # stopped by loop alone through the real production pipeline.
     events = [

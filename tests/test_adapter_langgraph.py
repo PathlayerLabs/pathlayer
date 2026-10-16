@@ -386,7 +386,7 @@ def test_pending_map_is_bounded_when_starts_are_never_paired() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# LLM cost capture (issue #77): on_llm_start/end -> a dedicated LLM_CALL event
+# LLM cost capture: on_llm_start/end -> a dedicated LLM_CALL event
 # carrying token cost in cost_usd, so BudgetDetector can guard model spend.
 # Driven by feeding the handler hand-built LLMResults -- deterministic, offline,
 # no API key -- which exercises both the handler and the adapter token/price path.

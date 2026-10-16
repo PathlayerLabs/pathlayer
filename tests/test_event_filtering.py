@@ -1,6 +1,6 @@
 """Event-kind filtering: action detectors ignore non-action events.
 
-A dedicated ``EventKind.LLM_CALL`` event (issue #77) carries token cost so
+A dedicated ``EventKind.LLM_CALL`` event carries token cost so
 ``BudgetDetector`` can account for model spend. Those events live in the same
 history as tool calls, so the action detectors (loop/retry/no_progress) must
 filter them out via ``Detector.event_kinds`` -- otherwise a reasoning agent that

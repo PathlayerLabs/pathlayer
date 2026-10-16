@@ -1,7 +1,7 @@
 """Bounded filesystem and pytest ``StateEvidence`` collectors.
 
-This module's bytes are one of the inputs COMP-1 hashes into its seal (see
-``benchmarks/comp1/run.py``), so a new collector belongs in
+This module's bytes were one of the inputs the COMP-1 benchmark sealed, so a
+new collector belongs in
 :mod:`pathlayer.coding_state_collectors` unless it is genuinely part of the
 sealed set. These deterministic helpers are shared by the offline COMP-1
 harness and the opt-in runtime producer introduced by ARCH-2. They bracket a caller-owned tool

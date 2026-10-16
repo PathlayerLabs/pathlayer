@@ -1,19 +1,19 @@
-"""Minimal ``StateEvidence`` contract (ARCH-1A, issue #170).
+"""Minimal ``StateEvidence`` contract (ARCH-1A).
 
-#166 (COMP-1) asks whether state-guided parameterized subtraces reuse better
+COMP-1 asked whether state-guided parameterized subtraces reuse better
 than full replay without raising false positives on healthy runs. Answering
 that requires *some* way to observe, before and after a tool boundary,
 whether the state a contract's pre/postconditions talk about actually
 changed -- without first designing Pathlayer's general collection
 architecture (storage v2, a causal graph, a generic collector registry, ...).
-#167 scopes that down to the smallest thing #166's benchmark needs; this
+The ARCH-1 spike scoped that down to the smallest thing COMP-1 needed; this
 module is that smallest thing: a single, versioned, hand-validated record
 type, ``StateEvidence``, plus a validator and a canonical hash. It defines
-nothing about *how* a collector captures a resource -- that is #172's job
+nothing about *how* a collector captures a resource -- that is ARCH-1B's job
 (filesystem existence/hash, test pass/fail sets) -- only the shape every
 collector's output must fit.
 
-The already-sealed benchmark matrix (#169, ``benchmarks/comp1/matrix.v1.json``)
+The sealed COMP-1A benchmark matrix
 fixes exactly what vocabulary this shape needs to carry: every
 precondition/postcondition across its three contracts is phrased either as a
 filesystem canonical-hash comparison ("differs from its initial hash" /
@@ -22,8 +22,8 @@ set becomes empty", "baseline passing tests unchanged") -- never a bare
 boolean. ``raw_fingerprint``/``canonical_fingerprint``/``delta`` are
 therefore generic, collector-defined JSON here, not fixed to either shape:
 closing them to ``{"filesystem", "tests"}``-specific structure would mean
-this module hardcoding #172's collector set, which #170 explicitly reserves
-for #172. Fixtures under ``tests/fixtures/state_evidence/`` demonstrate both
+this module hardcoding ARCH-1B's collector set, which ARCH-1A explicitly
+reserves for ARCH-1B. Fixtures under ``tests/fixtures/state_evidence/`` demonstrate both
 shapes without the schema enforcing either.
 
 Field semantics:
@@ -32,10 +32,10 @@ Field semantics:
   concerned ``ToolEvent``". ``pathlayer.events.ToolEvent`` carries no id
   field, and OpenClaw's adapter wires only ``after_tool_call`` (no live
   "before" hook exists to correlate against today) -- adding either is an
-  event-schema/adapter change #167's go/no-go explicitly forbids unless the
+  event-schema/adapter change the ARCH-1 go/no-go explicitly forbids unless the
   benchmark needs it. It doesn't: whatever brackets a tool call with
   ``capture(phase="before")``/``capture(phase="after")`` (almost certainly
-  #172's benchmark-harness script) mints this id itself and owns the
+  ARCH-1B's benchmark-harness script) mints this id itself and owns the
   correlation table out of band. This module makes no assumption about its
   format beyond "non-empty bounded string".
 - ``phase``: ``"before"`` or ``"after"`` -- which side of the tool boundary
@@ -50,7 +50,7 @@ Field semantics:
   was attempted and errored). This tri-state is the *entire* mechanism by
   which "no evidence" stays distinguishable from "no change": a consumer
   must never infer "unchanged" from a missing fingerprint, only from an
-  ``observed`` fingerprint that compares equal. #171's abstention logic reads
+  ``observed`` fingerprint that compares equal. COMP-1B's abstention logic reads
   this field directly, so the discriminator is ``status`` alone --
   :func:`validate_state_evidence` enforces that a non-``observed`` record
   can never carry a fingerprint or delta, so this invariant cannot be
@@ -65,7 +65,7 @@ Field semantics:
   this record, so a later consumer can check a record was produced by the
   version a contract expects.
 
-Go/no-go (per #167): **Go to #172.** This schema unambiguously represents a
+Go/no-go (per ARCH-1): **Go to ARCH-1B.** This schema unambiguously represents a
 before/after observation and its absences via ``status`` alone, and required
 no storage migration, no ``events.py`` change, and no adapter change.
 """
@@ -120,7 +120,7 @@ class StateEvidence:
     :func:`compute_evidence_hash` already gets order-independence for free
     from ``_canonical_sha256``'s recursive ``sort_keys`` -- no bespoke frozen
     representation is needed just to make hashing deterministic. Nothing in
-    #170's scope needs a ``StateEvidence`` as a dict key or set member.
+    ARCH-1A's scope needs a ``StateEvidence`` as a dict key or set member.
     """
 
     schema_version: int

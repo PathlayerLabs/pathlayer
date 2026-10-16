@@ -2,24 +2,135 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
+from langchain_core.tools import tool
+from langgraph.errors import GraphDrained
+from langgraph.graph import END, START, StateGraph
 
-from benchmarks.val5.run import pipeline, run_case
+from pathlayer.adapters.langgraph import LangGraphAdapter
+from pathlayer.detectors.loop import LoopDetector
 from pathlayer.detectors.no_progress import NoProgressDetector
 from pathlayer.detectors.progress import is_advancing
 from pathlayer.detectors.state_progress import StateEvidenceProgressAnchor
 from pathlayer.events import EventKind, ToolEvent
+from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action
+from pathlayer.policies.base import Policy, PolicyConfig, SuppressionRule
+from pathlayer.policies.langgraph_actuator import LangGraphActuator
+from pathlayer.policies.wiring import wire
+from pathlayer.state_collectors import unavailable_state_evidence
 from pathlayer.state_evidence import (
     STATE_EVIDENCE_METADATA_KEY,
+    FilesystemStateSensor,
+    StateEvidenceProducer,
     StateOutcome,
     state_evidence_from_event,
 )
 from pathlayer.store import decode_event, encode_event
 from pathlayer.validation import Trace, dump_trace, load_trace
+
+
+class UnavailableFilesystemSensor(FilesystemStateSensor):
+    """Controlled missing-observation fixture, through the real producer boundary."""
+
+    def capture(self, *, tool_event_ref, phase, before=None):
+        return unavailable_state_evidence(
+            tool_event_ref=tool_event_ref,
+            phase=phase,
+            resource_type=self.resource_type,
+            resource_id=self.resource_id,
+        )
+
+
+class RunState(TypedDict):
+    steps: int
+
+
+def pipeline(*, loops: bool = True) -> Pipeline:
+    anchor = StateEvidenceProgressAnchor("output")
+    detectors = [NoProgressDetector([anchor])]
+    if loops:
+        detectors.append(LoopDetector())
+    return Pipeline(
+        detectors,
+        Policy(PolicyConfig(suppressions={"loop": SuppressionRule("progress")})),
+        progress_anchors=[anchor],
+    )
+
+
+def run_case(root: Path, mode: str, *, loops: bool = True):
+    root.mkdir(parents=True, exist_ok=True)
+    output = root / "output.txt"
+    output.write_text("0")
+    # A directory is unobservable as a regular file; same real sensor class.
+    watched = root if mode == "collection_failed" else output
+    sensor_type = UnavailableFilesystemSensor if mode == "unavailable" else FilesystemStateSensor
+    pipe = pipeline(loops=loops)
+    actuator = LangGraphActuator()
+    sink = wire(pipe, actuator)
+    events = []
+    decisions = []
+
+    def observe(event):
+        events.append(event)
+        sink(event)
+        decisions.append(pipe.last_decision)
+
+    adapter = LangGraphAdapter(
+        observe,
+        state_evidence=StateEvidenceProducer([sensor_type(watched, resource_id="output")]),
+    )
+    adapter.attach()
+    count = 0
+
+    @tool
+    def advance_output() -> str:
+        """Perform the next step on the known output artifact."""
+        nonlocal count
+        count += 1
+        if mode == "productive":
+            output.write_text(str(count))
+        elif mode == "cycle":
+            output.write_text(str(count % 2))
+        return "ok"  # identical tool name, args and output in every scenario
+
+    def node(state: RunState) -> RunState:
+        advance_output.invoke({})
+        return {"steps": state["steps"] + 1}
+
+    graph = StateGraph(RunState)
+    graph.add_node("act", node)
+    graph.add_edge(START, "act")
+    graph.add_conditional_edges("act", lambda s: END if s["steps"] >= 16 else "act")
+    drained = False
+    try:
+        graph.compile().invoke(
+            {"steps": 0},
+            config={**adapter.as_config(), "recursion_limit": 32},
+            control=actuator.control,
+        )
+    except GraphDrained:
+        drained = True
+    assert drained == pipe.stopped == actuator.control.drain_requested
+    # Independent outcome, never derived from Pathlayer signals or fingerprints.
+    assert output.read_text() == (
+        "16" if mode == "productive" else str(count % 2) if mode == "cycle" else "0"
+    )
+    return events, decisions, drained
+
+
+@pytest.fixture(scope="module")
+def productive_event(tmp_path_factory: pytest.TempPathFactory) -> ToolEvent:
+    events, _, _ = run_case(tmp_path_factory.mktemp("live"), "productive")
+    # Unmutated control: the abstention tests below would pass vacuously if
+    # this event were already a gap.
+    assert StateEvidenceProgressAnchor("output").measure(events[:1]) == 1.0
+    return events[0]
 
 
 @pytest.mark.parametrize(
@@ -191,13 +302,10 @@ def test_fresh_state_does_not_suppress_budget(tmp_path: Path) -> None:
     "fingerprint", [[], {}, ["a"], {"x": 1}, 3, True, None, "invalid", "sha256:bad"]
 )
 @pytest.mark.parametrize("phase", [0, 1])
-def test_structurally_valid_but_bad_filesystem_fingerprint_is_a_gap(fingerprint, phase) -> None:
-    import copy
-
-    fixture = (
-        Path(__file__).resolve().parents[1] / "benchmarks/val5/results/productive-combined.json"
-    )
-    event = load_trace(fixture).events[0]
+def test_structurally_valid_but_bad_filesystem_fingerprint_is_a_gap(
+    productive_event: ToolEvent, fingerprint, phase
+) -> None:
+    event = productive_event
     metadata = copy.deepcopy(event.metadata)
     raw = metadata[STATE_EVIDENCE_METADATA_KEY]
     raw["records"][phase]["canonical_fingerprint"] = fingerprint
@@ -207,86 +315,15 @@ def test_structurally_valid_but_bad_filesystem_fingerprint_is_a_gap(fingerprint,
     assert NoProgressDetector([anchor]).evaluate([event]).confidence == 0
 
 
-def test_regenerated_results_match_archives(tmp_path: Path, monkeypatch) -> None:
-    import sys
-
-    from benchmarks.val5.run import main
-
-    reference = Path(__file__).resolve().parents[1] / "benchmarks/val5/results"
-    monkeypatch.setattr(
-        sys, "argv", ["val5", "--output", str(tmp_path), "--check-results", str(reference)]
-    )
-    main()
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    ["reference", "parent", "fingerprint", "outcome", "time", "verdict", "missing", "extra"],
-)
-def test_result_comparison_detects_changes(tmp_path: Path, mutation: str) -> None:
-    import json
-    import shutil
-
-    from benchmarks.val5.compare import compare_results
-
-    reference = Path(__file__).resolve().parents[1] / "benchmarks/val5/results"
-    shutil.copytree(reference, tmp_path, dirs_exist_ok=True)
-    path = tmp_path / "productive-combined.json"
-    payload = json.loads(path.read_text())
-    event = payload["events"][0]
-    evidence = event["metadata"][STATE_EVIDENCE_METADATA_KEY]
-    if mutation == "reference":
-        evidence["records"][1]["tool_event_ref"] = "wrong-event"
-    elif mutation == "parent":
-        event["metadata"]["parent_run_id"] = event["run_id"]
-    elif mutation == "fingerprint":
-        evidence["records"][1]["canonical_fingerprint"] = "changed"
-    elif mutation == "outcome":
-        evidence["outcome"] = "unavailable"
-    elif mutation == "time":
-        event["ts"] = 999
-    elif mutation == "verdict":
-        (tmp_path / "summary.json").write_text('{"verdict": "wrong"}')
-    elif mutation == "missing":
-        (tmp_path / "cycle-combined.json").unlink()
-    elif mutation == "extra":
-        (tmp_path / "unexpected.json").write_text("{}")
-    path.write_text(json.dumps(payload))
-    assert compare_results(reference, tmp_path)
-
-
 @pytest.mark.parametrize("phase", [0, 1])
 @pytest.mark.parametrize(
     "field,value",
     [("resource_id", "other"), ("resource_type", "tests"), ("collector_version", "other@1")],
 )
-def test_pair_scope_mismatch_abstains(phase, field, value) -> None:
-    import copy
-
-    fixture = (
-        Path(__file__).resolve().parents[1] / "benchmarks/val5/results/productive-combined.json"
-    )
-    event = load_trace(fixture).events[0]
+def test_pair_scope_mismatch_abstains(productive_event: ToolEvent, phase, field, value) -> None:
+    event = productive_event
     metadata = copy.deepcopy(event.metadata)
     metadata[STATE_EVIDENCE_METADATA_KEY]["records"][phase][field] = value
     assert (
         StateEvidenceProgressAnchor("output").measure([replace(event, metadata=metadata)]) is None
     )
-
-
-def test_missing_no_progress_signal_returns_no_go(tmp_path: Path, monkeypatch) -> None:
-    import json
-    import sys
-
-    from benchmarks.val5 import run
-    from pathlayer.pipeline import Pipeline
-
-    # Remove the detector from the actual live and replay pipeline. The harness
-    # should report NO-GO, not crash in max() or fabricate a successful check.
-    monkeypatch.setattr(run, "pipeline", lambda **kwargs: Pipeline([]))
-    monkeypatch.setattr(sys, "argv", ["val5", "--output", str(tmp_path)])
-    with pytest.raises(SystemExit, match="1"):
-        run.main()
-    report = json.loads((tmp_path / "summary.json").read_text())
-    assert report["verdict"] == "NO-GO"
-    assert all(row["no_progress_max"] == 0 for row in report["results"])

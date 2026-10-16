@@ -22,9 +22,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/Kropemann/Pathlayer"
-Repository = "https://github.com/Kropemann/Pathlayer"
-Issues = "https://github.com/Kropemann/Pathlayer/issues"
+Homepage = "https://github.com/PathlayerLabs/pathlayer"
+Repository = "https://github.com/PathlayerLabs/pathlayer"
+Issues = "https://github.com/PathlayerLabs/pathlayer/issues"
 
 [project.scripts]
 pathlayer-export-run = "pathlayer.adapters.openclaw_export:main"

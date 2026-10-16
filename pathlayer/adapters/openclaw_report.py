@@ -466,7 +466,7 @@ def _llm_events(
 
 
 def _share_of(events: Sequence[ToolEvent]) -> CostShare:
-    """Cost one payload contributed, via the same fold as the budget detector (#162)."""
+    """Cost one payload contributed, via the same fold as the budget detector."""
     if not events:
         return CostShare(unmeasured_events=1)
     share = CostShare()

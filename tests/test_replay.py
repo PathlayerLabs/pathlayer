@@ -156,8 +156,9 @@ def test_load_traces_single_file_and_dir() -> None:
 @pytest.mark.parametrize("subdir", ["nop4_experiment", "val7"])
 def test_load_traces_skips_non_pipeline_subdirs_when_scanning_root(subdir: str) -> None:
     # Scanning traces/ must exclude the anchor-only experiment, synthetic
-    # generated corpora (#97 M-1) and VAL-7 session-only traces, which need
-    # session_stitching enabled, so an aggregate pipeline score is not polluted.
+    # generated corpora (audit finding M-1, 2026-06-29) and VAL-7 session-only
+    # traces, which need session_stitching enabled, so an aggregate pipeline
+    # score is not polluted.
     def keys(traces: list[Trace]) -> set[tuple[str, str]]:
         return {(t.label, t.description) for t in traces}
 

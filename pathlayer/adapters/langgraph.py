@@ -10,7 +10,7 @@ lineage** -- ``parent_run_id`` is stored in ``metadata`` so delegation depth can
 be reconstructed offline later. We do *not* classify ``SUBAGENT_SPAWN`` (a
 name-based heuristic would be noisy); lifecycle events are out of scope here.
 
-LLM cost (issue #77): ``on_llm_start``/``on_llm_end`` are paired by ``run_id``
+LLM cost: ``on_llm_start``/``on_llm_end`` are paired by ``run_id``
 (like tools) to emit a dedicated ``EventKind.LLM_CALL`` event carrying the
 token cost in ``cost_usd``, so ``BudgetDetector`` can guard model spend (the
 real cost is in tokens, not tool calls). Tokens come from the model response

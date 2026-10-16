@@ -1,6 +1,6 @@
 {
   "label": "tests_after_transitioned",
-  "description": "Selected failing test set becomes empty after the tool call -- matches code.target-fixed's postcondition in benchmarks/comp1/matrix.v1.json.",
+  "description": "Selected failing test set becomes empty after the tool call -- matches code.target-fixed's postcondition in the COMP-1A benchmark matrix.",
   "expected_valid": true,
   "evidence": {
     "schema_version": 1,

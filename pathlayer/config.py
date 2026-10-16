@@ -251,7 +251,7 @@ class LoopConfig:
     ngram_min_hits: int = 3
     ngram_min_coverage: float = 0.3
     ngram_max_confidence: float = 0.85
-    # LOOP-3 (#19): steepness of the sigmoid ramp centered on ngram_min_hits.
+    # LOOP-3: steepness of the sigmoid ramp centered on ngram_min_hits.
     ngram_steepness: float = 3.0
 
 
@@ -1072,7 +1072,7 @@ def build_pipeline(
             "detectors.no_progress is disabled: the coding state anchor has nowhere "
             "to wire, so the preset will observe state on every tool call for no effect"
         )
-    # Audit #117 finding M-1: LOOP-2's n-gram fallback is an uncalibrated
+    # Audit finding M-1 (2026-07-07): LOOP-2's n-gram fallback is an uncalibrated
     # heuristic (see pathlayer.detectors.loop module docstring) that is only
     # safe today because two independent guards hold: it can never solo-STOP
     # (capped below stop_threshold, after fusion weighting), and the
@@ -1094,9 +1094,8 @@ def build_pipeline(
             resolved_logger.warning(
                 "build_pipeline: detectors.loop.ngram_max_confidence * "
                 "policy.weights.loop (%s * %s = %s) >= policy.stop_threshold (%s): "
-                "the LOOP-2 n-gram fallback, an uncalibrated heuristic (see issue "
-                "#19), can now solo-STOP an agent on its own -- see audit #117 "
-                "finding M-1",
+                "the LOOP-2 n-gram fallback, an uncalibrated heuristic, can now "
+                "solo-STOP an agent on its own -- see audit finding M-1",
                 spec.loop.ngram_max_confidence,
                 loop_weight,
                 spec.loop.ngram_max_confidence * loop_weight,
@@ -1108,7 +1107,7 @@ def build_pipeline(
                 "is disabled: the loop<-progress suppression that protects against "
                 "LOOP-2 false positives on routine checkpoint patterns (see "
                 "traces/healthy/repeated_checkpoint_pair.json) will not be wired -- "
-                "see audit #117 finding M-1"
+                "see audit finding M-1"
             )
     # ACT-1 anti-noise guard: an enabled WARN tier with no hysteresis re-fires on
     # every crossing of the warn threshold, and an ACT-1 actuator turns each

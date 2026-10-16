@@ -1,4 +1,4 @@
-"""OBS-5 (#197): captured cost split into attributed and unattributed, by cause.
+"""OBS-5: captured cost split into attributed and unattributed, by cause.
 
 Two families of tests, kept apart on purpose:
 
@@ -349,7 +349,7 @@ def test_a_run_named_by_the_source_without_a_recorded_start_is_still_attributed(
 
 
 # --------------------------------------------------------------------------- #
-# Nothing invented, consistent with the existing pricing (#162)
+# Nothing invented, consistent with the existing pricing
 # --------------------------------------------------------------------------- #
 
 

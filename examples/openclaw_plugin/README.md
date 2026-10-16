@@ -47,7 +47,7 @@ Conversation hooks (`before_agent_run`, `agent_end`) require explicit opt-in:
 # Pathlayer release layout (example)
 sudo mkdir -p /opt/pathlayer/releases /opt/pathlayer/shared
 cd /opt/pathlayer/releases
-git clone git@github.com:Kropemann/Pathlayer.git "$(date +%Y%m%d%H%M%S)"
+git clone git@github.com:PathlayerLabs/pathlayer.git "$(date +%Y%m%d%H%M%S)"
 cd "$(ls -1t | head -1)"
 python3 -m venv .venv
 .venv/bin/pip install -e ".[yaml]"

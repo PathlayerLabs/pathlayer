@@ -1,6 +1,6 @@
-"""PERF-2 (#76) reproducible before/after throughput benchmark.
+"""PERF-2 reproducible before/after throughput benchmark.
 
-Reproduces the issue #76 measurement: ``build_pipeline(PathlayerConfig())`` in
+Reproduces the PERF-2 measurement: ``build_pipeline(PathlayerConfig())`` in
 ``dry_run`` mode, fed ``N`` distinct ``TOOL_CALL`` events each carrying
 ``exit_code`` evidence (so the coding anchors -- and therefore
 ``NoProgressDetector`` -- are actually applicable every tick, not silently

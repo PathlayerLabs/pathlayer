@@ -1,4 +1,4 @@
-"""ARCH-1A: the minimal ``StateEvidence`` contract (issue #170)."""
+"""ARCH-1A: the minimal ``StateEvidence`` contract."""
 
 from __future__ import annotations
 

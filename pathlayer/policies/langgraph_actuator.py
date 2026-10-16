@@ -50,7 +50,7 @@ the design audit are load-bearing:
   malformed message) degrades to "let the agent proceed" and never raises into
   the run, exactly as :meth:`injection_node` returns ``{}`` on an empty buffer.
 
-FALLBACK/ESCALATE remain no-ops here (see ``ACT-3..4``, #31-32).
+FALLBACK/ESCALATE remain no-ops here (see ``ACT-3..4``).
 
 This module imports ``langgraph``/``langchain_core`` and so is an **optional**
 import, like :mod:`pathlayer.adapters.langgraph`: install the ``langgraph`` extra
@@ -482,7 +482,7 @@ def _format_warning(context: ActuationContext) -> str:
     :func:`_dominant_signal_name`), the fused score, and the tool name / step
     index from the :class:`~pathlayer.policies.actuation.EventSnapshot`. It never
     uses ``context.reason`` (a free-form ``Signal.reason`` can embed the raw tool
-    error -- secrets/PII, the SEC-3 #133 leak vector) nor ``args``/``result``/
+    error -- secrets/PII, the SEC-3 leak vector) nor ``args``/``result``/
     ``metadata`` (excluded from the snapshot for the same reason).
     """
     event = context.event
@@ -501,7 +501,7 @@ def _format_summary_instruction(context: ActuationContext) -> str:
     Same safety contract as :func:`_format_warning`: only the dominant signal
     *name*, the fused score and the event snapshot (tool / step) -- never
     ``context.reason``/``Signal.reason``/``args``/``result``/``metadata`` (the
-    SEC-3 #133 leak vector).
+    SEC-3 leak vector).
     """
     event = context.event
     return (

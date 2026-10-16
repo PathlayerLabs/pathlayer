@@ -445,7 +445,7 @@ class Policy:
         stay in lockstep with :meth:`fuse`'s normalization -- an unnormalized
         ``NaN`` fails every comparison, which would otherwise make ``max()``
         pick based on iteration order instead of on the actual weighted score
-        (found by audit issue #108: it named the wrong signal, or one carrying
+        (found by the 2026-07-01 audit: it named the wrong signal, or one carrying
         ``NaN``, depending on list order).
         """
         return self.config.weight_for(signal.name) * _normalized_confidence(signal.confidence)

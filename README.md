@@ -61,8 +61,8 @@ Pathlayer is currently alpha software. The most direct way to try the demos
 is from a local source checkout (Python 3.10+):
 
 ```bash
-git clone https://github.com/Kropemann/Pathlayer.git
-cd Pathlayer
+git clone https://github.com/PathlayerLabs/pathlayer.git
+cd pathlayer
 python -m pip install -e ".[dev]"
 python examples/demo_coding_contract.py
 ```
@@ -534,9 +534,7 @@ without I/O using `state_evidence_from_event(event)`. With no producer supplied,
 capture and pipeline behavior are unchanged. Capture alone does not alter policy
 decisions. The opt-in `StateEvidenceProgressAnchor` lets the existing progress
 mechanisms consume novelty on one explicitly selected filesystem artifact.
-See [VAL-5 integration and measured results](benchmarks/val5/README.md) for the
-bounded runtime GO, configuration and abstentions. Novelty is not proof of task
-success or semantic progress.
+Novelty is not proof of task success or semantic progress.
 
 ### The coding state preset
 
@@ -629,7 +627,7 @@ COVERAGE_CORE=sysmon pytest --cov-config=.coveragerc.fast --cov-fail-under=0
 
 This fast profile does not measure branch coverage and is not the project gate.
 Before submitting or merging a change, run plain `pytest` and the complete
-validation gate documented in [`AGENTS.md`](AGENTS.md#validation).
+validation gate documented in [`CONTRIBUTING.md`](CONTRIBUTING.md#validation).
 
 ## Demos
 

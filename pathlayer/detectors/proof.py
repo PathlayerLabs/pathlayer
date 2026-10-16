@@ -1,7 +1,7 @@
 """Deterministic ``checkpoint_set`` progress contract (ANC-1).
 
 Four ``no_progress`` traces (``no_progress_trivial``, ``replan_churn``,
-``research_rabbit_hole``, ``slow_burn_47k`` -- issue #132) carry no native ground
+``research_rabbit_hole``, ``slow_burn_47k``) carry no native ground
 truth: no test results, no exit code, no git diff. The coding anchors in
 ``pathlayer.detectors.progress`` have nothing to measure there, so
 ``NoProgressDetector`` stays silent -- correctly, since it never stops an agent

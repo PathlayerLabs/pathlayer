@@ -1,6 +1,6 @@
 {
   "label": "healthy",
-  "description": "ANC-4 (#188): a productive coding agent under a compiled coding contract (tests_improve + file_changes, proofs recorded live by the generated probe). After two functions it breaks calculator.py's syntax for ten consecutive calls (a refactor in progress): the test module cannot be collected, so each of those calls carries a progress_proof_unobserved marker naming the four test checkpoints. With ProofProgressAnchor wired, those calls are gaps and the run completes; with the markers stripped (pre-ANC-4 freeze) the same run STOPs at call 17.",
+  "description": "ANC-4: a productive coding agent under a compiled coding contract (tests_improve + file_changes, proofs recorded live by the generated probe). After two functions it breaks calculator.py's syntax for ten consecutive calls (a refactor in progress): the test module cannot be collected, so each of those calls carries a progress_proof_unobserved marker naming the four test checkpoints. With ProofProgressAnchor wired, those calls are gaps and the run completes; with the markers stripped (pre-ANC-4 freeze) the same run STOPs at call 17.",
   "events": [
     {
       "tool": "edit_function",

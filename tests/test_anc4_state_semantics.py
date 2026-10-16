@@ -3,7 +3,7 @@
 ANC-4 changed how an *enabled* ``progress_proof`` section reads events: proofs
 come from ``ToolEvent.metadata`` only, never ``ToolEvent.result``, and an
 unobserved marker holds ``no_progress`` silent. Full prefix replay does not
-always expose that (Kropemann's review on #192): a one-event prefix whose
+always expose that (Kropemann's review): a one-event prefix whose
 ``result``-side proof only set a baseline decides the same under both
 readings, so a resume is accepted, yet the anchor restarts from a different
 state and the *next* decision silently changes. The fingerprint of a

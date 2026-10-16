@@ -3,7 +3,7 @@
 ARCH-1B collects one file and one pytest selection. A coding preset needs two
 more deterministic observations, kept here rather than in
 :mod:`pathlayer.state_collectors` because that module's bytes are one of the
-sealed inputs COMP-1 hashes (see ``benchmarks/comp1/run.py``): growing it for
+sealed inputs of the COMP-1 benchmark: growing it for
 an unrelated feature churns that manifest for no benefit, while a new module
 costs nothing:
 

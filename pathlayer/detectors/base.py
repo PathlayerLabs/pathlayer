@@ -38,7 +38,7 @@ class Signal:
 
     ``confidence`` should live in ``[0, 1]`` (higher = more likely a
     failure/no-progress), but this is **not** enforced at construction on
-    purpose (audit issue #104 considered a ``__post_init__`` that raises on an
+    purpose (the 2026-07-01 audit considered a ``__post_init__`` that raises on an
     out-of-range value, and rejected it): a custom third-party detector is
     ordinary user code running inside the pipeline's ``sink()`` call, and
     Pathlayer must never crash the agent it observes just because one detector

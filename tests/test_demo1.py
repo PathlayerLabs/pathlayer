@@ -78,7 +78,7 @@ def test_main_prints_before_after_and_no_false_positive(capsys) -> None:  # type
     assert "Sans Pathlayer" in out
     assert "STOP apres" in out
     assert "Detecteur declencheur : loop" in out
-    # DoD #43: work avoided must be surfaced, with a coherent count.
+    # DEMO-1 DoD: work avoided must be surfaced, with a coherent count.
     match = re.search(r"Travail evite\s*:\s*(\d+) actions sur (\d+)", out)
     assert match is not None
     avoided, total = int(match.group(1)), int(match.group(2))

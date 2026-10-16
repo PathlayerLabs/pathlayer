@@ -139,7 +139,7 @@ def test_fixture_loop_has_high_confidence(trace: Callable[[str], list[ToolEvent]
 
 
 # --------------------------------------------------------------------------- #
-# LOOP-2: n-gram coverage fallback (#18)
+# LOOP-2: n-gram coverage fallback
 # --------------------------------------------------------------------------- #
 
 
@@ -219,7 +219,7 @@ def test_ngram_reports_the_single_best_size_not_a_sum() -> None:
 
 
 def test_ngram_size_guard_does_not_wrongly_exclude_short_windows() -> None:
-    # Regression (Copilot review on PR #116): the feasibility guard used to be
+    # Regression (Copilot review): the feasibility guard used to be
     # `size > n // 2`, which wrongly excluded n-gram sizes that could still
     # reach the hits floor on a short window. The only guard actually needed
     # is against a size that would leave zero grams (size > n); the hard floor
@@ -370,12 +370,12 @@ def test_existing_golden_loops_are_unaffected_by_ngram_fallback(
 
 
 # --------------------------------------------------------------------------- #
-# LOOP-3: windowed (continuous) scoring for the LOOP-2 fallback (#19)
+# LOOP-3: windowed (continuous) scoring for the LOOP-2 fallback
 # --------------------------------------------------------------------------- #
 
 
 def test_ngram_confidence_rises_smoothly_with_hits() -> None:
-    # The DoD for #19: confidence must rise smoothly as repetition increases,
+    # The DoD for LOOP-3: confidence must rise smoothly as repetition increases,
     # not jump from 0.0 straight to the raw coverage value at a hard cutoff.
     # Build interrupted cycles with a growing number of repetitions. Raw
     # coverage itself is not perfectly monotonic (it approaches its asymptote
@@ -399,7 +399,7 @@ def test_ngram_sigmoid_never_overflows_on_extreme_config() -> None:
     # Regression: _sigmoid used to clamp `x` before multiplying by `steepness`,
     # so a high ngram_min_hits combined with a high ngram_steepness could still
     # push the exponent past math.exp's range and raise OverflowError -- a
-    # detector must never crash the host agent (docs/agent/architecture.md).
+    # detector must never crash the host agent.
     detector = LoopDetector(ngram_min_hits=60, ngram_steepness=20.0, window=1000)
     signal = detector.evaluate(_interrupted_cycle(cycles=2))
     assert 0.0 <= signal.confidence <= 1.0
@@ -425,7 +425,7 @@ def test_ngram_steepness_controls_ramp_sharpness() -> None:
 def test_healthy_retry_then_succeed_stays_negligible(
     trace: Callable[[str], list[ToolEvent]],
 ) -> None:
-    # Regression pinned from the LOOP-3 spike (#19): this VAL-2
+    # Regression pinned from the LOOP-3 spike: this VAL-2
     # false-positive-boundary fixture (a transient failure retried twice then
     # resolved) has hits=2 for its best n-gram -- exactly the case the LOOP-3
     # ramp must keep negligible. A naive fix that simply lowered/removed

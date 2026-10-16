@@ -23,7 +23,7 @@ from pathlayer.policies.actuation import ActuationContext, EventSnapshot
 from pathlayer.policies.langgraph_actuator import LangGraphActuator
 from pathlayer.postmortem import PostMortem
 
-# A stand-in for the SEC-3 (#133) leak vector: a RetryDetector builds its
+# A stand-in for the SEC-3 leak vector: a RetryDetector builds its
 # Signal.reason from the raw tool error, which can carry secrets. The injected
 # warning must never surface it.
 _SECRET_IN_REASON = "db timeout: password=hunter2"
@@ -170,7 +170,7 @@ def test_warn_buffers_a_warning_and_never_drains() -> None:
 
 
 def test_warning_text_excludes_sensitive_fields() -> None:
-    # SEC-3 (#133): the advisory is built from safe fields only (dominant signal
+    # SEC-3: the advisory is built from safe fields only (dominant signal
     # NAME, fused, tool, step). It must never surface Signal.reason, which a
     # RetryDetector fills with the raw tool error (secrets/PII).
     actuator = LangGraphActuator()
@@ -332,7 +332,7 @@ def test_summarize_arms_gate_and_buffers_instruction() -> None:
 
 
 def test_summary_instruction_excludes_sensitive_fields() -> None:
-    # Same SEC-3 (#133) contract as WARN: the instruction names the signal but
+    # Same SEC-3 contract as WARN: the instruction names the signal but
     # never leaks Signal.reason (raw tool error -> secrets/PII).
     actuator = LangGraphActuator()
     actuator.apply_with_context(

@@ -18,20 +18,20 @@ components into a single continuous ``loop`` signal:
   probe_1, a, b, a, b, probe_2, ...``) -- LOOP-1's strict trailing-block match
   resets on every interruption and stays silent forever on this shape, even
   though the ``a, b`` cycle covers most of the window (proven empirically: see
-  the go/no-go spike for issue #18). This component only ever *opens a new
+  the LOOP-2 go/no-go spike). This component only ever *opens a new
   detection path*; it never boosts a loop LOOP-1 already sees, by design (see
   ``evaluate``): it is capped at ``ngram_max_confidence`` (default ``0.85``,
   below the default ``stop_threshold`` of ``0.9``, mirroring ``RET-2``'s
   ``dominance_max_confidence``) since it is a new, uncalibrated heuristic --
-  precision over recall until validated on the golden set (see #18's
+  precision over recall until validated on the golden set (see the LOOP-2
   discussion: an additive/OR design here would only ever *increase* false
   positives on the component already flagged as the FP hotspot, which is the
   opposite of what's wanted; see also the ``loop <- progress`` suppression in
   ``pathlayer.policies.base.SuppressionRule``, which this component inherits
   for free by staying under the same ``"loop"`` signal name).
 
-- **LOOP-3 -- windowed (continuous) scoring for LOOP-2 (#19).** Two go/no-go
-  spikes (see issue #19 discussion) ruled out the two most obvious designs:
+- **LOOP-3 -- windowed (continuous) scoring for LOOP-2.** Two go/no-go
+  spikes (see the LOOP-3 discussion) ruled out the two most obvious designs:
   fusing LOOP-1 and LOOP-2 into one blended score (pointless -- on every known
   case where LOOP-2 fires, LOOP-1 independently reports exactly ``0.0``, so a
   fusion would only reopen the additive-FP risk already rejected for LOOP-2
@@ -53,7 +53,7 @@ across the entire traces corpus, only two fixtures ever reach the LOOP-2
 fallback path at all, both around ``0.34``-``0.35`` -- nowhere near the
 ``0.85`` cap, which has therefore never been the binding constraint on any
 known trace. Moving it would be an uncalibrated guess, exactly what the
-`repository rules <https://github.com/Kropemann/Pathlayer/blob/main/AGENTS.md>`_
+`repository rules <https://github.com/PathlayerLabs/pathlayer/blob/main/CONTRIBUTING.md>`_
 rule out; raising it to grant LOOP-2 solo-stop
 authority is left as an explicitly open question for a richer, non-synthetic
 corpus (``VAL-5``).
@@ -211,13 +211,13 @@ class LoopDetector(Detector):
         the window, or whose interrupting action falls *inside* the tiled
         period (verified empirically: a 2-of-3 stable/varying cycle scores near
         zero under tiling but ~1/3 coverage under the overlapping count, which
-        is exactly the proven recall-gap shape for #18). Anti-double-counting
+        is exactly the proven recall-gap shape for LOOP-2). Anti-double-counting
         (the ``A B A B A`` concern from the design discussion): only the
         *single best* n-gram size is reported, never a sum across sizes --
         several sizes describing the same underlying cycle must not inflate the
         score.
 
-        LOOP-3 (#19): candidate sizes are ranked by raw coverage down to the
+        LOOP-3: candidate sizes are ranked by raw coverage down to the
         hard structural floor (``_NGRAM_HITS_FLOOR``, 2 occurrences -- a single
         occurrence is not a repeat and can trivially dominate a short window).
         ``ngram_min_hits`` is no longer a hard gate on top of that floor: it is

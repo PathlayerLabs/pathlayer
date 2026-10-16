@@ -45,7 +45,7 @@ STATE_SEMANTICS_VERSION = 2
 # configuration_fingerprint), so no other scope is invalidated. 2 = ANC-4:
 # proofs are read from ToolEvent.metadata only, never ToolEvent.result, and a
 # progress_proof_unobserved marker holds no_progress silent. Full prefix replay
-# cannot always expose the first change (Kropemann's review on #192): a
+# cannot always expose the first change (Kropemann's review): a
 # one-event prefix whose result-side proof only set a baseline decides the same
 # under both readings, yet leaves the anchor in a different state, and the next
 # decision silently changes after a resume.

@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token: every job only checks out code and passes artifacts within
+# this run, so a push or a contributor's pull request cannot write anything.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -35,11 +40,6 @@ jobs:
         run: mypy
       - name: Tests
         run: pytest
-      - name: Regenerate and compare VAL-5 runtime evidence
-        run: |
-          python -m benchmarks.val5.run \
-            --output "$RUNNER_TEMP/val5-regenerated" \
-            --check-results benchmarks/val5/results
 
   package-build:
     runs-on: ubuntu-latest

@@ -1,6 +1,6 @@
 {
   "label": "tests_before",
-  "description": "Selected test set observed before the tool call, with one failing case -- matches code.target-fixed's precondition in benchmarks/comp1/matrix.v1.json.",
+  "description": "Selected test set observed before the tool call, with one failing case -- matches code.target-fixed's precondition in the COMP-1A benchmark matrix.",
   "expected_valid": true,
   "evidence": {
     "schema_version": 1,

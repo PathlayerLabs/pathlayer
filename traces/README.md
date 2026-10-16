@@ -114,9 +114,9 @@ VAL-4/VAL-5 (later).
 | `healthy/same_tool_different_args.json` | Same tool, genuinely different files (legit exploration). |
 | `healthy/expensive_but_legitimate.json` | High cumulative cost but real progress; terminates. |
 | `healthy/varied_long_run.json` | Long but progressing run; length alone is not a fault. |
-| `healthy/multi_file_refactor.json` | LOOP-2 (#18) adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
-| `healthy/repo_exploration.json` | LOOP-2 (#18) adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
-| `healthy/repeated_checkpoint_pair.json` | LOOP-2 (#18) known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
+| `healthy/multi_file_refactor.json` | LOOP-2 adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
+| `healthy/repo_exploration.json` | LOOP-2 adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
+| `healthy/repeated_checkpoint_pair.json` | LOOP-2 known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
 | `healthy/rich_fail_to_pass_progress.json` | NOP-5: stable failing test IDs convert to passed often enough to reset patience. |
 | `healthy/rich_late_test_progress.json` | NOP-5: work begins before test evidence exists, then rich outcomes show real repairs. |
 | `healthy/rich_new_target_progress.json` | NOP-5: a new red target progresses locally without competing with an older target's absolute score. |
@@ -126,7 +126,7 @@ VAL-4/VAL-5 (later).
 
 | File | Why it must NOT fire |
 | --- | --- |
-| `anc4/probe_outage_mid_run.json` | ANC-4 (#188): a productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the ANC-3 benchmark seals. |
+| `anc4/probe_outage_mid_run.json` | ANC-4: a productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the ANC-3 benchmark seals. |
 
 ## Optional rich test-result contract (NOP-5)
 
@@ -195,7 +195,7 @@ Diagnostics never feed arbitration; they are purely observational.
 
 These fixtures are synthetic boundary cases, not production recordings. Runs
 without any deterministic ground truth remain outside NOP-5 and are tracked by
-ANC-1 (#135).
+ANC-1.
 
 ## ANC-3 progress-proof measurement
 

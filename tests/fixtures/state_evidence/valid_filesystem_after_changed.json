@@ -1,6 +1,6 @@
 {
   "label": "filesystem_after_changed",
-  "description": "Target resource's canonical hash differs after the tool call -- matches code.target-fixed's postcondition in benchmarks/comp1/matrix.v1.json.",
+  "description": "Target resource's canonical hash differs after the tool call -- matches code.target-fixed's postcondition in the COMP-1A benchmark matrix.",
   "expected_valid": true,
   "evidence": {
     "schema_version": 1,

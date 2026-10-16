@@ -1,6 +1,6 @@
 """Contract: every built-in detector keeps ``Signal.confidence`` in [0, 1].
 
-Audit #104 (M-2) flagged that ``Signal.confidence`` is never validated. We
+The 2026-07-01 audit (finding M-2) flagged that ``Signal.confidence`` is never validated. We
 enforce the invariant with tests rather than a runtime ``raise`` inside the
 detection loop: a range violation is a *detector bug*, and Pathlayer must never
 crash the agent it observes. The companion defensive guard lives in

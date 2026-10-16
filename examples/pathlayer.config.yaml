@@ -18,7 +18,7 @@ detectors:
     enabled: true
     k: 2          # min consecutive repetitions before any confidence (>= 2)
     window: 256   # tail size scanned per step (>= 2 * k)
-    # LOOP-2/LOOP-3 (#18, #19): n-gram coverage fallback, only ever consulted
+    # LOOP-2/LOOP-3: n-gram coverage fallback, only ever consulted
     # when the exact repetition above (k/window) is silent -- catches a cycle
     # regularly interrupted by a distinct one-off action. `ngram_sizes`
     # (default 2-5) stays code-level only, like no_progress's anchors.
@@ -26,7 +26,7 @@ detectors:
     ngram_min_coverage: 0.3  # hard floor: min share of the window the pattern must hold, (0, 1]
     ngram_max_confidence: 0.85  # cap: keep below stop_threshold, see the warning below
     ngram_steepness: 3.0     # sharpness of the ramp centered on ngram_min_hits (> 0)
-  # LOOP-2 precision (issue #113): loop cannot see `result` by design, so a
+  # LOOP-2 precision: loop cannot see `result` by design, so a
   # repeated call that is actually improving (e.g. re-running the same test
   # suite while `passed` climbs) would otherwise be stopped as a false
   # positive. AUTO-WIRING: when both `loop` and `no_progress` are enabled (and

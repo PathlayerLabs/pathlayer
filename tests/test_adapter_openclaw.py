@@ -1,4 +1,4 @@
-"""Tests for the OpenClaw capture adapter (ADP-1, issue #40).
+"""Tests for the OpenClaw capture adapter (ADP-1).
 
 Two layers, matching how the module is split:
 
