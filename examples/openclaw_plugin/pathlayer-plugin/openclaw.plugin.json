@@ -1,7 +1,7 @@
 {
   "id": "pathlayer-plugin",
   "name": "Pathlayer capture",
-  "description": "Forwards after_tool_call events to a local Pathlayer instance (loop/no-progress detection). Best-effort reference plugin for ADP-1 -- see pathlayer's examples/openclaw_plugin/README.md.",
+  "description": "Forwards before_agent_run, llm_output, after_tool_call and agent_end events to a local Pathlayer instance (loop/no-progress detection). Best-effort reference plugin for ADP-1 -- see pathlayer's examples/openclaw_plugin/README.md.",
   "configSchema": {
     "type": "object",
     "properties": {},
