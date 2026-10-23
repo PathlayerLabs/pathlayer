@@ -1,9 +1,9 @@
-# ANC-3 — progress-proof corpus measurement
+# Progress-proof corpus measurement
 
-ANC-3 asks a narrow question: when a domain supplies explicit checkpoint
-ground truth through the ANC-1 schema and ANC-2 producer, do the four previously
-unmeasurable no-progress traces become detectable without stopping a healthy
-trace?
+This measurement asks a narrow question: when a domain supplies explicit
+checkpoint ground truth through the progress-proof schema and producer, do the
+four previously unmeasurable no-progress traces become detectable without
+stopping a healthy trace?
 
 ## Reproduce
 
@@ -17,8 +17,8 @@ python scripts/anc3_corpus_benchmark.py --json
 The benchmark targets exactly `healthy_trivial.json`,
 `no_progress_trivial.json`, `traces/healthy/*.json` and
 `traces/no_progress/*.json`: 20 healthy and 8 no-progress traces. Loop traces
-are deliberately excluded because ANC-3 measures the progress-proof contract,
-not repetition detection.
+are deliberately excluded because this measurement covers the progress-proof
+contract, not repetition detection.
 
 The first pass reloads the original traces and uses the normal replay defaults.
 The second pass reloads them again, generates one validated manifest per trace,
@@ -98,9 +98,9 @@ flat observations. The unchanged default configuration requires ten stagnant
 steps to reach STOP, so a hypothetical 11th unchanged event would be the first
 one eligible to stop.
 
-ANC-3 does not lower a threshold, append an event or relabel the trace to force
-a perfect score. Those would change detector calibration or corpus evidence and
-need their own healthy counterexamples. The measured V1 result is therefore an
+This measurement does not lower a threshold, append an event or relabel the
+trace to force a perfect score. Those would change detector calibration or
+corpus evidence and need their own healthy counterexamples. The measured V1 result is therefore an
 honest reduction from four false negatives to one, not a claim of universal
 no-progress detection.
 

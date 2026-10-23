@@ -1,6 +1,7 @@
-"""DEMO-2 -- the flagship no-progress "slow burn" caught inside a live agent.
+"""The flagship no-progress "slow burn", caught inside a live agent.
 
-The differentiated case (the "$47k incident"): an agent looks busy and changes
+The differentiated case, the pattern behind a publicly reported $47k incident
+(see docs/no-progress-demo.md): an agent looks busy and changes
 its actions every single turn -- a genuinely different edit, then the test
 suite, over and over -- but the ground-truth progress signal (tests passing)
 never moves. Repetition detectors stay silent because nothing repeats; only
@@ -22,7 +23,7 @@ The graded intervention is shown end to end:
 ``loop`` and ``retry`` are wired **advisory** (observe-only): the demo prints
 their (flat) confidence to prove they stay silent, but only ``no_progress``
 drives the ladder. This is the calibrated separation for the no-progress story
-(see the DEMO-2 gameplan / tests/test_demo2.py).
+(see tests/test_demo2.py).
 
 A healthy counterpart -- same shape of activity, but the failing-test count
 strictly decreases to zero -- is run through the identical graph and is never
@@ -107,7 +108,7 @@ def run_tests_improving(target: str, failed: int) -> dict[str, int]:
 
 
 def demo_config() -> PathlayerConfig:
-    """The calibrated DEMO-2 policy: no_progress drives the ladder; loop/retry
+    """The calibrated demo policy: no_progress drives the ladder; loop/retry
     are advisory (observe-only). Thresholds verified against the healthy corpus
     in tests/test_demo2.py (zero STOP, zero SUMMARIZE on healthy traces).
     """
@@ -215,7 +216,7 @@ def _build_graph(model, actuator: LangGraphActuator, sink, tools: list):  # type
     """Wire the standard Pathlayer graph: inject warnings, gate summaries, run
     tools -- START -> warn -> model -> gate -> (tools -> warn | model).
 
-    Uses the idiomatic ``langgraph.prebuilt.ToolNode``: the ADP-0 adapter unwraps
+    Uses the idiomatic ``langgraph.prebuilt.ToolNode``: the LangGraph adapter unwraps
     the ``ToolMessage`` a ``ToolNode`` produces, so ``TestProgressAnchor`` still
     sees the structured ``{passed, failed}`` dict and no_progress fires.
     """
@@ -319,7 +320,7 @@ def _first_action_index(pipeline: Pipeline) -> int | None:
 
 
 def scenario_stuck() -> None:
-    print("--- SLOW BURN : busy agent, zero progress (the differentiated case) ---")
+    print("--- SLOW BURN: busy agent, zero progress (the differentiated case) ---")
     pipeline, events, drained = _run_live(_stuck_model({"n": 0}), [edit_file, run_tests])
     action_events = _action_events(events)
 
@@ -330,26 +331,25 @@ def scenario_stuck() -> None:
     first = _first_action_index(pipeline)
     processed = len(pipeline.history)
 
-    print(f"Sans Pathlayer : {NAIVE_CAP}+ actions et il tourne toujours (cap demo {NAIVE_CAP}).")
-    print(f"Avec Pathlayer : {'STOP (drain execute)' if drained else 'PAS de STOP (INATTENDU)'}.")
-    print(f"   Repetition silencieuse : loop={loop_max:.2f}  retry={retry_max:.2f} (attendu ~0)")
-    print(f"   No-progress detecte    : no_progress={nop_max:.2f} (monte et sature)")
+    print(f"Without Pathlayer: {NAIVE_CAP}+ actions and still going (demo cap {NAIVE_CAP}).")
+    print(f"With Pathlayer:    {'STOP (run drained)' if drained else 'NO STOP (UNEXPECTED)'}.")
+    print(f"   Repetition detectors : loop={loop_max:.2f}  retry={retry_max:.2f} (silent)")
+    print(f"   No progress detected : no_progress={nop_max:.2f} (rises and saturates)")
     if first is not None:
-        print(f"   Premiere intervention  : action #{first}")
-    print(f"   Ladder gradue          : {' -> '.join(_transitions(pipeline)) or 'aucun'}")
-    summary_state = "oui (pathlayer_progress_summary)" if summarized else "non"
-    print(f"   Resume force execute   : {summary_state}")
+        # The index is zero-based; people count actions from 1.
+        print(f"   First intervention   : action {first + 1}")
+    print(f"   Graded ladder        : {' -> '.join(_transitions(pipeline)) or 'none'}")
+    summary_state = "yes (pathlayer_progress_summary)" if summarized else "no"
+    print(f"   Forced summary       : {summary_state}")
     pm = pipeline.post_mortem
     if pm is not None:
-        print(f"   Raison du STOP         : {pm.reason}")
+        print(f"   STOP reason          : {pm.reason}")
     avoided = NAIVE_CAP - processed
-    print(
-        f"   Travail evite          : ~{avoided} actions sur {NAIVE_CAP} ({processed} traitees).\n"
-    )
+    print(f"   Work avoided         : ~{avoided} of {NAIVE_CAP} actions ({processed} processed).\n")
 
 
 def scenario_healthy() -> None:
-    print("--- SAIN : meme activite, mais les tests avancent (contre-exemple) ---")
+    print("--- HEALTHY: same activity, but the tests improve (counterexample) ---")
     pipeline, events, drained = _run_live(
         _healthy_model({"n": 0}), [edit_file, run_tests_improving]
     )
@@ -357,17 +357,17 @@ def scenario_healthy() -> None:
     nop_max = _max_confidence(NoProgressDetector(coding_anchors()), _action_events(events))
 
     if drained or actions:
-        print(f"Avec Pathlayer : intervention (FAUX POSITIF) : {_transitions(pipeline)}.\n")
+        print(f"With Pathlayer:    intervention (FALSE POSITIVE): {_transitions(pipeline)}.\n")
         return
     print(
-        f"Avec Pathlayer : {len(pipeline.history)} actions, no_progress={nop_max:.2f}, "
-        "aucune intervention. L'agent finit seul.\n"
+        f"With Pathlayer:    {len(pipeline.history)} actions, no_progress={nop_max:.2f}, "
+        "no intervention. The agent finishes on its own.\n"
     )
 
 
 def main() -> None:
     print("=" * 64)
-    print("DEMO-2 PATHLAYER - no-progress slow burn detecte et stoppe (ACT-1/2/0)")
+    print("PATHLAYER DEMO - a no-progress slow burn detected and stopped")
     print("=" * 64 + "\n")
     scenario_stuck()
     scenario_healthy()

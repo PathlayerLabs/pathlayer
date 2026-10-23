@@ -1,4 +1,4 @@
-# Coding Alpha demo (VAL-6)
+# Coding alpha demo
 
 From a source checkout, install `pip install -e '.[dev,langgraph,yaml]'`, then run:
 
@@ -8,8 +8,8 @@ python examples/demo_coding_alpha.py
 
 This is a scripted agent running real LangGraph tools in disposable workspaces,
 not an LLM generalization benchmark. Its edit tool writes a calculator module and
-its test tool actually executes pytest. A separately compiled ANC-4 contract
-checks the objective; the STATE-1 configuration maps edit arguments to files.
+its test tool actually executes pytest. A separately compiled coding contract
+checks the objective; the coding state preset maps edit arguments to files.
 No production detector threshold is changed.
 
 The five scenarios distinguish productive repetition, identical stagnant edits,

@@ -4,7 +4,7 @@ Unlike ``listen.py`` (print-only demo), this listener persists every forwarded
 hook under ``$PATHLAYER_RUNS_DIR`` (default ``/var/lib/pathlayer/runs``) and
 runs an independent Pathlayer pipeline per run.
 
-Detector thresholds come from the standard Pathlayer config (INF-4): pass
+Detector thresholds come from the standard Pathlayer config: pass
 ``--config path`` (or set ``$PATHLAYER_CONFIG``), or drop a
 ``.pathlayer/config.yaml`` next to where the listener runs and it is discovered
 automatically. With no config file at all the built-in defaults apply, which is
