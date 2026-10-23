@@ -1,0 +1,22 @@
+# Weekly dependency updates, one grouped pull request per ecosystem.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python:
+        patterns: ["*"]
+    ignore:
+      # Pinned exactly in pyproject.toml and matched by the ruff rev in
+      # .pre-commit-config.yaml: bump both together, by hand.
+      - dependency-name: "ruff"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]

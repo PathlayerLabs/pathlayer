@@ -1,0 +1,3 @@
+# Both maintainers own the whole repository: GitHub requests their review on
+# every pull request. Approval rules live in the `main` ruleset, not here.
+* @gaelancel @Kropemann
