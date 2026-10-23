@@ -58,17 +58,18 @@ WARN → SUMMARIZE → STOP intervention, see
 ## Install
 
 Pathlayer is currently alpha software. The most direct way to try the demos
-is from a local source checkout (Python 3.10+):
+is from a local source checkout, in a virtual environment (Python 3.10+):
 
 ```bash
 git clone https://github.com/PathlayerLabs/pathlayer.git
 cd pathlayer
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 python -m pip install -e ".[dev]"
 python examples/demo_coding_contract.py
 ```
 
-Repository access is required while the source repository is private. The
-development extra includes the dependencies needed for the demos; for an
+The development extra includes the dependencies needed for the demos; for an
 application integration, install only the optional extras you need:
 
 ```bash

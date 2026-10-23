@@ -1,5 +1,10 @@
-# Local gate before each commit. Install once: `pre-commit install`.
-# mypy and pytest run in CI (kept out of pre-commit to keep commits fast).
+# Local gate. Install once with `pre-commit install`: it sets up both hook
+# types below. Commits run the checks and ruff; pushes also run mypy, from the
+# active environment. pytest stays in CI: the full suite takes minutes.
+default_install_hook_types: [pre-commit, pre-push]
+# Ruff and the YAML/TOML checks run at commit time only, not again on push.
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -20,3 +25,15 @@ repos:
       - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Same command as CI: targets and strictness come from [tool.mypy] in
+      # pyproject.toml, so no file list is passed.
+      - id: mypy
+        name: mypy
+        entry: mypy
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
