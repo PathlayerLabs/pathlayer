@@ -273,3 +273,27 @@ def test_main_accepts_stop_threshold(capsys) -> None:  # type: ignore[no-untyped
     code = main([str(_TRACES_DIR / "loop"), "--stop-threshold", "0.5"])
     assert code == 0
     assert "FP=" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# entry point
+# --------------------------------------------------------------------------- #
+def test_pathlayer_replay_console_script_is_declared() -> None:
+    import tomllib
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["scripts"]["pathlayer-replay"] == "pathlayer.validation.replay:main"
+
+
+def test_replay_main_prints_report_without_runpy_warning(capsys) -> None:
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        code = main([str(_TRACES_DIR / "loop_trivial.json")])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.strip()
+    assert not [w for w in caught if "runpy" in str(w.message).lower()]

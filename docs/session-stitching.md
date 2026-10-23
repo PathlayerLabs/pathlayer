@@ -20,7 +20,7 @@ Le journal append-only se trouve dans `<store.path>.sessions`. Chaque capture es
 
 Le contexte borné utilisé pour la décision est attaché à l'événement capturé. Le replay reproduit donc la décision sans relire le journal courant ni sonder à nouveau l'espace de travail. Les payloads bruts et les décisions canoniques ne sont pas réécrits. Les empreintes de configuration historiques restent compatibles; l'activation de cette fonction possède une version de sémantique distincte.
 
-Les traces étiquetées de `traces/val7/` portent ce contexte figé, qui ne compte qu'avec l'option activée. Elles sont rejouées avec `session_stitching` par `tests/test_session_stitching.py` et exclues du score agrégé de `python -m pathlayer.validation.replay traces`, qui utilise la configuration par défaut.
+Les traces étiquetées de `traces/val7/` portent ce contexte figé, qui ne compte qu'avec l'option activée. Elles sont rejouées avec `session_stitching` par `tests/test_session_stitching.py` et exclues du score agrégé de `pathlayer-replay traces`, qui utilise la configuration par défaut.
 
 Une observation manquée insère une rupture de fenêtre dans le journal : aucune répétition n'est jointe par-dessus, et la continuité reprend avec les observations capturées ensuite. Trois cas produisent une rupture : une erreur de capture, une exécution OpenClaw interrompue (son suffixe non observé est inconnu) et un changement de configuration (les observations ne sont plus comparables, y compris lors d'un retour à l'ancienne configuration). La session n'est jamais désactivée définitivement et il n'est pas nécessaire de changer d'identité de session.
 
