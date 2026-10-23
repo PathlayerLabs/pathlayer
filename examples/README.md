@@ -123,6 +123,35 @@ Needs the `langgraph` and `yaml` extras:
 python examples/demo_coding_contract.py
 ```
 
+## `demo_coding_alpha.py` (VAL-6)
+
+The coding-contract story on a **scripted LangGraph agent that runs real tools**
+in a disposable workspace: its edit tool writes a calculator module and its test
+tool actually executes pytest. A separately compiled ANC-4 contract checks the
+objective, and the STATE-1 configuration maps edit arguments to files. No LLM,
+no network, and no production detector threshold is changed.
+
+Five scenarios distinguish productive repetition, identical stagnant edits, new
+file content without successful tests, a missing validation executable
+(`collection_failed`), and nested tool boundaries (`unavailable`). Missing
+evidence must not create a no-progress signal; independent loop detection can
+still STOP. Each run is compared with the same script without proofs and with
+replay after the workspace has been deleted.
+
+The output reports contract checkpoints, resource state, calls since progress
+and the recorded intervention. An observed file change is not proof that the
+tests pass. Temporary traces are removed on exit.
+
+Needs the dev, langgraph and yaml extras:
+
+```bash
+pip install -e '.[dev,langgraph,yaml]'
+python examples/demo_coding_alpha.py
+```
+
+See [docs/val6-coding-alpha.md](../docs/val6-coding-alpha.md) for the full
+write-up and the acceptance assertions (`tests/test_val6_coding_alpha.py`).
+
 ## `pathlayer.config.yaml`
 
 Reference configuration (INF-4) documenting every tunable threshold with its
