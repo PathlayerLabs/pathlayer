@@ -28,11 +28,23 @@ to rule out.
 
 ## Validation
 
-Install the development dependencies:
+Install the development dependencies in a virtual environment, then the Git
+hooks:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+pre-commit install
 ```
+
+`pre-commit install` sets up two hooks from `.pre-commit-config.yaml`. Each
+commit runs the whitespace, YAML and TOML checks, `ruff check --fix` and
+`ruff format`; each push also runs `mypy`, which takes a few seconds. The push
+hook uses the `mypy` of the active environment, so push with the virtual
+environment activated. Ruff already sorts imports and formats code: do not add
+Black or isort, which would fight it. The hooks give early feedback on your
+machine; they do not replace CI, which also runs the test suite.
 
 Run the full gate before a pull request is ready for review:
 

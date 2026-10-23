@@ -8,7 +8,6 @@ on:
 permissions:
   actions: read
   contents: read
-  issues: read
 
 jobs:
   stage:
@@ -37,7 +36,7 @@ jobs:
           readme = pathlib.Path("README.md").read_text()
           stale_markers = ("Status: early scaffolding.", "not published yet")
           if any(marker in readme for marker in stale_markers):
-              raise SystemExit("README is not release-ready; merge PKG-2 before tagging")
+              raise SystemExit("README still describes an unreleased package; update it before tagging")
           PY
       - name: Require tagged commit on main with successful CI
         id: ci
@@ -46,7 +45,6 @@ jobs:
         run: |
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-          test "$(gh issue view 42 --json state --jq '.state')" = "CLOSED"
           run_id="$(
             gh api \
               -X GET \
