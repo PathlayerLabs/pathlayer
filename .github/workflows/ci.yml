@@ -1,10 +1,17 @@
 name: CI
 
+# The full CI runs in the merge queue, on the exact commit that will land on
+# `main`, and again on `main` after each merge. A push to a pull request runs
+# nothing: its jobs are skipped, and a skipped required check counts as
+# passed, which only makes the pull request eligible for the queue. The
+# `main` ruleset therefore requires the merge queue; without it, a pull
+# request could merge with no CI at all.
 on:
   push:
-    branches: [main]
-  pull_request:
-  workflow_dispatch:
+    branches: [main]  # after each merge: status badge, and publish.yml's prerequisite
+  pull_request:       # runs nothing (see above)
+  merge_group:        # the real gate, when a pull request enters the queue
+  workflow_dispatch:  # optional early feedback: gh workflow run ci.yml --ref <branch>
 
 # Read-only token: every job only checks out code and passes artifacts within
 # this run, so a push or a contributor's pull request cannot write anything.
@@ -17,6 +24,7 @@ concurrency:
 
 jobs:
   test:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,6 +50,8 @@ jobs:
         run: pytest
 
   package-build:
+    # The other packaging jobs need this one and are skipped with it.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -202,7 +212,7 @@ jobs:
           .package-venv/bin/pip check
 
   package-gate:
-    if: always()
+    if: always() && github.event_name != 'pull_request'
     needs:
       - test
       - package-build
