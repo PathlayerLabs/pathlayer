@@ -91,6 +91,7 @@ VAL-4/VAL-5 (later).
 | `loop/period3_cycle.json` | Longer cycle of period 3 replayed identically. |
 | `loop/volatile_ids.json` | Same call hidden behind fresh UUIDs/timestamps/cursors; visible only after canonicalization. |
 | `loop/ping_pong.json` | Analyzer <-> verifier A->B->A->B oscillation. |
+| `loop/retry_same_error.json` | Retry storm: the agent calls the same deploy endpoint with identical args and gets the same timeout error every time, never backing off or changing approach. Caught by the retry detector (same tool + args + error) and, structurally, by the loop detector (a period-1 repetition). |
 
 ### `no_progress`
 
@@ -121,12 +122,43 @@ VAL-4/VAL-5 (later).
 | `healthy/rich_late_test_progress.json` | NOP-5: work begins before test evidence exists, then rich outcomes show real repairs. |
 | `healthy/rich_new_target_progress.json` | NOP-5: a new red target progresses locally without competing with an older target's absolute score. |
 | `healthy/rich_legacy_revert_recovers.json` | NOP-5 follow-up: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
+| `healthy/finished_without_tests.json` | A research agent completes a summary task, then keeps issuing low-value follow-up searches. It carries no test or exit-code evidence, so the coding anchors abstain and NoProgressDetector stays silent -- we never stop an agent we cannot measure. Documents the F1.1 limit: 'finished' outside the test signal is handled by anchor abstention, not by is_satisfied. |
+| `healthy/finishes_before_runtime_limit.json` | A long but healthy run starts lifecycle measurement and completes before the hard ceiling, so no timeout event exists and duration stays silent. |
+| `healthy/noisy_progress.json` | Genuine but noisy progress: the agent fixes a suite while occasionally regressing by one test before climbing again (passed-minus-failed goes 1, 3, 2, 4, 3, 5). The trend is clearly upward and every dip is bounded at -1, so a record-based CUSUM keeps resetting and must stay silent. Guards NOP-2 against treating normal red/green churn as a stall. |
+| `healthy/plateau_after_success.json` | The agent fixes a suite to all-green, then keeps polishing without breaking anything: progress plateaus at success (failed==0). A plateau here is 'nothing left to fix', not a stall, so NoProgressDetector must stay silent via anchor success suppression (is_satisfied). Guards NOP-3 against stopping an agent that has actually succeeded. |
+| `healthy/repetitive_but_passing.json` | F1a precision false positive: the agent re-runs the same test suite with identical args (no `target`, so canonicalization sees an unchanging action) after every fix, and the test count climbs 1 -> 8 passed each time. LoopDetector sees only the repeated (tool, args) pair -- it has no visibility into `result` by design -- and reaches STOP by the 5th repeat even though the agent is making real, verifiable progress. Guards the loop<-progress suppression (LOOP-PRECISION): a repetition that is actually advancing must not be stopped by loop alone. |
+| `healthy/retry_reset_after_progress.json` | RET-3 boundary: the agent hits a couple of transient rate-limited searches, then does genuine work (an edit, a passing test run, a commit), then resumes with a short fresh search burst. RET-2 must not merge the two search phases across the real work into one dominating run -- because only the trailing uninterrupted run of a tool counts (the counter resets on a genuinely different action), the final 3-call search burst is too short to dominate, so nothing fires. A naive bag-of-occurrences count over the window would risk a false alarm here. |
+| `healthy/slow_but_real_progress.json` | Genuine but slow progress: the agent sets a new ground-truth record (passed-minus-failed climbs 0 -> 2 -> 4 -> 6) only every few edits, with flat stretches in between. Each stretch is shorter than the CUSUM patience, so confidence rises but never reaches the stop threshold and every new record resets it. Guards NOP-3 against stopping an honest-but-slow agent (false positive on legitimate work). |
+| `healthy/varied_reads_by_id.json` | CAN-3 boundary: the agent reads many genuinely different files addressed by a numeric file_id (not a path). The _id suffix must NOT be treated as volatile, otherwise these distinct reads collapse into a false loop. After exploring, an edit and a passing test close the task. |
 
 ### `anc4/` (coding-contract probe outage)
 
 | File | Why it must NOT fire |
 | --- | --- |
 | `anc4/probe_outage_mid_run.json` | ANC-4: a productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the ANC-3 benchmark seals. |
+
+### `nop4_experiment/` (net vs size git anchors)
+
+| File | Why the label is what it is |
+| --- | --- |
+| `nop4_experiment/inplace_bugfix_no_tests.json` | Legit in-place bug fixing, no tests run. Each edit modifies new distinct existing lines, so the cumulative diff vs baseline keeps growing in SIZE (insertions+deletions) but its NET (insertions-deletions) stays ~0. Genuinely progressing -> label healthy. A net-based git anchor sees a flat 0 and false-stops; a size-based git anchor credits the growing churn and stays silent. Discriminates net vs size scalar. |
+| `nop4_experiment/late_first_test_progressing.json` | The agent edits real code (git net staircases up) for several steps with NO test result yet, then the test suite appears late and stays red/flat while edits keep progressing. Genuinely progressing -> label healthy. A naive git anchor (always applicable) keeps crediting the rising net and prevents the false stop; a test-deferring conditional git anchor abstains once tests appear and cannot prevent the baseline false stop. Distinguishes naive vs conditional integration. |
+| `nop4_experiment/same_zone_rewrite.json` | Churn: the agent rewrites the SAME zone over and over, so the cumulative diff vs baseline is constant in both NET and SIZE (insertions=4, deletions=4 every step). No tests run. Real no-progress -> label no_progress. Baseline has no applicable anchor (no test/exit/git-progress) and stays silent -> false negative; either git scalar sees a flat level and catches it. Shows git adds detection for no-test coding agents. |
+| `nop4_experiment/tdd_red_progressing.json` | TDD red phase: the agent writes real, growing code (git net staircases up) while the test suite stays red and flat (passed=0, failed=3). Genuinely progressing -> label healthy. Baseline (test anchor only) sees a flat red level and false-stops; a git anchor that credits the rising net should prevent that false stop. |
+| `nop4_experiment/useless_growth.json` | 47k-style slow burn: the agent keeps adding new but useless lines (git net staircases up) while the test level stays flat and not-satisfied (passed=2, failed=2). Real no-progress -> label no_progress. Baseline (test anchor) catches the flat level; a git anchor that credits the rising net MASKS it -> false negative. This is the hidden cost of the git anchor. |
+
+### `val7/` (session-level traces)
+
+Session-level traces, replayed with `session_stitching` enabled (see
+[`docs/session-stitching.md`](../docs/session-stitching.md)). Each run owns its
+pipeline; successful repetitions are never stitched.
+
+| File | What the concluding turn freezes |
+| --- | --- |
+| `val7/polling.json` | concluding turn with frozen cross-run evidence: polling. The user asks again each turn and the same read-only check succeeds. |
+| `val7/progress.json` | concluding turn with frozen cross-run evidence: progress. |
+| `val7/repeat.json` | concluding turn with frozen cross-run evidence: repeat. |
+| `val7/unavailable.json` | concluding turn with frozen cross-run evidence: unavailable. |
 
 ## Optional rich test-result contract (NOP-5)
 
