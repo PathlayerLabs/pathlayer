@@ -1,0 +1,65 @@
+name: False positive or missed detection
+description: Pathlayer acted on a run that was making progress, or missed a stuck one.
+labels: ["detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        False positives are the first risk Pathlayer guards against, so these reports are the most useful ones.
+
+        **Before attaching anything:** traces, decisions and run directories contain prompts, tool arguments and tool results. Remove secrets and private data first.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened?
+      options:
+        - "False positive: Pathlayer acted on a run that was making progress"
+        - "Missed detection: a stuck or wasteful run was not caught"
+    validations:
+      required: true
+  - type: dropdown
+    id: action
+    attributes:
+      label: Action Pathlayer selected
+      options:
+        - STOP
+        - SUMMARIZE
+        - WARN
+        - None
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: run
+    attributes:
+      label: What the agent was doing
+      description: The task, and why the run was (or was not) making progress.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Trace and decisions
+      description: Attach the trace (`trace.json`, or the event sequence) and, if you have them, the decisions (`decisions.jsonl` lines, the STOP reason or post-mortem).
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Your `.pathlayer/config.*`, or "defaults".
+      render: yaml
+  - type: input
+    id: version
+    attributes:
+      label: Pathlayer version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: integration
+    attributes:
+      label: Integration
+      options:
+        - LangGraph
+        - OpenClaw
+        - Core API / custom adapter
