@@ -14,7 +14,9 @@ requiring another LLM in the detection loop.
 Pathlayer observes agents during execution, detects loops, repeated failures,
 missing progress, and cost overruns, then selects a graded action:
 `warn -> summarize -> fallback -> escalate -> stop`. LangGraph currently
-enforces WARN, SUMMARIZE, and STOP; FALLBACK and ESCALATE are planned.
+enforces WARN, SUMMARIZE, and STOP. OpenClaw enforces STOP when the recording
+listener runs with `--enforce`: it blocks the stopped run's later tool calls;
+otherwise Pathlayer only observes OpenClaw. FALLBACK and ESCALATE are planned.
 
 Pathlayer is alpha software. Its detectors run locally without a cloud account,
 API key, or network call. Progress detection is strongest when an agent
@@ -511,8 +513,9 @@ For an OpenClaw `llm_output` carrying only total tokens, Pathlayer estimates
 the input/output split with `pricing.openclaw_input_ratio` (default `0.8`).
 Budget signals and reports identify that cost as estimated; it is not a
 provider invoice. Estimates count toward the configured budget brake, like
-per-tool budget estimates, and can select STOP. The OpenClaw recorder remains
-passive: this decision does not terminate the external agent. Missing token
+per-tool budget estimates, and can select STOP. On OpenClaw, that STOP blocks
+the run's later tool calls only when the listener enforces STOP (`--enforce`);
+it never terminates the external agent. Missing token
 counters or unknown prices remain unmeasured; an explicitly configured
 per-call budget estimate may still apply where an event exists.
 State semantics version 2 rejects older durable scopes: estimated token costs
@@ -615,8 +618,10 @@ wiring lives in [`examples/demo_no_progress.py`](examples/demo_no_progress.py).
 At a duration timeout, `LangGraphActuator` requests cooperative drain. It does
 not forcibly cancel a provider request that is already blocked; the STOP is
 applied as soon as the runtime can observe/cooperate with that request. The
-OpenClaw recorder persists the timeout, STOP decision, trace and report, but is
-passive toward the separate OpenClaw process and does not terminate it.
+OpenClaw recorder persists the timeout, STOP decision, trace and report. It
+never terminates the separate OpenClaw process; with `--enforce` it blocks the
+run's later tool calls (see
+[`examples/openclaw_plugin/README.md`](examples/openclaw_plugin/README.md#enforce-stop-opt-in)).
 
 ## Development
 

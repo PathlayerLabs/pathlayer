@@ -2,16 +2,21 @@
 
 Pathlayer observes OpenClaw through a **loopback HTTP bridge** (not a sidecar
 daemon, not in-process Python inside the Node gateway). A small JavaScript
-plugin forwards hook payloads; Python translates them and runs detectors.
+plugin forwards hook payloads; Python translates them and runs detectors. With
+`record.py --enforce`, a STOP also blocks the stopped run's later tool calls
+(see [Enforce STOP](#enforce-stop-opt-in)).
 
 ## Architecture
 
 ```
 OpenClaw Gateway (Node)
-  └── pathlayer-plugin (before_agent_run, llm_output, after_tool_call, agent_end)
-        └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
-              └── record.py  OR  listen.py (demo)
-                    └── OpenClawRunRecorder  OR  print ToolEvents
+  └── pathlayer-plugin
+        ├── before_agent_run, llm_output, after_tool_call, agent_end
+        │     └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
+        └── before_tool_call
+              └── POST .../ingest, awaited (fails open)  ->  allow, or block after a STOP
+                    └── record.py  OR  listen.py (demo)
+                          └── OpenClawRunRecorder  OR  print ToolEvents
 ```
 
 - **`listen.py`** — print-only demo listener (unchanged behaviour).
@@ -96,7 +101,56 @@ An unreadable, malformed or out-of-range config **fails at startup** with a
 `invalid Pathlayer config: ...` message and a non-zero exit -- it never falls
 back to defaults silently.
 
-For a quick smoke test without persistence, use the print-only demo:
+## Enforce STOP (opt-in)
+
+By default the listener only observes: a STOP is recorded and analysis ends,
+but OpenClaw keeps running the agent's tool calls. Start the listener with
+`--enforce` to act on it:
+
+```bash
+python examples/openclaw_plugin/record.py --enforce
+```
+
+Before each tool call, the plugin's `before_tool_call` hook asks the listener
+for a decision. Once Pathlayer has stopped a run, every later tool call of that
+run is blocked, and the agent receives the reason as the tool's error:
+
+```text
+Pathlayer stopped this run (loop: 5x repeat of 1-action block). Do not call
+more tools: report your progress and what blocked you.
+```
+
+What this does and does not do:
+
+- **Only STOP is enforced.** WARN and SUMMARIZE stay observed on OpenClaw:
+  `before_tool_call` can allow, block or ask for approval, not advise.
+- **One run at a time.** Other runs and later requests are not affected; each
+  OpenClaw run has its own pipeline. A blocked run is not ended: the agent can
+  still answer without tools.
+- **Nothing extra is recorded.** The query carries identifiers only (run,
+  session, agent, tool name), never tool arguments. It is never journaled and
+  never reaches a detector, so recordings and their replay are the same with or
+  without `--enforce`. Blocked calls that OpenClaw still reports through
+  `after_tool_call` are recorded like any event after a STOP.
+- **It fails open.** OpenClaw blocks a tool call when a `before_tool_call`
+  handler throws or times out (15 seconds by default). The plugin never throws,
+  gives up on Pathlayer after at most 0.8 s, and then lets the call run: a
+  listener that is down, slow or broken never blocks the agent. Keep any
+  `hooks.timeouts.before_tool_call` you set for this plugin well above 1 s.
+- **Timing.** The plugin waits (at most 0.3 s) for its previous forward of the
+  run to be answered before asking, so the tool call that follows the event
+  that triggered the STOP is the first one blocked. If that forward times out,
+  one more call can run.
+- **Restarts.** A listener restart marks the runs in progress as interrupted:
+  they are no longer analyzed, so a run stopped before the restart is no
+  longer blocked after it.
+
+The ingest endpoint listens on loopback only and has no authentication: any
+local process can post to it. Use `--enforce` on a host whose local users you
+trust.
+
+For a quick smoke test without persistence, use the print-only demo (it never
+blocks anything):
 
 ```bash
 python examples/openclaw_plugin/listen.py
@@ -404,12 +458,14 @@ OpenClaw. Treat `$PATHLAYER_RUNS_DIR` as sensitive data. Restrict filesystem
 permissions (owner-only; Pathlayer's SQLite chmod is POSIX best-effort). Do not
 commit run directories into git.
 
-## Limitations (V1)
+## Limitations
 
-- Passive observer only — Pathlayer does **not** block OpenClaw tool calls yet,
-  so a STOP is recorded and stops analysis without ending the OpenClaw run.
+- Only STOP is enforced, and only with `--enforce` (see
+  [Enforce STOP](#enforce-stop-opt-in)). Without it, a STOP is recorded and
+  stops analysis without affecting the OpenClaw run.
 - No retention: run directories accumulate until you archive or delete them.
-- Only the four forwarded hooks are recorded. Model cost is an estimate from
+- Only the four forwarded hooks are recorded; the `before_tool_call` query is
+  answered, never recorded. Model cost is an estimate from
   `usage.total` and a configured input/output ratio, not a provider invoice.
 - Hook payload shapes follow the public OpenClaw docs and may differ slightly
   on your gateway version — inspect `events.raw.jsonl` when in doubt.

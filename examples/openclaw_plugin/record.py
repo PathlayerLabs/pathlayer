@@ -15,7 +15,10 @@ Usage (on the same host as the OpenClaw gateway)::
 
     export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
     sudo mkdir -p "$PATHLAYER_RUNS_DIR"
-    python examples/openclaw_plugin/record.py [--config .pathlayer/config.yaml]
+    python examples/openclaw_plugin/record.py [--config .pathlayer/config.yaml] [--enforce]
+
+``--enforce`` makes a STOP block the stopped run's later tool calls, through the
+plugin's ``before_tool_call`` hook. Without it the listener only observes.
 
 See ``README.md`` in this directory for OpenClaw plugin installation and config.
 """
@@ -51,6 +54,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--runs-root", type=Path, default=RUNS_ROOT, help="Recorded runs root")
     parser.add_argument("--port", type=int, default=PORT, help="Loopback ingest port")
+    parser.add_argument(
+        "--enforce",
+        action="store_true",
+        help="block the tool calls of a run after Pathlayer stops it (default: observe only)",
+    )
     return parser.parse_args(argv)
 
 
@@ -76,7 +84,7 @@ def build_recorder(args: argparse.Namespace) -> OpenClawRunRecorder:
     """
     config = load_listener_config(args.config)
     try:
-        return OpenClawRunRecorder(args.runs_root, config=config)
+        return OpenClawRunRecorder(args.runs_root, config=config, enforce=args.enforce)
     except ConfigError as exc:
         raise SystemExit(f"invalid Pathlayer config: {exc}") from exc
 
@@ -93,7 +101,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"Ingest URL : http://127.0.0.1:{adapter.port}/ingest")
     print(f"Runs root  : {recorder.runs_root}")
     print(f"Config     : {args.config or 'discovery (.pathlayer/config.*) or defaults'}")
-    print("Hooks      : before_agent_run, after_tool_call, agent_end")
+    print("Hooks      : before_agent_run, llm_output, after_tool_call, agent_end, before_tool_call")
+    if args.enforce:
+        print("Enforcement: on -- a STOP blocks the run's later tool calls")
+    else:
+        print("Enforcement: off -- observe only (start with --enforce to block after a STOP)")
     print("Ctrl+C to stop.\n", flush=True)
 
     def _stop(_signum: int, _frame: types.FrameType | None) -> None:
