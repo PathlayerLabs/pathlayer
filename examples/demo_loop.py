@@ -1,22 +1,22 @@
-"""DEMO-1 -- une boucle detectee et stoppee par le vrai chemin ACT-0.
+"""A loop detected and stopped through the real runtime path.
 
-La plus petite histoire complete de Pathlayer : un agent se bloque et refait
-sans cesse les memes gestes. Sans garde-fou il tournerait sans fin ; avec
-Pathlayer la boucle est detectee et l'agent est stoppe proprement.
+The smallest complete Pathlayer story: an agent gets stuck and repeats the
+same actions. Without a guardrail it would run forever; with Pathlayer the
+loop is detected and the agent is stopped cleanly.
 
-Le stop passe par le chemin runtime reel, pas un raccourci :
+The STOP goes through the real runtime path, not a shortcut:
 
     agent -> wire(pipeline, actuator) -> LoopDetector -> Policy -> STOP
-          -> DemoActuator.apply(STOP) -> l'agent draine et s'arrete
+          -> DemoActuator.apply(STOP) -> the agent drains and stops
 
-``DemoActuator`` est le pendant offline de ``LangGraphActuator`` : sur STOP il
-demande un drain coopératif (un flag) que l'agent observe. Il ne decide jamais
--- l'``Action`` lui arrive deja arbitree par le pipeline.
+``DemoActuator`` is the offline counterpart of ``LangGraphActuator``: on STOP
+it requests a cooperative drain (a flag) that the agent observes. It never
+decides -- the ``Action`` arrives already arbitrated by the pipeline.
 
-Une contrepartie saine (outils varies, bornee) est cablee de la meme facon et
-n'est PAS stoppee : le cout d'un faux positif est central.
+A healthy, bounded counterpart (varied tools) is wired the same way and is NOT
+stopped: the cost of a false positive is central.
 
-Deterministe, offline, sans LLM ni reseau. Lancer :
+Deterministic, offline, no LLM, no network. Run:
 
     python examples/demo_loop.py
 """
@@ -34,17 +34,17 @@ from pathlayer.observability import JsonFormatter, get_logger
 from pathlayer.policies import Action, Actuator, wire
 from pathlayer.postmortem import PostMortem
 
-# Sans garde-fou l'agent bloque ne s'arreterait jamais. On borne la demo pour
-# qu'elle finisse, tout en montrant qu'a ce cap il "tourne toujours".
+# Without a guardrail the stuck agent would never stop. The demo is capped so
+# that it ends, while showing that at this cap the agent is "still going".
 NAIVE_CAP = 200
 
 
 @dataclass
 class DemoRunControl:
-    """Drapeau de drain coopératif : le pendant offline de LangGraph RunControl.
+    """Cooperative drain flag: the offline counterpart of LangGraph's RunControl.
 
-    L'actuator demande le drain (``stopped``) ; l'agent l'observe apres chaque
-    pas et s'arrete de lui-meme. Aucun framework, aucun reseau.
+    The actuator requests the drain (``stopped``); the agent checks it after
+    each step and stops on its own. No framework, no network.
     """
 
     stopped: bool = False
@@ -52,10 +52,10 @@ class DemoRunControl:
 
 
 class DemoActuator(Actuator):
-    """Execute STOP en demandant un drain sur un ``DemoRunControl``.
+    """Applies STOP by requesting a drain on a ``DemoRunControl``.
 
-    Calque de ``LangGraphActuator`` : n'agit que sur ``Action.STOP`` et ne
-    decide jamais -- l'``Action`` arrive deja arbitree par le pipeline.
+    Modeled on ``LangGraphActuator``: acts only on ``Action.STOP`` and never
+    decides -- the ``Action`` arrives already arbitrated by the pipeline.
     """
 
     def __init__(self, control: DemoRunControl) -> None:
@@ -69,10 +69,10 @@ class DemoActuator(Actuator):
 
 
 def looping_agent() -> Iterator[ToolEvent]:
-    """Agent bloque : il liste puis relit le meme fichier, sans jamais avancer.
+    """Stuck agent: lists, then rereads the same file, and never advances.
 
-    Chaque pas porte un ``ts`` distinct (evenements non byte-identiques) ; la
-    canonicalisation les rapproche pour que la boucle soit visible.
+    Each step carries a distinct ``ts`` (events are not byte-identical);
+    canonicalization matches them so that the loop is visible.
     """
     step = 0
     while True:
@@ -82,7 +82,7 @@ def looping_agent() -> Iterator[ToolEvent]:
 
 
 def healthy_agent() -> Iterator[ToolEvent]:
-    """Agent sain et borne : des outils varies qui font avancer la tache, puis fin."""
+    """Healthy, bounded agent: varied tools that advance the task, then it ends."""
     plan: list[tuple[str, dict[str, object]]] = [
         ("list_dir", {"path": "src"}),
         ("read_file", {"path": "src/main.py"}),
@@ -97,7 +97,7 @@ def healthy_agent() -> Iterator[ToolEvent]:
 
 
 def _run_naive(agent: Iterator[ToolEvent], cap: int) -> int:
-    """Sans Pathlayer : l'agent avance jusqu'au cap (ou jusqu'a s'arreter seul)."""
+    """Without Pathlayer: the agent runs until the cap (or until it stops on its own)."""
     executed = 0
     for _ in agent:
         executed += 1
@@ -109,7 +109,7 @@ def _run_naive(agent: Iterator[ToolEvent], cap: int) -> int:
 def _run_guarded(
     agent: Iterator[ToolEvent], logger: logging.Logger
 ) -> tuple[Pipeline, DemoRunControl, int]:
-    """Avec Pathlayer (ACT-0) : chaque pas traverse ``wire()`` ; STOP draine l'agent."""
+    """With Pathlayer: each step goes through ``wire()``; STOP drains the agent."""
     pipeline = Pipeline([LoopDetector()], logger=logger)
     control = DemoRunControl()
     sink = wire(pipeline, DemoActuator(control), logger=logger)
@@ -119,7 +119,7 @@ def _run_guarded(
         executed += 1
         if control.stopped:
             break
-        if executed >= NAIVE_CAP:  # filet de securite si la detection echouait
+        if executed >= NAIVE_CAP:  # safety net in case detection failed
             break
     return pipeline, control, executed
 
@@ -131,38 +131,41 @@ def _triggering_detector(pm: PostMortem) -> str:
 
 
 def scenario_loop(logger: logging.Logger) -> None:
-    print("--- BOUCLE : agent bloque ---")
+    print("--- LOOP: stuck agent ---")
     naive = _run_naive(looping_agent(), NAIVE_CAP)
     pipeline, control, _ = _run_guarded(looping_agent(), logger)
     pm = pipeline.post_mortem
 
-    print(f"Sans Pathlayer : {naive} actions et il tourne toujours (cap demo {NAIVE_CAP}).")
+    print(f"Without Pathlayer: {naive} actions and still going (demo cap {NAIVE_CAP}).")
     if pm is None:
-        print("Avec Pathlayer : rien detecte (INATTENDU pour cette trace).\n")
+        print("With Pathlayer:    nothing detected (UNEXPECTED for this trace).\n")
         return
-    print(f"Avec Pathlayer : STOP apres {pm.events_processed} actions.")
-    print(f"   Detecteur declencheur : {_triggering_detector(pm)} ({pm.reason})")
-    print(f"   Pas de detection      : action #{pm.stopped_at_index}")
-    print(f"   Actuator             : {'drain demande' if control.stopped else 'non declenche'}")
+    print(f"With Pathlayer:    STOP after {pm.events_processed} actions.")
+    print(f"   Triggering detector : {_triggering_detector(pm)} ({pm.reason})")
+    # stopped_at_index is zero-based; people count actions from 1.
+    print(f"   Detected at         : action {pm.stopped_at_index + 1}")
+    print(f"   Actuator            : {'drain requested' if control.stopped else 'not triggered'}")
     avoided = naive - pm.events_processed
-    print(f"   Travail evite        : {avoided} actions sur {naive}.\n")
+    print(f"   Work avoided        : {avoided} of {naive} actions.\n")
 
 
 def scenario_healthy(logger: logging.Logger) -> None:
-    print("--- SAIN : agent qui avance (contre-exemple) ---")
+    print("--- HEALTHY: agent making progress (counterexample) ---")
     pipeline, control, executed = _run_guarded(healthy_agent(), logger)
 
     if pipeline.stopped or control.stopped:
         pm = pipeline.post_mortem
         reason = pm.reason if pm is not None else "?"
-        print(f"Avec Pathlayer : STOP apres {executed} actions (FAUX POSITIF : {reason}).\n")
+        print(f"With Pathlayer:    STOP after {executed} actions (FALSE POSITIVE: {reason}).\n")
         return
-    print(f"Avec Pathlayer : {executed} actions, aucune intervention. L'agent finit seul.\n")
+    print(
+        f"With Pathlayer:    {executed} actions, no intervention. The agent finishes on its own.\n"
+    )
 
 
 def main() -> None:
-    # OBS-1 : signal / decision / action en JSON lines vers stderr, pour voir
-    # exactement quand et pourquoi Pathlayer agit sans polluer la sortie demo.
+    # Signal / decision / action logs go to stderr as JSON lines, to show exactly
+    # when and why Pathlayer acts without cluttering the demo output.
     logger = get_logger("pathlayer.demo")
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -172,7 +175,7 @@ def main() -> None:
         logger.propagate = False
 
     print("=" * 60)
-    print("DEMO-1 PATHLAYER - une boucle detectee et stoppee (ACT-0)")
+    print("PATHLAYER DEMO - a loop detected and stopped")
     print("=" * 60 + "\n")
     scenario_loop(logger)
     scenario_healthy(logger)

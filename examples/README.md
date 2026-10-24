@@ -4,11 +4,11 @@ Runnable before/after demos. The key demo: an agent that loops forever
 **without** Pathlayer, vs. the same agent **with** Pathlayer detecting the
 loop, stopping execution, and producing a summary.
 
-## `demo_loop.py` (DEMO-1)
+## `demo_loop.py`
 
 Smallest complete Pathlayer story: an agent gets stuck in a loop and would run
-forever, versus the same agent stopped through the **real ACT-0 runtime path**
-(not a shortcut):
+forever, versus the same agent stopped through the **real runtime path** (not
+a shortcut):
 
 ```text
 agent -> wire(pipeline, actuator) -> LoopDetector -> Policy -> STOP
@@ -22,22 +22,23 @@ the `Action` arrives already arbitrated by the pipeline.
 The demo prints a before/after for the looping agent (triggering detector,
 detection step, STOP, work avoided) and runs a **healthy bounded counterpart**
 that is deliberately *not* stopped (a false positive is worse than no
-Pathlayer at all). OBS-1 signal/decision/action logs go to stderr as JSON
-lines. Deterministic, offline, no LLM, no network.
+Pathlayer at all). Signal/decision/action logs go to stderr as JSON lines.
+Deterministic, offline, no LLM, no network.
 
 ```bash
 python examples/demo_loop.py
 ```
 
-## `demo_no_progress.py` (DEMO-2)
+## `demo_no_progress.py`
 
-The flagship story: the **no-progress "slow burn"** (the "$47k incident"). An
-agent looks busy and changes its actions every turn -- a genuinely different
+The flagship story: the **no-progress "slow burn"**, the pattern behind a
+publicly reported $47k incident (see
+[`docs/no-progress-demo.md`](../docs/no-progress-demo.md)). An agent looks busy and changes its actions every turn -- a genuinely different
 edit, then the test suite, over and over -- but the ground-truth progress signal
 (tests passing) never moves. Repetition detectors stay silent because nothing
 repeats; only `NoProgressDetector` (CUSUM on the flat test result) catches it.
 
-Unlike DEMO-1, this runs a **real compiled LangGraph `StateGraph`** (still no LLM
+Unlike `demo_loop.py`, this runs a **real compiled LangGraph `StateGraph`** (still no LLM
 and no network: the model node is scripted and deterministic) through the full
 runtime path, and shows the *graded* intervention rather than an immediate hard
 stop:
@@ -54,7 +55,7 @@ stop      -> progress still never resumes, so the run is drained and halted
 
 `loop` and `retry` are wired **advisory** (observe-only): the demo prints their
 (flat) confidence to prove they stay silent, but only `no_progress` drives the
-ladder. This is the calibrated DEMO-2 separation -- with `loop`/`retry`
+ladder. This is the calibrated separation for this demo -- with `loop`/`retry`
 actionable, a healthy trace (`retry_then_succeed`) would be forced to SUMMARIZE
 (a false positive), which `tests/test_demo2.py` proves in both directions.
 
@@ -64,14 +65,16 @@ summarized or stopped.
 
 Scope: this demonstrates the differentiator on an agent that emits a
 **deterministic ground-truth signal** (test results). It does not claim to catch
-slow burns with *no* tests, git or exit code -- that native-signal-free case is
-tracked separately by ANC-1.
+slow burns with *no* tests, git or exit code: such a run is covered only
+conditionally, when an operator supplies a progress-proof contract (see
+[`docs/progress-proof-corpus-measurement.md`](../docs/progress-proof-corpus-measurement.md)).
 
 The demo runs tools through the idiomatic `langgraph.prebuilt.ToolNode`. A
-`ToolNode` wraps each result in a `ToolMessage`; the ADP-0 adapter unwraps that
-wrapper (structured `artifact`, else a JSON object/array `content` parsed back to
-a dict/list) so `TestProgressAnchor` still sees the structured `{passed, failed}`
-result and no_progress fires -- exactly as it would on a real agent.
+`ToolNode` wraps each result in a `ToolMessage`; the LangGraph adapter unwraps
+that wrapper (structured `artifact`, else a JSON object/array `content` parsed
+back to a dict/list) so `TestProgressAnchor` still sees the structured
+`{passed, failed}` result and no_progress fires -- exactly as it would on a
+real agent.
 
 Needs the langgraph extra (`pip install "pathlayer[langgraph]"`):
 
@@ -79,7 +82,7 @@ Needs the langgraph extra (`pip install "pathlayer[langgraph]"`):
 python examples/demo_no_progress.py
 ```
 
-## `demo_coding_contract.py` (ANC-4)
+## `demo_coding_contract.py`
 
 The same no-progress story when the agent's tools return plain text, as a shell
 tool would: the default coding anchors have nothing to measure. The operator
@@ -100,7 +103,7 @@ normal configuration path, and passes the producer to `LangGraphAdapter`. The
 generated probe runs the real tests and checks the real file after every tool
 call of a real compiled `StateGraph`. STOP is enforced through
 `LangGraphActuator`, with production thresholds and the default detectors.
-Five scripted scenarios were fixed before the first run:
+Six scripted scenarios were fixed in advance:
 
 | Scenario | With the contract | Without it |
 | --- | --- | --- |
@@ -109,13 +112,17 @@ Five scripted scenarios were fixed before the first run:
 | oscillating: fixes `add`, breaks it, fixes it again | STOP at call 11 | no action, 16 calls |
 | objective reached, then unrelated notes | no action, 16 calls | no action, 16 calls |
 | stagnant, but the probe cannot import Pathlayer | no action, 0 proofs, 16 warnings | no action, 16 calls |
+| productive, but the module cannot be imported for 10 calls mid-run | no action, 22 calls, 10 gaps | no action, 22 calls |
 
 Every scenario also replays identically from its recorded trace after the
 workspace is deleted, and decides identically through a hand-written low-level
 manifest and probe fed the same checkpoints. The file edit in the stagnant run
 is an observed effect: it counts once, then the unchanged tests are a stall.
 The unavailable probe is fail-open: no proof, no decision change, one explicit
-warning per tool call. `tests/test_anc4_coding_demo.py` asserts this table.
+warning per tool call. A module that cannot be imported for ten calls in the
+middle of a refactor leaves the tests unobserved: those calls are gaps, not
+stagnation. `tests/test_anc4_coding_demo.py` asserts this table. The demo takes
+about 80 seconds: the probe runs the real tests after every tool call.
 
 Needs the `langgraph` and `yaml` extras:
 
@@ -125,7 +132,7 @@ python examples/demo_coding_contract.py
 
 ## `pathlayer.config.yaml`
 
-Reference configuration (INF-4) documenting every tunable threshold with its
+Reference configuration documenting every tunable threshold with its
 built-in default. Pathlayer is zero-config: with no file present it uses these
 exact values. Copy it to `.pathlayer/config.yaml` (`.yml` and `.json` are also
 discovered) at your project root and override only what you need, then:

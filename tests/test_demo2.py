@@ -218,10 +218,10 @@ def test_main_prints_before_after_evidence(capsys) -> None:  # type: ignore[no-u
     demo.main()
     out = capsys.readouterr().out
 
-    assert "Sans Pathlayer" in out
-    assert "STOP (drain execute)" in out
+    assert "Without Pathlayer" in out
+    assert "STOP (run drained)" in out
     assert "WARN -> SUMMARIZE -> STOP" in out
     assert "no_progress=1.00" in out
-    assert "Resume force execute   : oui" in out
-    assert "Travail evite" in out
-    assert "aucune intervention" in out
+    assert "Forced summary       : yes" in out
+    assert "Work avoided" in out
+    assert "no intervention" in out

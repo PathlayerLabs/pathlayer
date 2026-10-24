@@ -1,4 +1,4 @@
-"""VAL-6: coding contract and STATE-1 on an actual scripted LangGraph agent.
+"""A coding contract and the coding state preset on a real scripted LangGraph agent.
 
 Run ``python examples/demo_coding_alpha.py``. No LLM or network is used.
 The agent runs pytest itself; the independent contract probe verifies its objective.
@@ -178,7 +178,7 @@ def run_scenario(name: str, root: Path) -> dict[str, Any]:
     config = PathlayerConfig.from_mapping({"detectors": detectors})
     events, decisions, _ = run_live(workspace, config, script)
     dump_trace(
-        Trace(label="unknown", events=events, description=f"VAL-6 scenario: {name}"),
+        Trace(label="unknown", events=events, description=f"coding alpha scenario: {name}"),
         root / "trace.json",
     )
     shutil.rmtree(workspace)

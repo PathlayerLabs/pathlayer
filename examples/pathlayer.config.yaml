@@ -1,4 +1,4 @@
-# Pathlayer configuration reference (INF-4).
+# Pathlayer configuration reference.
 #
 # Every value below is the built-in default: with NO config file present,
 # Pathlayer behaves exactly as if this file were loaded. Copy it to
@@ -18,7 +18,7 @@ detectors:
     enabled: true
     k: 2          # min consecutive repetitions before any confidence (>= 2)
     window: 256   # tail size scanned per step (>= 2 * k)
-    # LOOP-2/LOOP-3: n-gram coverage fallback, only ever consulted
+    # N-gram coverage fallback, only ever consulted
     # when the exact repetition above (k/window) is silent -- catches a cycle
     # regularly interrupted by a distinct one-off action. `ngram_sizes`
     # (default 2-5) stays code-level only, like no_progress's anchors.
@@ -26,7 +26,7 @@ detectors:
     ngram_min_coverage: 0.3  # hard floor: min share of the window the pattern must hold, (0, 1]
     ngram_max_confidence: 0.85  # cap: keep below stop_threshold, see the warning below
     ngram_steepness: 3.0     # sharpness of the ramp centered on ngram_min_hits (> 0)
-  # LOOP-2 precision: loop cannot see `result` by design, so a
+  # Loop precision: loop cannot see `result` by design, so a
   # repeated call that is actually improving (e.g. re-running the same test
   # suite while `passed` climbs) would otherwise be stopped as a false
   # positive. AUTO-WIRING: when both `loop` and `no_progress` are enabled (and
@@ -36,12 +36,13 @@ detectors:
   # diff anchor is deliberately excluded: it is gameable and would let useless
   # padding suppress a real loop). Not a user-facing config key in V1.
 
-  # RetryDetector: RET-1 (same failing call replayed, same error) folded with
-  # RET-2 (one tool dominating the recent window regardless of args/error).
+  # RetryDetector: identical failures (same failing call replayed, same error)
+  # folded with tool dominance (one tool dominating the recent window
+  # regardless of args/error).
   retry:
     enabled: true
-    threshold: 3  # RET-1: consecutive identical failures mapped to confidence 1.0 (>= 2)
-    # RET-2 sliding-window tool dominance. Capped below stop_threshold, so a
+    threshold: 3  # consecutive identical failures mapped to confidence 1.0 (>= 2)
+    # Sliding-window tool dominance. Capped below stop_threshold, so a
     # tool storm reinforces a stop via fusion but never stops a run on its own.
     window: 16                    # recent tool calls scanned (>= dominance_min_calls)
     dominance_min_calls: 5        # min calls of one tool in the window to fire (>= 2)
@@ -58,7 +59,7 @@ detectors:
     # Optional external spend seed. SQLite replay already restores persisted
     # events and never adds its own total here, avoiding double counting.
     baseline_usd: 0.0
-    # BUD-3: fallback estimates for TOOL_CALL / LLM_CALL events whose adapter
+    # Fallback estimates for TOOL_CALL / LLM_CALL events whose adapter
     # supplied no positive cost_usd. A captured positive cost always wins, so
     # model pricing is never charged twice. Matching is exact and case-sensitive.
     # For LLM_CALL fallbacks the key must match the event's `tool` field exactly
@@ -96,7 +97,7 @@ detectors:
     # silently unavailable (no signal) on platforms without /proc.
     max_rss_bytes: 2147483648
 
-# Per-tool canonicalization overrides (CAN-2). Empty by default.
+# Per-tool canonicalization overrides. Empty by default.
 canonicalization:
   tool_masks: {}
   # Example:
@@ -110,7 +111,7 @@ policy:
   stop_threshold: 0.9     # fused confidence at/above which we STOP (in [0, 1])
   advisory_signals: []    # signals computed/logged but never allowed to STOP
                           # (one of: loop, retry, budget, no_progress, resource)
-  # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
+  # Per-detector fusion weights in [0, 1]; missing names default to 1.0.
   # Signals are fused with a weighted noisy-OR (1 - prod(1 - weight * confidence)),
   # so two converging signals reinforce each other. A weight of 0 makes a signal
   # inert (same effect as listing it in advisory_signals). Empty = all 1.0.
@@ -120,14 +121,14 @@ policy:
   #   loop: 1.0
   #   no_progress: 0.5
 
-  # Graded action ladder (ARB-3). By default only STOP is active (at
+  # Graded action ladder. By default only STOP is active (at
   # stop_threshold), so arbitration is NONE/STOP -- the recommended setup today.
   #
   # STATUS: LangGraphActuator drains the run on STOP. It also gives WARN and
   # SUMMARIZE real effects when its complete integration is wired: WARN injects
   # an advisory and SUMMARIZE gates tools until the agent emits a structured
   # progress summary. FALLBACK and ESCALATE are still decided and logged but
-  # remain inert until ACT-3/ACT-4. Other actuators enforce only the actions
+  # remain inert (planned: issues #1 and #2). Other actuators enforce only the actions
   # they explicitly implement.
   #
   # Opt in by giving a tier a fused-confidence threshold (< stop_threshold).
@@ -154,7 +155,7 @@ policy:
   # STOP). A single non-confirming tick resets the counter, so a spike from
   # baseline never escalates.
   #
-  # LOOP-2 precision note: the loop <- progress suppression above (see
+  # Loop precision note: the loop <- progress suppression above (see
   # detectors.loop) only reads the *last* event, so if your agent's progress
   # action (e.g. `run_tests`) is not replayed on every tick -- interleaved
   # instead with other repeated actions in a longer cycle -- the suppression
@@ -166,7 +167,7 @@ policy:
   escalate_ticks: 1
   deescalate_ticks: 1
 
-  # Priority overrides (ARB-4). Some signals don't deserve the graduated path:
+  # Priority overrides. Some signals don't deserve the graduated path:
   # a rule maps a detector to a confidence threshold + action that is committed
   # IMMEDIATELY, bypassing both fusion and hysteresis. The headline case is
   # "budget or runtime at ceiling = stop now".
@@ -182,7 +183,7 @@ policy:
   # Fields per rule: `threshold` (confidence in [0, 1], default 1.0) and
   # `action` (warn/summarize/fallback/escalate/stop, default stop). Enforcement
   # depends on the actuator: LangGraphActuator implements WARN/SUMMARIZE/STOP;
-  # FALLBACK and ESCALATE remain inert until ACT-3/ACT-4.
+  # FALLBACK and ESCALATE remain inert (planned).
   overrides: {}
   # Example: soften the budget brake to fire at 95% of the ceiling, and add a
   # custom immediate stop when the loop detector is fully saturated.
@@ -196,7 +197,7 @@ policy:
 
 pipeline:
   recent_history: 10      # events kept in the post-mortem tail (>= 0)
-  dry_run: false          # true = detect/log only; never apply or halt (OBS-3)
+  dry_run: false          # true = detect/log only; never apply or halt
 
 # Token prices, in USD per 1M tokens, feeding pathlayer.pricing.cost_of(). Empty
 # by default: the built-in table (pathlayer/pricing.py, common 2025 OpenAI and

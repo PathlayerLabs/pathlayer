@@ -1,5 +1,5 @@
 /**
- * Pathlayer capture plugin (reference implementation for ADP-1).
+ * Pathlayer capture plugin (reference implementation for the OpenClaw adapter).
  *
  * Forwards OpenClaw lifecycle hooks to a local Pathlayer HTTP ingest endpoint.
  * Translation and per-run recording live in Python (`pathlayer.adapters.openclaw*`);

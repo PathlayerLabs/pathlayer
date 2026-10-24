@@ -1,4 +1,4 @@
-# OpenClaw integration (ADP-1) + per-run recording
+# OpenClaw integration and per-run recording
 
 Pathlayer observes OpenClaw through a **loopback HTTP bridge** (not a sidecar
 daemon, not in-process Python inside the Node gateway). A small JavaScript
@@ -41,53 +41,55 @@ Conversation hooks (`before_agent_run`, `agent_end`) require explicit opt-in:
 }
 ```
 
-## Installation (Lightsail / same host as OpenClaw)
+## Installation
+
+Install Pathlayer on the same host as the OpenClaw gateway: the plugin posts to
+a loopback address.
 
 ```bash
-# Pathlayer release layout (example)
-sudo mkdir -p /opt/pathlayer/releases /opt/pathlayer/shared
-cd /opt/pathlayer/releases
-git clone git@github.com:PathlayerLabs/pathlayer.git "$(date +%Y%m%d%H%M%S)"
-cd "$(ls -1t | head -1)"
+git clone https://github.com/PathlayerLabs/pathlayer.git
+cd pathlayer
 python3 -m venv .venv
 .venv/bin/pip install -e ".[yaml]"
-sudo ln -sfn "$PWD" /opt/pathlayer/current
 
-# Recording storage (outside the git checkout)
-sudo mkdir -p /var/lib/pathlayer/runs
-sudo chown "$USER":"$USER" /var/lib/pathlayer/runs
+# Recording storage, outside the git checkout (the default location is shown;
+# any directory you own works)
 export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
+sudo mkdir -p "$PATHLAYER_RUNS_DIR"
+sudo chown "$USER" "$PATHLAYER_RUNS_DIR"
 ```
 
-Install the OpenClaw plugin:
+Install the OpenClaw plugin from the checkout:
 
 ```bash
-cp -r /opt/pathlayer/current/examples/openclaw_plugin/pathlayer-plugin \
-  ~/.openclaw/extensions/pathlayer-plugin
+cp -r examples/openclaw_plugin/pathlayer-plugin ~/.openclaw/extensions/pathlayer-plugin
 openclaw gateway restart
 ```
 
 ## Start the recording listener
 
+From the checkout:
+
 ```bash
-cd /opt/pathlayer/current
 source .venv/bin/activate
 export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
-nohup python examples/openclaw_plugin/record.py > /opt/pathlayer/shared/record.log 2>&1 &
-tail -f /opt/pathlayer/shared/record.log
+python examples/openclaw_plugin/record.py
 ```
 
-Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`.
+Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. To keep the
+listener running after you log out, run it under your service manager, or in
+the background with
+`nohup python examples/openclaw_plugin/record.py > record.log 2>&1 &`.
 
 ### Detector configuration
 
-The listener uses the standard Pathlayer config (INF-4) -- no listener-specific
+The listener uses the standard Pathlayer config -- no listener-specific
 format. In priority order: `--config <path>`, `$PATHLAYER_CONFIG`, then
 discovery of `.pathlayer/config.{yaml,yml,json}` in the working directory. With
 no config file the built-in defaults apply.
 
 ```bash
-python examples/openclaw_plugin/record.py --config /opt/pathlayer/shared/config.yaml
+python examples/openclaw_plugin/record.py --config path/to/config.yaml
 ```
 
 An unreadable, malformed or out-of-range config **fails at startup** with a
@@ -116,10 +118,10 @@ Each run directory contains:
 ├── manifest.json      # schema version, execution status, observed outcome, metadata
 ├── request.json       # before_agent_run snapshot (prompt, raw payload)
 ├── events.raw.jsonl   # every hook payload (verbatim)
-├── trace.json         # replayable ToolEvent trace (VAL-1)
+├── trace.json         # replayable ToolEvent trace (format: traces/README.md)
 ├── decisions.jsonl    # Pathlayer's per-tool-event tick: signals, score, action
 ├── final.json         # agent_end snapshot
-└── report.json        # end-of-session report (OBS-2)
+└── report.json        # end-of-session report
 ```
 
 The recorder also keeps `state.db` at the runs root by default. It journals
@@ -131,9 +133,9 @@ events. A configured non-default `store.path` is honored instead.
 
 SQLite cost counters describe only the analyzed and committed prefix, ending
 at Pathlayer's STOP. `events.raw.jsonl` remains the source for the separate
-recorder/reporting fold over every event, including the post-STOP suffix; OBS-2
-must use that fold when reporting the real session spend rather than presenting
-the SQLite snapshot as a total.
+recorder/reporting fold over every event, including the post-STOP suffix; the
+post-session report must use that fold when reporting the real session spend
+rather than presenting the SQLite snapshot as a total.
 
 If SQLite becomes unavailable, OpenClaw keeps the raw JSONL recording and
 continues analysis in memory. The manifest then records
@@ -174,7 +176,7 @@ release.
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
 was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
-decision in `health_reason`, but always keeps `health` and the VAL-1 trace label
+decision in `health_reason`, but always keeps `health` and the trace label
 at `unknown` until an explicit human curation step assigns ground truth. An
 absence of intervention is not evidence that the run was healthy, and a STOP
 is a detector outcome rather than a curated failure class.
@@ -202,16 +204,16 @@ Silent detectors are kept in `signals` on purpose: "wired and reported 0.00" and
 line with `"analyzed": false` carries none of these columns — no detector ran for
 that event, so asserting a confidence for it would be an invention.
 
-`fused` and `arbitrated_action` arrived with OBS-2, which makes them the marker
-of the journal's format. A run recorded by an earlier listener is still read back:
+`fused` and `arbitrated_action` arrived with the post-session report, which
+makes them the marker of the journal's format. A run recorded by an earlier listener is still read back:
 its `action` column gives the action Pathlayer emitted, so a STOP and its reason
 survive, while the fused score it never recorded is reported as unknown rather
 than as `0.00`. The report names how many lines are in that older format.
 
 Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
 `agent_end` or a late tool call for such a run is logged and dropped, never
-replayed onto the run directory. The one exception is a late `llm_output`
-(OBS-5). OpenClaw dispatches `llm_output` and `agent_end` fire-and-forget, the
+replayed onto the run directory. The one exception is a late `llm_output`.
+OpenClaw dispatches `llm_output` and `agent_end` fire-and-forget, the
 plugin forwards each without waiting, and the ingest server handles requests
 concurrently, so the last model call of a run can arrive after its `agent_end`.
 That payload is appended to the run's `late.jsonl` annex and `report.json` is
@@ -225,7 +227,7 @@ cat "/var/lib/pathlayer/runs/$RUN/trace.json"
 cat "/var/lib/pathlayer/runs/$RUN/report.json"
 ```
 
-## Read the post-session report (OBS-2)
+## Read the post-session report
 
 A finalized run normally carries a `report.json`: what it cost, which detectors
 reacted and how strongly, what Pathlayer did, and how the run ended. It is
@@ -237,7 +239,7 @@ killed mid-line is still reported, with a note saying the truncated line was
 dropped; a journal corrupted elsewhere is refused instead of summarised, and that
 run keeps no `report.json` (the failure is logged and the sweep continues).
 
-Repeated alerts are grouped into findings (OBS-3). A finding is one unbroken
+Repeated alerts are grouped into findings. A finding is one unbroken
 run of non-zero readings from the same detector, shown once with its
 occurrence count, event span, and peak confidence, and labelled with the tool
 calls it covered, for example `loop / shell_exec: 15 occurrences (events 3-17,
@@ -260,7 +262,7 @@ pathlayer-report --all      # one line per recorded run
 pathlayer-report --last --json   # the structured report instead of the summary
 ```
 
-### Captured, attributed and unattributed cost (OBS-5)
+### Captured, attributed and unattributed cost
 
 `--cost-attribution` replaces the per-run output with one cost split over the
 selected runs. It needs a run selection like the other modes:
@@ -283,7 +285,7 @@ unattributed: $0.0742 over 11 event(s)
 - **Captured** is every `llm_output` Pathlayer journaled, priced at the table
   pinned in the run's manifest when it was recorded, never at today's config. It
   always equals attributed plus unattributed. `llm_output` is the only OpenClaw
-  hook that carries a cost; BUD-3 per-tool estimates are configuration, not
+  hook that carries a cost; per-tool budget estimates are configuration, not
   captured cost, and are left out.
 - **Attributed** means the source named the run (`ctx.runId`, else
   `event.runId`). Two subsets are shown as evidence and are never moved
@@ -349,20 +351,20 @@ reported even when it comes out at zero:
   with the `pricing` table. That is an *estimate*, never an invoice-grade
   measurement, and the report labels it as such. An unknown model or a missing
   counter leaves that call unmeasured rather than free. The other substitute is
-  `detectors.budget.tool_costs_usd` (BUD-3): a known price per tool times the
+  `detectors.budget.tool_costs_usd`: a known price per tool times the
   number of calls, also reported as an estimate, separately from captured cost.
   That estimate is persisted on every tool call, not only at `agent_end`, so a run
-  killed mid-flight keeps what it had already spent. A BUD-3 estimate of `$0.00`
+  killed mid-flight keeps what it had already spent. A per-tool estimate of `$0.00`
   is a measured zero and is reported as such; only a run that recorded no estimate
   at all is reported as unmeasured, and if that run never reached its end the
   report calls the figure indeterminate rather than blaming a disabled detector.
 - **Cross-run spend.** `detectors.budget.baseline_usd` is the seed this run's
   detection actually started from. The cumulative total across runs belongs to
-  INF-1's state store, which this report does not read: it is the engine's
+  the SQLite state store, which this report does not read: it is the engine's
   inter-run state, while a run directory is the adapter's own auditable capture.
   The report keeps one distinct, still-empty field as the seam between the two.
-- **Detector activity.** A run recorded before OBS-2 has no per-tick confidence
-  and no fused score in its journal. The report says both are unknown, not that
+- **Detector activity.** A run recorded by an older listener, before this
+  report existed, has no per-tick confidence and no fused score in its journal. The report says both are unknown, not that
   no detector reacted and not that the score was zero.
 
 The most actionable line is often the fused score: a run that peaked at 0.85 and
@@ -392,7 +394,8 @@ print(report)
 PY
 ```
 
-Or use the offline replay CLI documented in `traces/README.md`.
+To replay a trace file or a folder of traces from the command line, run
+`python -m pathlayer.validation.replay <path>`.
 
 ## Privacy warning
 
@@ -418,9 +421,3 @@ commit run directories into git.
 rm -rf ~/.openclaw/extensions/pathlayer-plugin && openclaw gateway restart
 pkill -f "examples/openclaw_plugin/record.py" || true
 ```
-
-## Demo listener runbook (legacy)
-
-The step-by-step French runbook for first-time manual validation with
-`listen.py` remains valid for smoke testing; prefer `record.py` for production
-recording on `/var/lib/pathlayer/runs`.

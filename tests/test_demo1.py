@@ -75,12 +75,17 @@ def test_main_prints_before_after_and_no_false_positive(capsys) -> None:  # type
     demo.main()
 
     out = capsys.readouterr().out
-    assert "Sans Pathlayer" in out
-    assert "STOP apres" in out
-    assert "Detecteur declencheur : loop" in out
+    assert "Without Pathlayer" in out
+    assert "STOP after" in out
+    assert "Triggering detector : loop" in out
     # DEMO-1 DoD: work avoided must be surfaced, with a coherent count.
-    match = re.search(r"Travail evite\s*:\s*(\d+) actions sur (\d+)", out)
+    match = re.search(r"Work avoided\s*:\s*(\d+) of (\d+) actions", out)
     assert match is not None
     avoided, total = int(match.group(1)), int(match.group(2))
     assert 0 < avoided < total
-    assert "aucune intervention" in out
+    # Actions are counted from 1: detection happens on the action that stops.
+    stopped = re.search(r"STOP after (\d+) actions", out)
+    detected = re.search(r"Detected at\s*:\s*action (\d+)", out)
+    assert stopped is not None and detected is not None
+    assert detected.group(1) == stopped.group(1)
+    assert "no intervention" in out

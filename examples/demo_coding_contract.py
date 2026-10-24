@@ -1,4 +1,4 @@
-"""ANC-4 -- a declarative coding contract on a real LangGraph agent.
+"""A declarative coding contract on a real LangGraph agent.
 
 A scripted coding agent (no LLM, no network) works in a throwaway workspace:
 ``calculator.py`` starts with four unimplemented functions and
@@ -41,9 +41,9 @@ Six scenarios are fixed in advance; production thresholds are untouched:
 
 Each scenario is checked four ways: the live run (enforced through
 ``LangGraphActuator``), a replay of the recorded trace after the workspace is
-deleted, the same events through the hand-written low-level ANC path (a
-manifest and a probe replaying the recorded checkpoints), and an ablation with
-the proofs removed under the default configuration.
+deleted, the same events through the hand-written low-level progress-proof
+path (a manifest and a probe replaying the recorded checkpoints), and an
+ablation with the proofs removed under the default configuration.
 
 Requires the ``langgraph`` and ``yaml`` extras. Run::
 
@@ -335,7 +335,7 @@ def _recorded_observation(event: ToolEvent) -> tuple[dict[str, bool] | None, int
 def low_level_decisions(
     root: Path, installed: InstalledCodingContract, events: Sequence[ToolEvent]
 ) -> list[PipelineDecision | None]:
-    """The same events through a hand-written ANC-1 manifest and ANC-2 probe."""
+    """The same events through a hand-written progress-proof manifest and probe."""
     spec = installed.compiled.bundle.proof_spec
     manifest = root / "low-level" / "manifest.json"
     manifest.parent.mkdir()
@@ -461,7 +461,8 @@ def run_all(root: Path) -> list[ScenarioResult]:
 
 
 def _outcome(stop: int | None, events: int) -> str:
-    return f"STOP at call {stop}" if stop is not None else f"no action ({events} calls)"
+    # ``stop`` is a zero-based decision index; people count calls from 1.
+    return f"STOP at call {stop + 1}" if stop is not None else f"no action ({events} calls)"
 
 
 def main() -> None:
