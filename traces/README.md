@@ -94,6 +94,7 @@ rather than stored here.
 | `loop/period3_cycle.json` | Longer cycle of period 3 replayed identically. |
 | `loop/volatile_ids.json` | Same call hidden behind fresh UUIDs/timestamps/cursors; visible only after canonicalization. |
 | `loop/ping_pong.json` | Analyzer <-> verifier A->B->A->B oscillation. |
+| `loop/retry_same_error.json` | Retry storm: the same deploy call with identical arguments gets the same timeout every time. Caught by the retry detector, and by loop detection as a period-1 repetition. |
 
 ### `no_progress`
 
@@ -124,12 +125,52 @@ rather than stored here.
 | `healthy/rich_late_test_progress.json` | Rich test results: work begins before test evidence exists, then rich outcomes show real repairs. |
 | `healthy/rich_new_target_progress.json` | Rich test results: a new red target progresses locally without competing with an older target's absolute score. |
 | `healthy/rich_legacy_revert_recovers.json` | Rich test results: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
+| `healthy/finished_without_tests.json` | A research agent finishes its summary, then keeps issuing low-value searches. No test or exit-code evidence exists, so the progress anchors abstain: Pathlayer never stops an agent it cannot measure. |
+| `healthy/finishes_before_runtime_limit.json` | A long run completes before the hard runtime ceiling: no timeout event exists, so the duration check stays silent. |
+| `healthy/noisy_progress.json` | Real but noisy progress: passed-minus-failed goes 1, 3, 2, 4, 3, 5. Every dip is bounded at 1, and every new record resets the stall count. |
+| `healthy/plateau_after_success.json` | The suite is all green, then the agent keeps polishing without breaking anything: a plateau at success means nothing is left to fix, not a stall. |
+| `healthy/repetitive_but_passing.json` | The same test command reruns after every fix while the passed count climbs from 1 to 8. Loop detection alone would STOP at the fifth repeat; the real test progress suppresses it. |
+| `healthy/retry_reset_after_progress.json` | Two transient rate-limited searches, then real work (an edit, a passing test run, a commit), then a short new search burst. Only the trailing uninterrupted run of a tool counts, so the two search phases are never merged into one. |
+| `healthy/slow_but_real_progress.json` | Slow progress: passed-minus-failed climbs 0, 2, 4, 6, with flat stretches shorter than the no-progress patience. Each new record resets the confidence before it reaches STOP. |
+| `healthy/varied_reads_by_id.json` | Many reads of genuinely different files addressed by a numeric `file_id`: the `_id` suffix must not be canonicalized away, or distinct reads would look like a loop. |
 
 ### `anc4/` (coding-contract probe outage)
 
 | File | Why it must NOT fire |
 | --- | --- |
 | `anc4/probe_outage_mid_run.json` | A productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the progress-proof corpus measurement seals. |
+
+### `nop4_experiment/` (git-diff progress experiment)
+
+These fixtures measure the git-diff progress anchor on its own:
+`tests/test_nop4_git_experiment.py` replays them through `NoProgressDetector`
+alone and compares the net diff size (insertions minus deletions) with the
+total diff size (insertions plus deletions). The shipped git anchor uses the
+total size and abstains when test results exist. These traces are excluded from
+the aggregate replay score of `traces/`.
+
+| File | Label | What it shows |
+| --- | --- | --- |
+| `nop4_experiment/inplace_bugfix_no_tests.json` | `healthy` | In-place bug fixes with no tests: the total diff size grows while the net size stays near 0. A net-size anchor false-stops; the total size stays silent. |
+| `nop4_experiment/late_first_test_progressing.json` | `healthy` | Code grows for several steps before any test result, then a late suite stays red while the edits continue. The baseline false-stops, and so does the shipped anchor, because it abstains once tests exist. |
+| `nop4_experiment/same_zone_rewrite.json` | `no_progress` | The agent rewrites the same zone over and over, with no tests: the net and total sizes stay constant. Without git there is nothing to measure and the stall is missed; every git anchor catches it. |
+| `nop4_experiment/tdd_red_progressing.json` | `healthy` | Red phase of test-driven work: code grows while the suite stays at 0 passed, 3 failed. Same limit as above: the baseline and the shipped anchor false-stop. |
+| `nop4_experiment/useless_growth.json` | `no_progress` | Useless lines keep being added while the tests stay flat at 2 passed, 2 failed. The test anchor catches it; a git anchor that always applies would mask it, which is why the shipped one abstains when tests exist. |
+
+### `val7/` (session-level traces)
+
+Each trace is the concluding turn of a session and carries its frozen
+cross-run context. That context only counts with
+`pipeline.session_stitching: true`: `tests/test_session_stitching.py` replays
+these traces with it, and they are excluded from the aggregate replay score of
+`traces/` (see [`docs/session-stitching.md`](../docs/session-stitching.md)).
+
+| File | Label | What the frozen context holds |
+| --- | --- | --- |
+| `val7/repeat.json` | `loop` | The same `build` fails with the same compiler error on three turns while the test checkpoint stays unmet: the failures are stitched and the retry detector stops the agent. |
+| `val7/polling.json` | `healthy` | The same read-only check (`gh pr checks 12`) succeeds on five turns: a success is never stitched, so nothing fires. |
+| `val7/progress.json` | `healthy` | The same failing `build` on the third turn, but the window starts at that turn: progress in an earlier turn broke continuity. |
+| `val7/unavailable.json` | `healthy` | The same shape, but continuity broke on an unavailable observation: nothing is stitched across it. |
 
 ## Optional rich test-result contract
 
