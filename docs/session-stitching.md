@@ -20,7 +20,7 @@ The append-only journal lives in `<store.path>.sessions`. Each capture is isolat
 
 The bounded context used for the decision is attached to the captured event. Replay therefore reproduces the decision without rereading the current journal or probing the workspace again. Raw payloads and canonical decisions are not rewritten. Historical configuration fingerprints remain compatible; enabling this feature has its own semantics version.
 
-The labeled traces in `traces/val7/` carry this frozen context, which only counts with the option enabled. `tests/test_session_stitching.py` replays them with `session_stitching`, and they are excluded from the aggregate score of `python -m pathlayer.validation.replay traces`, which uses the default configuration.
+The labeled traces in `traces/val7/` carry this frozen context, which only counts with the option enabled. `tests/test_session_stitching.py` replays them with `session_stitching`, and they are excluded from the aggregate score of `pathlayer-replay traces`, which uses the default configuration.
 
 A missed observation inserts a window break into the journal: no repetition is stitched across it, and continuity resumes with the observations captured afterwards. Three cases produce a break: a capture error, an interrupted OpenClaw run (its unobserved suffix is unknown) and a configuration change (observations are no longer comparable, including when switching back to the previous configuration). The session is never disabled permanently, and there is no need to change the session identity.
 

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -273,3 +276,20 @@ def test_main_accepts_stop_threshold(capsys) -> None:  # type: ignore[no-untyped
     code = main([str(_TRACES_DIR / "loop"), "--stop-threshold", "0.5"])
     assert code == 0
     assert "FP=" in capsys.readouterr().out
+
+
+def test_installed_pathlayer_replay_command_prints_report_without_warning() -> None:
+    # `python -m pathlayer.validation.replay` warns from runpy, because the
+    # package imports the module first; the installed command does not.
+    name = "pathlayer-replay.exe" if os.name == "nt" else "pathlayer-replay"
+    executable = Path(sys.executable).with_name(name)
+    assert executable.is_file(), f"missing {executable}: reinstall with pip install -e ."
+    completed = subprocess.run(
+        [str(executable), str(_TRACES_DIR / "loop_trivial.json")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "FP=0" in completed.stdout
+    assert "TP=1" in completed.stdout
+    assert "Warning" not in completed.stderr
