@@ -241,6 +241,16 @@ def test_symlinks_are_never_followed_to_a_verdict(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.usefixtures("symlinks_supported")
+def test_a_symlink_loop_is_unobservable_on_every_python(tmp_path: Path) -> None:
+    workspace = tmp_path.resolve()
+    (workspace / "loop").symlink_to(workspace / "loop")
+
+    with pytest.raises(coding_contract_probe.Unobservable) as raised:
+        coding_contract_probe.contained_path(workspace, "loop/x.py")
+    assert raised.value.reason == REASON_NOT_REGULAR
+
+
 def test_missing_workspace_observes_nothing(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     payload = _payload(

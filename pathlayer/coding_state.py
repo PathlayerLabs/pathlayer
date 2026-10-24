@@ -67,6 +67,7 @@ from pathlayer.coding_state_collectors import (
     validate_command,
 )
 from pathlayer.config import ConfigError, PathlayerConfig, StateEvidenceConfig, ToolRuleConfig
+from pathlayer.state_collectors import resolve_non_strict
 from pathlayer.state_evidence import (
     FilesystemStateSensor,
     PytestStateSensor,
@@ -217,7 +218,7 @@ class CodingStatePlanner:
         candidate = Path(value)
         target = candidate if candidate.is_absolute() else self.workspace / candidate
         try:
-            resolved = target.resolve(strict=False)
+            resolved = resolve_non_strict(target)
         except (OSError, RuntimeError, ValueError):  # RuntimeError: symlink loop
             return None
         if self.workspace not in resolved.parents:
@@ -288,7 +289,7 @@ def state_evidence_producer_from_config(config: PathlayerConfig) -> StateEvidenc
 def _workspace(configured: str, base_dir: Path | None) -> Path:
     root = (base_dir or Path.cwd()) / Path(configured)
     try:
-        workspace = root.resolve(strict=False)
+        workspace = resolve_non_strict(root)
     except (OSError, RuntimeError, ValueError) as error:
         raise CodingStateError(f"unusable workspace {configured!r}") from error
     if not workspace.is_dir():

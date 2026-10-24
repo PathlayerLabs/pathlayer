@@ -73,7 +73,11 @@ from pathlayer._contract_pytest_plugin import (
     OUTPUT_ENV,
     SELECT_ENV,
 )
-from pathlayer.state_collectors import _wait_for_pytest, collect_filesystem_evidence
+from pathlayer.state_collectors import (
+    _wait_for_pytest,
+    collect_filesystem_evidence,
+    resolve_non_strict,
+)
 
 PAYLOAD_FORMAT = "pathlayer-coding-contract"
 PAYLOAD_VERSION = 1
@@ -155,7 +159,7 @@ def contained_path(workspace: Path, relative: str) -> Path:
         raise Unobservable(REASON_UNSAFE_PATH)
     target = workspace.joinpath(*relative.split("/"))
     try:
-        resolved = target.resolve(strict=False)
+        resolved = resolve_non_strict(target)
     except (OSError, RuntimeError, ValueError) as error:  # RuntimeError: symlink loop
         raise Unobservable(REASON_NOT_REGULAR) from error
     if resolved != workspace and workspace not in resolved.parents:
