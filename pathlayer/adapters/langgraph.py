@@ -98,6 +98,30 @@ _MAX_PENDING = 1024
 # scope here.
 _JSON_FRIENDLY = (bool, int, float, str, dict, list)
 
+# Deepest container nesting parsed back from a ``ToolMessage``. Up to Python
+# 3.13, ``json.loads`` raises ``RecursionError`` near 1,000 levels; 3.14 parses
+# far deeper, and the recursive encoders downstream (the state store) would
+# then fail instead. A fixed bound gives the same result on every version and
+# stays far above any real tool output.
+_MAX_JSON_DEPTH = 256
+
+
+def _nesting_exceeds(value: Any, limit: int) -> bool:
+    """Whether ``value`` nests dicts and lists more than ``limit`` levels deep."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
 
 def _unwrap_tool_message(output: Any) -> Any:
     """Return the underlying result carried by a LangChain ``ToolMessage``.
@@ -127,12 +151,13 @@ def _unwrap_tool_message(output: Any) -> Any:
         stripped = content.strip()
         if stripped[:1] in ("{", "["):
             try:
-                return json.loads(stripped)
+                parsed = json.loads(stripped)
             except (ValueError, RecursionError):
                 # ValueError covers malformed JSON (JSONDecodeError); RecursionError
                 # guards deeply-nested content -- neither must escape the callback
                 # (the module's "never a crash" contract).
                 return content
+            return content if _nesting_exceeds(parsed, _MAX_JSON_DEPTH) else parsed
     return content
 
 

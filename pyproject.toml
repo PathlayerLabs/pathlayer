@@ -16,6 +16,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
     "Typing :: Typed",
 ]
@@ -38,7 +40,7 @@ pathlayer-compile-contract = "pathlayer.coding_contracts:main"
 # (pathlayer.policies.langgraph_actuator, ACT-0). Not a runtime dependency of
 # the core pipeline. Upper bounds are pinned because CI runs
 # `pip install -e ".[dev]"` without a lockfile (see .github/workflows/ci.yml)
-# across the 3.10/3.11/3.12 matrix -- an open floor would break on a breaking
+# across the 3.10-3.14 matrix -- an open floor would break on a breaking
 # major release. Both packages declare requires-python >=3.10.
 # Floor raised to 1.2 (ACT-0): langgraph.runtime.RunControl / request_drain /
 # langgraph.errors.GraphDrained (cooperative graceful shutdown) only exist

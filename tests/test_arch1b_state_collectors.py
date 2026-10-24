@@ -223,6 +223,27 @@ def test_filesystem_replacement_with_symlink_is_collection_failed(
     assert _filesystem(target).status == "collection_failed"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="symlink_to requires SeCreateSymbolicLinkPrivilege on Windows",
+)
+def test_resolve_non_strict_raises_on_a_symlink_loop_on_every_python(tmp_path: Path) -> None:
+    # Python 3.13 stopped raising for a loop in non-strict mode: the helper keeps
+    # the earlier behavior, so a loop never resolves to an attributable path.
+    root = tmp_path.resolve()
+    (root / "loop").symlink_to(root / "loop")
+    (root / "real").mkdir()
+    (root / "link").symlink_to(root / "real", target_is_directory=True)
+    (root / "dangling").symlink_to(root / "gone")
+
+    with pytest.raises(RuntimeError, match=r"(?i)symlink loop"):
+        collectors_module.resolve_non_strict(root / "loop" / "x.py")
+    resolve = collectors_module.resolve_non_strict
+    assert resolve(root / "missing" / "x.py") == root / "missing" / "x.py"
+    assert resolve(root / "link" / "x.py") == root / "real" / "x.py"
+    assert resolve(root / "dangling") == root / "gone"
+
+
 def test_unavailable_before_remains_explicit_and_prevents_delta(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.write_text("content", encoding="utf-8")
