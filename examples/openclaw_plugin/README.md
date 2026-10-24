@@ -395,7 +395,7 @@ PY
 ```
 
 To replay a trace file or a folder of traces from the command line, run
-`python -m pathlayer.validation.replay <path>`.
+`pathlayer-replay <path>`.
 
 ## Privacy warning
 
