@@ -25,6 +25,11 @@ to rule out.
 - Documentation states only what is enforced and proven: distinguish observed,
   advisory, and enforced actions.
 - Pull requests are squash-merged: one pull request, one commit on `main`.
+- CI runs in the merge queue, not on each push to a pull request: "Merge when
+  ready" runs the full CI on the exact commit that will land on `main`, and the
+  pull request merges only if it passes. Review happens before CI results, so
+  run the gate below before asking for one. Maintainers can get early feedback
+  on a branch with `gh workflow run ci.yml --ref <branch>`.
 
 ## Validation
 
