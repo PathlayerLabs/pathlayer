@@ -21,7 +21,7 @@ pytest.importorskip("langchain_core")
 from langchain_core.tools import tool
 
 from pathlayer import Pipeline
-from pathlayer.adapters.langgraph import LangGraphAdapter, _coerce_result
+from pathlayer.adapters.langgraph import _MAX_JSON_DEPTH, LangGraphAdapter, _coerce_result
 from pathlayer.config import PathlayerConfig, PricingSection
 from pathlayer.detectors.budget import BudgetDetector
 from pathlayer.detectors.loop import LoopDetector
@@ -265,10 +265,18 @@ def test_coerce_result_unwraps_tool_message() -> None:
     assert _coerce_result(ToolMessage(content="11", tool_call_id="1")) == "11"
     # Malformed JSON object falls back to the raw string (no crash).
     assert _coerce_result(ToolMessage(content="{not json}", tool_call_id="1")) == "{not json}"
-    # Pathologically nested JSON makes json.loads raise RecursionError (not a
-    # ValueError); it must be caught too, falling back to the raw string.
+    # Pathologically nested JSON falls back to the raw string on every Python:
+    # up to 3.13 json.loads raises RecursionError (not a ValueError), 3.14
+    # parses it and the depth bound rejects it.
     nested = "[" * 20000 + "]" * 20000
     assert _coerce_result(ToolMessage(content=nested, tool_call_id="1")) == nested
+    # The bound itself: one level deeper than _MAX_JSON_DEPTH stays a string.
+    at_bound = "[" * _MAX_JSON_DEPTH + "]" * _MAX_JSON_DEPTH
+    assert isinstance(_coerce_result(ToolMessage(content=at_bound, tool_call_id="1")), list)
+    beyond = "[" + at_bound + "]"
+    assert _coerce_result(ToolMessage(content=beyond, tool_call_id="1")) == beyond
+    wide = '{"a": [' + ", ".join(["{}"] * 1000) + "]}"
+    assert _coerce_result(ToolMessage(content=wide, tool_call_id="1")) == {"a": [{}] * 1000}
 
 
 def test_toolnode_style_invoke_captures_structured_result() -> None:
