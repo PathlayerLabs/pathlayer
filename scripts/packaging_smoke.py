@@ -50,6 +50,7 @@ from pathlayer.adapters import InMemoryAdapter  # noqa: E402
 from pathlayer.events import ToolEvent  # noqa: E402
 from pathlayer.policies import Action, Actuator, wire  # noqa: E402
 from pathlayer.postmortem import PostMortem  # noqa: E402
+from pathlayer.validation import Trace, dump_trace  # noqa: E402
 
 
 class RecordingActuator(Actuator):
@@ -261,6 +262,22 @@ def _exercise_scaffolder_entrypoint() -> None:
         assert "NotImplementedError" in probe.stderr
 
 
+def _exercise_replay_entrypoint() -> None:
+    executable_name = "pathlayer-replay.exe" if os.name == "nt" else "pathlayer-replay"
+    executable = Path(sys.executable).with_name(executable_name)
+    assert executable.is_file(), f"missing installed entry point: {executable}"
+    with tempfile.TemporaryDirectory() as directory:
+        traces = Path(directory)
+        dump_trace(Trace(label="healthy", events=_healthy_events()), traces / "healthy.json")
+        dump_trace(Trace(label="loop", events=_loop_events()), traces / "loop.json")
+        completed = subprocess.run(
+            [str(executable), str(traces)], check=True, capture_output=True, text=True
+        )
+        assert "FP=0" in completed.stdout, completed.stdout
+        assert "TP=1" in completed.stdout, completed.stdout
+        assert "Warning" not in completed.stderr, completed.stderr
+
+
 def _exercise_contract_compiler_entrypoint() -> None:
     """ANC-4: the installed compiler writes a bundle whose probe runs from the install."""
     executable_name = (
@@ -354,6 +371,7 @@ def main() -> None:
     _exercise_session_report()
     _exercise_scaffolder_entrypoint()
     _exercise_contract_compiler_entrypoint()
+    _exercise_replay_entrypoint()
     if args.readme is not None:
         _exercise_readme(args.readme)
     if args.extras == "core":
