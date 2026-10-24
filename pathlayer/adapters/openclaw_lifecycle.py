@@ -3,7 +3,8 @@
 Lifecycle hooks (``before_agent_run``, ``agent_end``) are handled by the run
 recorder and are **not** forced into :class:`~pathlayer.events.ToolEvent`.
 Only ``after_tool_call`` is translated into tool events for the detector
-pipeline.
+pipeline. ``before_tool_call`` is a decision query, not an observation: the
+recorder answers it and never records it.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 BEFORE_AGENT_RUN = "before_agent_run"
+BEFORE_TOOL_CALL = "before_tool_call"
 AFTER_TOOL_CALL = "after_tool_call"
 AGENT_END = "agent_end"
 LLM_OUTPUT = "llm_output"
@@ -27,6 +29,7 @@ class OpenClawHookKind(str, Enum):
     TOOL = "tool"
     RUN_END = "run_end"
     LLM = "llm"
+    TOOL_DECISION = "tool_decision"
     IGNORED = "ignored"
 
 
@@ -80,6 +83,8 @@ def classify_openclaw_hook(payload: Any) -> OpenClawHookKind:
         return OpenClawHookKind.RUN_END
     if hook == LLM_OUTPUT:
         return OpenClawHookKind.LLM
+    if hook == BEFORE_TOOL_CALL:
+        return OpenClawHookKind.TOOL_DECISION
     return OpenClawHookKind.IGNORED
 
 

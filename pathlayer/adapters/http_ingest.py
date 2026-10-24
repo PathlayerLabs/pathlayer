@@ -52,6 +52,14 @@ logger = logging.getLogger(__name__)
 # (never the server itself -- see ``_Handler.do_POST``).
 Translator = Callable[[Any], list[ToolEvent]]
 
+# Optional, per source: answers a request with a decision for the forwarder
+# (for instance "block this tool call"), returned under the response's
+# ``decision`` key. ``None`` means no decision. It runs after the translator,
+# under the same lock, so it sees every event ingested before its request.
+# A raising decider is logged and answered with no decision: a forwarder that
+# acts on decisions must treat their absence as "allow" (fail open).
+Decider = Callable[[Any], Mapping[str, Any] | None]
+
 
 class _UnknownSourceError(LookupError):
     """Raised only when no translator is registered for a source."""
@@ -107,7 +115,8 @@ class HttpIngestAdapter(Adapter):
 
     A POST to ``/ingest`` must carry a JSON body ``{"source": str, "payload":
     <framework-specific>}``. ``source`` selects the translator; ``payload`` is
-    passed to it as-is.
+    passed to it as-is. The response is ``{"ok": true}``, plus a ``decision``
+    object when a decider registered for the source returns one.
     """
 
     def __init__(
@@ -117,6 +126,7 @@ class HttpIngestAdapter(Adapter):
         *,
         host: str = "127.0.0.1",
         port: int = 0,
+        deciders: Mapping[str, Decider] | None = None,
     ) -> None:
         super().__init__(sink)
         if not translators:
@@ -128,6 +138,7 @@ class HttpIngestAdapter(Adapter):
                 "from the network"
             )
         self._translators = dict(translators)
+        self._deciders = dict(deciders or {})
         self._host = host
         self._requested_port = port
         self._server: ThreadingHTTPServer | None = None
@@ -167,8 +178,8 @@ class HttpIngestAdapter(Adapter):
         self._server = None
         self._thread = None
 
-    def _ingest(self, source: str, payload: Any) -> None:
-        """Translate one request body and emit the resulting events.
+    def _ingest(self, source: str, payload: Any) -> Mapping[str, Any] | None:
+        """Translate one request body, emit the resulting events, then decide.
 
         Raises ``_UnknownSourceError`` for an unknown source; lets a translator's own
         exceptions propagate. The HTTP handler turns both into an error
@@ -179,6 +190,9 @@ class HttpIngestAdapter(Adapter):
         thread) never interleave: ``ts`` stays contiguous and the downstream
         sink sees one event at a time, matching every other adapter's
         contract.
+
+        Returns the source's decision for this request, if any (see
+        :data:`Decider`).
         """
         try:
             translator = self._translators[source]
@@ -190,6 +204,14 @@ class HttpIngestAdapter(Adapter):
                 event.ts = self._ts
                 self._ts += 1
                 self.emit(event)
+            decider = self._deciders.get(source)
+            if decider is None:
+                return None
+            try:
+                return decider(payload)
+            except Exception:
+                logger.exception("decider for source=%r failed; answering no decision", source)
+                return None
 
 
 def _make_handler(adapter: HttpIngestAdapter) -> type[BaseHTTPRequestHandler]:
@@ -234,7 +256,7 @@ def _make_handler(adapter: HttpIngestAdapter) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             try:
-                adapter._ingest(source, body["payload"])
+                decision = adapter._ingest(source, body["payload"])
             except _UnknownSourceError:
                 self._respond(400, {"error": f"unknown source {source!r}"})
                 return
@@ -242,7 +264,10 @@ def _make_handler(adapter: HttpIngestAdapter) -> type[BaseHTTPRequestHandler]:
                 logger.exception("translator for source=%r failed", source)
                 self._respond(500, {"error": "internal error (see server log)"})
                 return
-            self._respond(200, {"ok": True})
+            if decision is None:
+                self._respond(200, {"ok": True})
+            else:
+                self._respond(200, {"ok": True, "decision": dict(decision)})
 
         def _drain(self, length: int, chunk_size: int = 65_536) -> None:
             remaining = length

@@ -281,6 +281,64 @@ def test_translator_exception_is_hidden_logged_and_does_not_crash_server(
     assert [event.tool for event in events] == ["ok"]
 
 
+def test_a_decider_answer_is_returned_under_decision() -> None:
+    def _decide(payload: Any) -> dict[str, Any] | None:
+        return {"block": True} if payload.get("tool") == "stop-me" else None
+
+    adapter = HttpIngestAdapter(
+        lambda _e: None, translators={"x": _echo_translator}, deciders={"x": _decide}
+    )
+    adapter.attach()
+    try:
+        assert _post(adapter.port, {"source": "x", "payload": {"tool": "stop-me"}}) == (
+            200,
+            {"ok": True, "decision": {"block": True}},
+        )
+        assert _post(adapter.port, {"source": "x", "payload": {"tool": "fine"}}) == (
+            200,
+            {"ok": True},
+        )
+    finally:
+        adapter.detach()
+
+
+def test_a_decider_sees_the_events_its_own_request_emitted() -> None:
+    events: list[ToolEvent] = []
+    adapter = HttpIngestAdapter(
+        events.append,
+        translators={"x": _echo_translator},
+        deciders={"x": lambda _payload: {"events_seen": len(events)}},
+    )
+    adapter.attach()
+    try:
+        _, first = _post(adapter.port, {"source": "x", "payload": {"tool": "a"}})
+        _, second = _post(adapter.port, {"source": "x", "payload": {"tool": "b"}})
+    finally:
+        adapter.detach()
+    assert (first["decision"], second["decision"]) == ({"events_seen": 1}, {"events_seen": 2})
+
+
+def test_a_failing_decider_answers_no_decision(caplog: pytest.LogCaptureFixture) -> None:
+    # A forwarder treats a missing decision as "allow": a broken decider must
+    # fail open, not turn into a 500 the forwarder could misread.
+    def _boom(_payload: Any) -> dict[str, Any] | None:
+        raise RuntimeError("decider down")
+
+    events: list[ToolEvent] = []
+    adapter = HttpIngestAdapter(
+        events.append, translators={"x": _echo_translator}, deciders={"x": _boom}
+    )
+    adapter.attach()
+    try:
+        with caplog.at_level(logging.ERROR, logger="pathlayer.adapters.http_ingest"):
+            status, body = _post(adapter.port, {"source": "x", "payload": {"tool": "a"}})
+    finally:
+        adapter.detach()
+    assert (status, body) == (200, {"ok": True})
+    assert [event.tool for event in events] == ["a"]
+    assert any("decider for source='x' failed" in record.message for record in caplog.records)
+
+
 def test_translator_returning_multiple_events_are_all_emitted_in_order() -> None:
     def _fan_out(payload: Any) -> list[ToolEvent]:
         return [ToolEvent(tool=f"tool-{i}") for i in range(payload["n"])]
