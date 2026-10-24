@@ -20,7 +20,11 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer run replaces an older one for the same pull request or branch, but
+  # never on `main`: back-to-back merges from the queue would otherwise cancel
+  # the push run of the earlier commit, and publish.yml needs a successful push
+  # run on the exact commit a release tag points to.
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   test:
