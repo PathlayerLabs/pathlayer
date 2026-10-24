@@ -139,11 +139,12 @@ contract checks the objective, and the coding state preset maps the edit tool's
 no production threshold is changed.
 
 Each scenario runs through a compiled LangGraph `StateGraph` twice: once with
-the contract and state evidence, once with the default configuration (the
+its evidence configured (the contract and the state preset, or the state preset
+alone in the last two scenarios), once with the default configuration (the
 baseline). For each scenario, the output shows the contract status, the last
 proof of progress, the state of the edited file and the intervention:
 
-| Scenario | What the agent does | With contract and state evidence | Baseline |
+| Scenario | What the agent does | With evidence configured | Baseline |
 | --- | --- | --- | --- |
 | `productive` | a wrong edit then the fix, for each function, with a test run after every edit | contract reached, no intervention | no intervention |
 | `stagnant` | the same edit to `add`, over and over | STOP at event 3 (loop): the file is unchanged after the first edit | STOP at event 4 (loop) |
