@@ -30,10 +30,10 @@ not replay that team's system.
 - **The intervention is gradual, not abrupt.** The agent is not cut off right
   away: it is warned, then asked for a progress summary, and stopped only if
   nothing moves.
-- **No false positive.** An agent that really makes progress (same kind of
-  activity, but more and more tests pass) is **never** disturbed: it finishes
-  on its own. Stopping an agent that works well would be worse than having no
-  guardrail at all.
+- **No false positive in the healthy counterexample.** In this demo, the agent
+  that really makes progress (same kind of activity, but more and more tests
+  pass) is not disturbed: it finishes on its own. Stopping an agent that works
+  well would be worse than having no guardrail at all.
 
 Everything runs **locally, with no AI in the detection loop and no network**:
 it is deterministic and reproducible.
