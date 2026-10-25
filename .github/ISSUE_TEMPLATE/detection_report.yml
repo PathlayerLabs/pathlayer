@@ -49,6 +49,8 @@ body:
       label: Configuration
       description: Your `.pathlayer/config.*`, or "defaults".
       render: yaml
+    validations:
+      required: true
   - type: input
     id: version
     attributes:
