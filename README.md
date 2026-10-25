@@ -88,7 +88,7 @@ Once a release is published to PyPI, the package can be installed with
 `pip install pathlayer` (and optional extras such as
 `pathlayer[langgraph]`).
 
-Release CI currently tests Python 3.10, 3.11, and 3.12.
+Release CI currently tests Python 3.10, 3.11, 3.12, 3.13, and 3.14.
 
 ## Quickstart
 

@@ -54,11 +54,26 @@ __all__ = [
     "collect_pytest_evidence",
     "dump_state_evidence_export",
     "load_state_evidence_export",
+    "resolve_non_strict",
     "unavailable_state_evidence",
 ]
 
 FILESYSTEM_COLLECTOR_VERSION = _FILESYSTEM_COLLECTOR_VERSION
 PYTEST_COLLECTOR_VERSION = _PYTEST_COLLECTOR_VERSION
+
+
+def resolve_non_strict(path: Path) -> Path:
+    """``path.resolve(strict=False)`` that raises ``RuntimeError`` on a symlink loop.
+
+    Python 3.12 and earlier raise ``RuntimeError`` for a loop; 3.13 and later
+    return the path with the loop left unresolved. A resolved path otherwise
+    holds no symlink (missing components are not links, dangling links are
+    followed), so a symlink still in the result is a loop, on every version.
+    """
+    resolved = path.resolve(strict=False)
+    if any(part.is_symlink() for part in (resolved, *resolved.parents)):
+        raise RuntimeError(f"symlink loop in {path}")
+    return resolved
 
 
 def unavailable_state_evidence(
