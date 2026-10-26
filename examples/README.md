@@ -130,6 +130,47 @@ Needs the `langgraph` and `yaml` extras:
 python examples/demo_coding_contract.py
 ```
 
+## `demo_coding_alpha.py`
+
+A scripted agent with real tools in disposable workspaces: its edit tool
+rewrites a calculator module and its test tool runs pytest. A compiled coding
+contract checks the objective, and the coding state preset maps the edit tool's
+`file_path` argument to the file it changes. This is not an LLM benchmark, and
+no production threshold is changed.
+
+Each scenario runs through a compiled LangGraph `StateGraph` twice: once with
+its evidence configured (the contract and the state preset, or the state preset
+alone in the last two scenarios), once with the default configuration (the
+baseline). For each scenario, the output shows the contract status, the last
+proof of progress, the state of the edited file and the intervention:
+
+| Scenario | What the agent does | With evidence configured | Baseline |
+| --- | --- | --- | --- |
+| `productive` | a wrong edit then the fix, for each function, with a test run after every edit | contract reached, no intervention | no intervention |
+| `stagnant` | the same edit to `add`, over and over | STOP at event 3 (loop): the file is unchanged after the first edit | STOP at event 4 (loop) |
+| `activity_without_success` | a different wrong edit to `add`, then the tests, eight times | STOP at event 10 (no progress: 10 steps without new progress) | no intervention |
+| `collection_failed` | the same repeated edit, but the validation command does not exist | no contract observed, STOP at event 4 (loop) | STOP at event 4 (loop) |
+| `unavailable` | the same repeated edit, through a nested tool | file state unavailable, STOP at event 9 (loop) | STOP at event 9 (loop) |
+
+Event numbers count captured tool events from 0. In `unavailable`, each call
+produces two events because the edit runs inside a nested tool.
+
+Missing evidence never creates a no-progress signal: in the last two scenarios
+the no-progress confidence stays at 0, and only loop detection stops the agent.
+Every scenario also replays identically from its recorded trace after the
+workspace is deleted. The demo takes about 30 seconds and removes its temporary
+traces on exit.
+
+Needs the `dev`, `langgraph` and `yaml` extras:
+
+```bash
+pip install -e '.[dev,langgraph,yaml]'
+python examples/demo_coding_alpha.py
+```
+
+See [`docs/coding-alpha-demo.md`](../docs/coding-alpha-demo.md) for the design
+and the acceptance tests.
+
 ## `pathlayer.config.yaml`
 
 Reference configuration documenting every tunable threshold with its
