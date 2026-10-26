@@ -74,3 +74,10 @@ COVERAGE_CORE=sysmon pytest --cov-config=.coveragerc.fast --cov-fail-under=0
 This run does not verify the 85% branch-coverage floor and is not the gate:
 plain `pytest`, which the CI `test` job runs, stays mandatory before a pull
 request.
+
+## Reporting problems
+
+Use the issue templates. A false positive or a missed detection has its own
+template: it is the most useful report, because false positives on healthy
+runs are the first risk Pathlayer guards against. Report security problems
+privately, as described in [`SECURITY.md`](SECURITY.md).
