@@ -1,54 +1,54 @@
-# Répétitions au niveau d'une session
+# Session-level repetitions
 
-Activez `pipeline.session_stitching: true` dans la configuration Pathlayer pour reconnaître des actions équivalentes entre plusieurs exécutions liées. La fonction est désactivée par défaut.
+Set `pipeline.session_stitching: true` in the Pathlayer configuration to recognize equivalent actions across several related runs. The feature is disabled by default.
 
-Les seuils et signaux existants sont conservés. Seul le détecteur de retry utilise ce contexte; boucles, budgets, watchdogs, état de politique, absence de progrès, cycle de vie et STOP restent propres à chaque exécution.
+Existing thresholds and signals are unchanged. Only the retry detector uses this context; loops, budgets, watchdogs, policy state, no-progress, lifecycle and STOP remain specific to each run.
 
 ## Capture
 
-OpenClaw utilise uniquement le `ctx.sessionKey` fourni par la source. LangGraph exige un identifiant de session et un identifiant d'exécution logique fournis explicitement par l'appelant. Une identité absente ou ambiguë ne produit aucune conclusion inter-exécutions. Pathlayer ne détecte pas qu'une même identité a été réutilisée pour une autre tâche : il revient à la source ou à l'appelant de fournir une identité propre à la tâche. Un échec identique répété sous une identité réutilisée serait donc joint.
+OpenClaw uses only the `ctx.sessionKey` supplied by the source. LangGraph requires a session identifier and a logical run identifier, both supplied explicitly by the caller. A missing or ambiguous identity produces no cross-run conclusion. Pathlayer does not detect that the same identity was reused for another task: the source or the caller must supply a task-specific identity. An identical failure repeated under a reused identity would therefore be stitched.
 
-Chaque invocation conserve donc son pipeline et son cycle de vie indépendants. La fin d'une exécution ne ferme pas la session source.
+Each invocation therefore keeps its own independent pipeline and lifecycle. The end of a run does not close the source session.
 
-Seuls des échecs identiques sont joints : même action canonique et même erreur. Un appel réussi n'est jamais joint, car un même appel réussi répété d'un tour à l'autre vient le plus souvent de l'utilisateur qui relance (attente d'une CI, question reposée), pas d'un agent bloqué. Une erreur différente ou un succès rompt donc la continuité.
+Only identical failures are stitched: same canonical action and same error. A successful call is never stitched, because the same successful call repeated from one turn to the next most often comes from a user retrying (waiting for CI, asking a question again), not from a stuck agent. A different error or a success therefore breaks continuity.
 
-L'erreur ne suffit pas à elle seule : une observation d'état inchangé et valide, ou une preuve complète de checkpoints encore non satisfaits, est aussi nécessaire pour joindre deux actions. Un état modifié, une preuve partielle ou satisfaite, une preuve invalide ou indisponible, une action différente, une liaison manquante ou un résultat de test rompt la continuité. La sortie de l'outil seule ne constitue jamais une preuve.
+The error alone is not enough: an unchanged and valid state observation, or a complete proof of checkpoints that are still unsatisfied, is also required to stitch two actions. A changed state, a partial or satisfied proof, an invalid or unavailable proof, a different action, a missing link or a test result breaks continuity. Tool output alone is never proof.
 
-## Durabilité et replay
+## Durability and replay
 
-Le journal append-only se trouve dans `<store.path>.sessions`. Chaque capture est isolée par source, session, exécution logique et identifiant d'événement. Les captures identiques sont idempotentes; un payload différent avec la même identité est rejeté.
+The append-only journal lives in `<store.path>.sessions`. Each capture is isolated by source, session, logical run and event identifier. Identical captures are idempotent; a different payload with the same identity is rejected.
 
-Le contexte borné utilisé pour la décision est attaché à l'événement capturé. Le replay reproduit donc la décision sans relire le journal courant ni sonder à nouveau l'espace de travail. Les payloads bruts et les décisions canoniques ne sont pas réécrits. Les empreintes de configuration historiques restent compatibles; l'activation de cette fonction possède une version de sémantique distincte.
+The bounded context used for the decision is attached to the captured event. Replay therefore reproduces the decision without rereading the current journal or probing the workspace again. Raw payloads and canonical decisions are not rewritten. Historical configuration fingerprints remain compatible; enabling this feature has its own semantics version.
 
-Les traces étiquetées de `traces/val7/` portent ce contexte figé, qui ne compte qu'avec l'option activée. Elles sont rejouées avec `session_stitching` par `tests/test_session_stitching.py` et exclues du score agrégé de `python -m pathlayer.validation.replay traces`, qui utilise la configuration par défaut.
+The labeled traces in `traces/val7/` carry this frozen context, which only counts with the option enabled. `tests/test_session_stitching.py` replays them with `session_stitching`, and they are excluded from the aggregate score of `python -m pathlayer.validation.replay traces`, which uses the default configuration.
 
-Une observation manquée insère une rupture de fenêtre dans le journal : aucune répétition n'est jointe par-dessus, et la continuité reprend avec les observations capturées ensuite. Trois cas produisent une rupture : une erreur de capture, une exécution OpenClaw interrompue (son suffixe non observé est inconnu) et un changement de configuration (les observations ne sont plus comparables, y compris lors d'un retour à l'ancienne configuration). La session n'est jamais désactivée définitivement et il n'est pas nécessaire de changer d'identité de session.
+A missed observation inserts a window break into the journal: no repetition is stitched across it, and continuity resumes with the observations captured afterwards. Three cases produce a break: a capture error, an interrupted OpenClaw run (its unobserved suffix is unknown) and a configuration change (observations are no longer comparable, including when switching back to the previous configuration). The session is never disabled permanently, and there is no need to change the session identity.
 
-Si le journal est inaccessible, la rupture est conservée dans un marqueur synchronisé sur disque, un fichier par observation manquée, puis inscrite dans le journal avant la capture suivante de cette session. Le traitement local continue normalement. Si même le marqueur ne peut pas être écrit, l'erreur est propagée plutôt que de prétendre à une continuité qui survivrait à un redémarrage. Une série d'échecs de capture ne produit qu'un avertissement, jusqu'à la prochaine capture réussie.
+If the journal is unavailable, the break is kept in a marker synced to disk, one file per missed observation, then written to the journal before that session's next capture. Local processing continues normally. If even the marker cannot be written, the error is propagated rather than claiming a continuity that would survive a restart. A series of capture failures produces a single warning, until the next successful capture.
 
-## Changements actifs même sans l'option
+## Changes active even without the option
 
-Trois changements de capture livrés avec cette évolution s'appliquent même quand `session_stitching` est désactivé :
+Three capture changes shipped with this feature apply even when `session_stitching` is disabled:
 
-- `LangGraphAdapter.from_config` branche le producteur de preuve ANC-4 (`producer_from_config`) dès que `detectors.progress_proof` est activé : la sonde s'exécute alors après chaque appel d'outil. Pour s'en passer, construisez l'adaptateur directement sans `progress_proof`.
-- Si ce producteur lève une exception côté LangGraph, l'événement porte `progress_proof_unobserved: {"reason": "producer_failed"}`. Ce marqueur sort volontairement du schéma fermé ANC-4 : `ProofProgressAnchor` l'ignore et se comporte comme sans marqueur, mais sa présence suffit à empêcher toute jonction inter-exécutions.
-- Le manifeste OpenClaw conserve la `session_key` fixée à la création du run ; le hook de démarrage ne la réécrit plus avec son propre `ctx.sessionKey`.
+- `LangGraphAdapter.from_config` wires the coding-contract progress-proof producer (`producer_from_config`) as soon as `detectors.progress_proof` is enabled: the probe then runs after every tool call. To do without it, construct the adapter directly, without `progress_proof`.
+- If that producer raises an exception on the LangGraph side, the event carries `progress_proof_unobserved: {"reason": "producer_failed"}`. This marker deliberately falls outside the closed progress-proof schema: `ProofProgressAnchor` ignores it and behaves as if there were no marker, but its presence is enough to prevent any cross-run stitching.
+- The OpenClaw manifest keeps the `session_key` set when the run was created; the start hook no longer overwrites it with its own `ctx.sessionKey`.
 
-## Rapport en lecture seule
+## Read-only report
 
 ```bash
-python -m pathlayer.session --source openclaw --session-key ma-session \
-  runs/tour-un/trace.json runs/tour-deux/trace.json runs/tour-trois/trace.json
+python -m pathlayer.session --source openclaw --session-key my-session \
+  runs/turn-one/trace.json runs/turn-two/trace.json runs/turn-three/trace.json
 ```
 
-Ajoutez `--json` pour obtenir une sortie structurée et `--config` pour utiliser des masques de canonicalisation personnalisés. Le même regroupement est disponible avec `SessionJournal.report()` et `project_session(...)`.
+Add `--json` for structured output and `--config` to use custom canonicalization masks. The same grouping is available through `SessionJournal.report()` and `project_session(...)`.
 
-Le rapport décrit un échec répété comparable observé: identité canonique, outil borné, nombre d'occurrences, identifiants de runs et index d'observation. Il renvoie vers les événements et décisions propres à chaque run, sans créer de nouvelle alerte ni inventer l'attribution d'un détecteur.
+The report describes a comparable repeated failure that was observed: canonical identity, bounded tool, number of occurrences, run identifiers and observation index. It points to each run's own events and decisions, without raising a new alert or inventing a detector attribution.
 
-## Limites
+## Limits
 
-Cette version joint uniquement des échecs consécutifs et équivalents, selon la canonicalisation existante. Une répétition réussie entre plusieurs tours n'est jamais signalée au niveau de la session, même si elle traduit une vraie boucle; la détection propre à chaque exécution reste inchangée. Elle ne joint pas encore les cycles alternant plusieurs outils et ne transporte pas l'état général d'absence de progrès entre les runs. Une preuve inconnue abstient le signal inter-session; la détection propre à l'exécution continue normalement.
+This version stitches only consecutive, equivalent failures, according to the existing canonicalization. A successful repetition across several turns is never reported at the session level, even if it reflects a real loop; per-run detection is unchanged. It does not yet stitch cycles that alternate between several tools, and it does not carry the general no-progress state across runs. An unknown proof makes the cross-session signal abstain; per-run detection continues normally.
 
-Le contexte est limité à 64 observations et 128 KiB d'événements encodés. Une limite dépassée crée une rupture de fenêtre. Ce sont des bornes de stockage et de replay, pas des seuils calibrés sur une nouvelle métrique.
+The context is limited to 64 observations and 128 KiB of encoded events. Exceeding a limit creates a window break. These are storage and replay bounds, not thresholds calibrated on a new metric.
 
-Le journal contient des données de traces sensibles et doit recevoir les mêmes protections d'accès que les traces existantes. La rétention et la compaction restent hors du périmètre de cette évolution.
+The journal contains sensitive trace data and must receive the same access protections as existing traces. Retention and compaction are outside the scope of this feature.

@@ -28,27 +28,36 @@ checked test results to distinguish productive retries from repeated activity
 that does not advance a task.
 
 The [coding contract demonstration](examples/demo_coding_contract.py) runs a
-scripted LangGraph coding agent with real file edits and test checks. It
-compares execution with and without an external progress contract:
+scripted LangGraph coding agent with real file edits and real pytest runs. Its
+tools return plain text, as a shell tool would, so without help Pathlayer
+cannot tell a productive run from a stuck one. A five-line contract declares
+what progress means: the calculator tests improve. The demo runs six scenarios,
+fixed in advance, with and without that contract:
 
-| Scenario | What the demo tests |
-| --- | --- |
-| Productive retries | Repeated edits and tests with measurable improvements should continue. |
-| Stagnation | Edits that do not improve tests can trigger a STOP. |
-| Unavailable evidence | Missing proof is treated as an observation gap, not as failure. |
-| Deterministic replay | Recorded events are replayed and compared with live decisions. |
+| Scenario | With the contract | Without it |
+| --- | --- | --- |
+| Productive: a wrong attempt, then a fix, per function | no action (16 calls) | no action (16 calls) |
+| Stagnant: a different wrong edit every time | **STOP at call 11** | no action (16 calls) |
+| Oscillating: fixes `add`, breaks it, fixes it again | **STOP at call 11** | no action (16 calls) |
+| Objective reached, then unrelated notes | no action (16 calls) | no action (16 calls) |
+| Probe cannot run: no proof at all | no action (16 calls), 16 warnings | no action (16 calls) |
+| Module unimportable for 10 calls mid-refactor | no action (22 calls), 10 gaps | no action (22 calls) |
 
-Run it from a source checkout using the [installation steps below](#install):
+The contract stops the two stuck runs and leaves the four others alone; without
+it, no run is stopped. Missing evidence is an observation gap with a warning,
+never a reason to stop. Every scenario also replays to the same decisions from
+its recorded trace. The table condenses what the demo prints, and
+`tests/test_anc4_coding_demo.py` asserts these numbers.
+
+Run it from a source checkout using the [installation steps below](#install).
+It takes about 80 seconds, because the contract's probe runs the real tests
+after every tool call:
 
 ```bash
 python examples/demo_coding_contract.py
 ```
 
-The output compares **with contract** and **without contract** for each
-scenario, including STOP decisions, evidence gaps, and replay agreement.
-The demo runs a reproducible coding-agent workflow through LangGraph, using real
-file operations and test results to validate Pathlayer's detection, intervention,
-and replay capabilities. It runs entirely locally, with no LLM API or network dependency.
+Everything runs locally, with no LLM API or network dependency.
 
 For a simpler loop example, see
 [`demo_loop.py`](examples/demo_loop.py). For graded
@@ -179,7 +188,7 @@ detectors:
 Captured positive costs always win over fallback estimates. Cost accounting
 uses the same convention throughout Pathlayer: `cost_usd > 0` is a captured,
 priced event; `cost_usd == 0` means that no captured price is available and may
-therefore use a configured estimate when BUD is enabled.
+therefore use a configured estimate when the budget detector is enabled.
 
 Duration enforcement is also opt-in and requires the live run-aware sink:
 
@@ -238,8 +247,8 @@ pathlayer-scaffold-proof \
 The command writes a validated `proof_spec.json`, an intentionally inert
 `probe.py`, and a local `README.md` with the opt-in configuration. It refuses
 to overwrite any of those files. Implement the probe against state outside the
-observed agent's control; until then it raises `NotImplementedError`, ANC-2
-emits no proof and detection stays inert.
+observed agent's control; until then it raises `NotImplementedError`, the
+progress-proof producer emits no proof and detection stays inert.
 
 Keep the manifest, probe code and state it reads outside the observed agent's
 write boundary, or enforce equivalent integration controls. An agent that can
@@ -590,12 +599,12 @@ A configured `build.command` runs with the workspace as its working directory,
 and the observed agent can write there. Name the executable by absolute path,
 or keep it outside the agent's reach: an agent that can plant a binary the
 command resolves to can make Pathlayer run it. This is the same trust boundary
-an ANC-4 probe has.
+a coding-contract probe has.
 
 Two limits worth stating plainly. An observed effect is not success: the anchor
-that feeds `no_progress` stops measuring as soon as test results or ANC-4
-proofs are present, so an effect can never keep a stalled objective quiet.
-And novelty is gameable -- an agent writing fresh junk on every call reaches new
+that feeds `no_progress` stops measuring as soon as test results or
+coding-contract proofs are present, so an effect can never keep a stalled
+objective quiet. And novelty is gameable -- an agent writing fresh junk on every call reaches new
 states -- so pair the preset with a contract when the objective can be stated.
 
 The fragment assumes `graph` and `initial_state` already exist. For WARN to
@@ -637,18 +646,20 @@ validation gate documented in [`CONTRIBUTING.md`](CONTRIBUTING.md#validation).
 - [`examples/demo_no_progress.py`](examples/demo_no_progress.py): a real,
   deterministic LangGraph run that receives WARN, SUMMARIZE and STOP while
   repetition detectors remain silent.
-- [`docs/demo-2.md`](docs/demo-2.md): a non-technical walkthrough of the
-  no-progress demo and what it proves.
+- [`docs/no-progress-demo.md`](docs/no-progress-demo.md): a non-technical
+  walkthrough of the no-progress demo and what it proves.
 - [`examples/demo_coding_contract.py`](examples/demo_coding_contract.py): a
   five-line coding contract on a real LangGraph agent whose tools return plain
   text -- productive repetition left alone, stagnation stopped.
+- [`docs/coding-alpha-demo.md`](docs/coding-alpha-demo.md): a coding contract
+  combined with the coding state preset, with a per-scenario explanation.
 
 The no-progress demo relies on deterministic ground truth from tests. Detecting
 slow burns with no tests, exit codes, code evidence or other objective signal is
 outside the zero-config V1 claim. An operator-supplied progress-proof contract
-can cover such a run conditionally; the sealed ANC-3 corpus measurement and its
+can cover such a run conditionally; the sealed corpus measurement and its
 remaining short-trace limitation are documented in
-[`docs/anc-3-corpus-measurement.md`](docs/anc-3-corpus-measurement.md).
+[`docs/progress-proof-corpus-measurement.md`](docs/progress-proof-corpus-measurement.md).
 
 ## License
 

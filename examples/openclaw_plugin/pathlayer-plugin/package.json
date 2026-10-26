@@ -2,7 +2,7 @@
   "name": "pathlayer-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "Reference OpenClaw plugin (ADP-1): forwards after_tool_call events to a local Pathlayer instance.",
+  "description": "Reference OpenClaw plugin: forwards after_tool_call events to a local Pathlayer instance.",
   "type": "module",
   "openclaw": {
     "extensions": ["./index.js"]

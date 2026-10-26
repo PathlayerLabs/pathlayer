@@ -1,22 +1,22 @@
-"""Ecouteur pret a l'emploi pour valider l'adapter OpenClaw (ADP-1) en vrai.
+"""Ready-to-run listener to try the OpenClaw adapter against a real gateway.
 
-Ce script ne demande AUCUNE ligne de Python a ecrire ou modifier : il demarre
-`OpenClawAdapter`, affiche le port sur lequel il ecoute, puis imprime chaque
-evenement recu en direct, au fur et a mesure qu'OpenClaw les envoie via le
-plugin de reference (`pathlayer-plugin/`, dans ce meme dossier).
+This script needs NO Python to be written or changed: it starts
+`OpenClawAdapter`, prints the port it listens on, then prints each event live,
+as OpenClaw sends them through the reference plugin (`pathlayer-plugin/`, in
+this same folder).
 
-A lancer sur la MEME machine que le gateway OpenClaw (voir README.md de ce
-dossier pour le runbook complet) :
+Run it on the SAME machine as the OpenClaw gateway (see this folder's
+README.md for the installation steps):
 
     python examples/openclaw_plugin/listen.py
 
-Pour qu'il survive a une deconnexion SSH, le lancer avec nohup :
+To keep it running after an SSH disconnection, start it with nohup:
 
     nohup python examples/openclaw_plugin/listen.py > pathlayer.log 2>&1 &
     tail -f pathlayer.log
 
-Arret : Ctrl+C si lance au premier plan, ou `pkill -f listen.py` si lance avec
-nohup en arriere-plan.
+Stop: Ctrl+C in the foreground, or `pkill -f listen.py` when started in the
+background with nohup.
 """
 
 from __future__ import annotations
@@ -30,20 +30,20 @@ from datetime import datetime, timezone
 from pathlayer.adapters.openclaw import DEFAULT_PORT, OpenClawAdapter
 from pathlayer.events import ToolEvent
 
-# Permet de changer de port sans toucher au code, si 8787 est deja pris sur la
-# VM -- dans ce cas, penser a mettre a jour PATHLAYER_URL du cote du plugin
-# JavaScript (voir pathlayer-plugin/index.js) avec le meme numero.
+# Changes the port without touching the code, if 8787 is already taken on the
+# host -- then set the same port in PATHLAYER_URL on the JavaScript plugin side
+# (see pathlayer-plugin/index.js).
 PORT = int(os.environ.get("PATHLAYER_PORT", DEFAULT_PORT))
 
 
 def _print_event(event: ToolEvent) -> None:
     now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    print(f"[{now}] outil = {event.tool!r}")
+    print(f"[{now}] tool   = {event.tool!r}")
     print(f"           args   = {event.args}")
     if event.result is not None:
         print(f"           result = {event.result!r}")
     if event.metadata.get("error") is not None:
-        print(f"           ERREUR = {event.metadata['error']!r}")
+        print(f"           ERROR  = {event.metadata['error']!r}")
     print(flush=True)
 
 
@@ -52,18 +52,18 @@ def main() -> None:
     adapter.attach()
 
     print("=" * 60)
-    print("Ecouteur Pathlayer pour OpenClaw (ADP-1) -- pret.")
+    print("Pathlayer listener for OpenClaw -- ready.")
     print("=" * 60)
-    print(f"En ecoute sur : http://127.0.0.1:{adapter.port}/ingest")
-    print("Le plugin OpenClaw doit pointer vers cette meme URL (voir")
-    print("pathlayer-plugin/index.js : PATHLAYER_URL / PATHLAYER_PORT).")
+    print(f"Listening on: http://127.0.0.1:{adapter.port}/ingest")
+    print("The OpenClaw plugin must post to this same URL: if you changed the")
+    print("port, set PATHLAYER_URL for the gateway (see pathlayer-plugin/index.js).")
     print()
-    print("Demande maintenant une tache simple a OpenClaw (ex: lire un")
-    print("fichier) et regarde les evenements apparaitre ci-dessous.")
-    print("Ctrl+C pour arreter.\n", flush=True)
+    print("Now give OpenClaw a simple task (e.g. read a file) and")
+    print("watch the events appear below.")
+    print("Ctrl+C to stop.\n", flush=True)
 
     def _stop(_signum: int, _frame: types.FrameType | None) -> None:
-        print("\nArret de l'ecouteur.")
+        print("\nListener stopped.")
         adapter.detach()
         sys.exit(0)
 

@@ -2,7 +2,7 @@
 
 Labeled recordings of agent runs, used to validate the detectors offline (no
 live agent, no LLM). Each file is one run. The format and the loader/writer live
-in [`pathlayer/validation/traces.py`](../pathlayer/validation/traces.py) (VAL-1).
+in [`pathlayer/validation/traces.py`](../pathlayer/validation/traces.py).
 
 ## On-disk format
 
@@ -37,7 +37,7 @@ field is optional and falls back to the `ToolEvent` default when absent:
 | `result` | `null` | Raw result. |
 | `cost_usd` | `0.0` | Cost of the call. |
 | `ts` | `0.0` | Event-sourced timestamp (the detection loop never reads the wall clock). |
-| `kind` | `"tool_call"` | Includes `tool_call`, resource events, and RES-2 `run_start`/`run_timeout`. |
+| `kind` | `"tool_call"` | Includes `tool_call`, resource events, and the duration watchdog's `run_start`/`run_timeout`. |
 | `run_id` | `null` | Run identifier (cross-run state). |
 | `metadata` | `{}` | Free-form per-event data. |
 
@@ -47,14 +47,15 @@ Fields left at their default are omitted on write, so simple traces stay terse.
 
 - **`loop`** - the agent replays the same action(s); the stream compresses trivially.
 - **`no_progress`** - each step looks different but nothing actually advances (the
-  47k$-style slow burn).
+  "busy but stuck" slow burn shown in [`docs/no-progress-demo.md`](../docs/no-progress-demo.md)).
 - **`healthy`** - a normal run that must **not** trigger any intervention (guards
   against false positives).
 - **`unknown`** - neutral, non-curated label: the run's class was never
-  established. Live recordings (ADP-2) use it rather than claiming `healthy`
-  just because the agent reached the end. Such traces never belong to the golden
-  set; VAL-3 may replay them for inspection but excludes them from confusion
-  metrics. The three labels above are the curated classes.
+  established. Live recordings (such as the OpenClaw recorder's) use it rather
+  than claiming `healthy` just because the agent reached the end. Such traces
+  never belong to the golden set; the replay harness may replay them for
+  inspection but excludes them from confusion metrics. The three labels above
+  are the curated classes.
 
 ## Loading / writing
 
@@ -69,7 +70,7 @@ dump_trace(t, "traces/copy.json")            # round-trips: load(dump(t)) == t
 
 - The three minimal **format examples** stay flat at the root of `traces/`
   (`loop_trivial.json`, `no_progress_trivial.json`, `healthy_trivial.json`).
-- The curated **golden set** (VAL-2) lives in one subfolder per class:
+- The curated **golden set** lives in one subfolder per class:
   `traces/loop/`, `traces/no_progress/`, `traces/healthy/`.
 
 Tests discover **every** `*.json` under `traces/` recursively, so the folder a
@@ -79,8 +80,10 @@ each well-formed and described).
 
 ## Current corpus
 
-Curated golden set: VAL-2. Programmatically generated/mutated traces are
-VAL-4/VAL-5 (later).
+The tables below describe the curated golden set. Mutated variants with
+machine-derived expectations are generated in memory by
+[`pathlayer/validation/mutations.py`](../pathlayer/validation/mutations.py)
+rather than stored here.
 
 ### `loop`
 
@@ -97,13 +100,13 @@ VAL-4/VAL-5 (later).
 | File | What makes it no-progress |
 | --- | --- |
 | `no_progress_trivial.json` | Re-analyze / re-plan, distinct each step, never edits. |
-| `no_progress/slow_burn_47k.json` | The 47k$-style analyzer/verifier debate: distinct text + cost each turn, zero real progress. |
+| `no_progress/slow_burn_47k.json` | An analyzer/verifier debate modeled on the publicly reported $47k incident: distinct text + cost each turn, zero real progress. |
 | `no_progress/replan_churn.json` | Plan rewritten over and over, never executed. |
 | `no_progress/failing_edit_churn.json` | Genuinely different patches each turn, but the test result never moves off `3 failed`. |
 | `no_progress/research_rabbit_hole.json` | Endless distinct searches/reads, no change applied. |
-| `no_progress/rich_flat_red.json` | NOP-5: stable per-test debts remain red while activity continues. |
-| `no_progress/rich_oscillation.json` | NOP-5: one debt oscillates after its first repair; repeated recovery earns no new credit. |
-| `no_progress/rich_deleted_failure.json` | NOP-5: a failing test disappears; absence is not credited as a repair. |
+| `no_progress/rich_flat_red.json` | Rich test results: stable per-test debts remain red while activity continues. |
+| `no_progress/rich_oscillation.json` | Rich test results: one debt oscillates after its first repair; repeated recovery earns no new credit. |
+| `no_progress/rich_deleted_failure.json` | Rich test results: a failing test disappears; absence is not credited as a repair. |
 
 ### `healthy` (false-positive boundary)
 
@@ -114,21 +117,21 @@ VAL-4/VAL-5 (later).
 | `healthy/same_tool_different_args.json` | Same tool, genuinely different files (legit exploration). |
 | `healthy/expensive_but_legitimate.json` | High cumulative cost but real progress; terminates. |
 | `healthy/varied_long_run.json` | Long but progressing run; length alone is not a fault. |
-| `healthy/multi_file_refactor.json` | LOOP-2 adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
-| `healthy/repo_exploration.json` | LOOP-2 adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
-| `healthy/repeated_checkpoint_pair.json` | LOOP-2 known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
-| `healthy/rich_fail_to_pass_progress.json` | NOP-5: stable failing test IDs convert to passed often enough to reset patience. |
-| `healthy/rich_late_test_progress.json` | NOP-5: work begins before test evidence exists, then rich outcomes show real repairs. |
-| `healthy/rich_new_target_progress.json` | NOP-5: a new red target progresses locally without competing with an older target's absolute score. |
-| `healthy/rich_legacy_revert_recovers.json` | NOP-5 follow-up: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
+| `healthy/multi_file_refactor.json` | N-gram loop adversarial: same read/edit/test shape repeats, but each occurrence targets a genuinely different file -- no n-gram of tokens ever recurs. |
+| `healthy/repo_exploration.json` | N-gram loop adversarial: alternating search/read with a distinct query and file every time -- similar-looking but never a recurring n-gram. |
+| `healthy/repeated_checkpoint_pair.json` | N-gram loop known-limitation fixture: real work (edit) every cycle, but a fixed routine checkpoint pair (lint, run_tests) recurs every time -- raw LoopDetector confidence is *not* zero (pure repetition-frequency cannot distinguish this from an idle interruption), but capped + suppressed by real test progress, so the default pipeline never STOPs on it. |
+| `healthy/rich_fail_to_pass_progress.json` | Rich test results: stable failing test IDs convert to passed often enough to reset patience. |
+| `healthy/rich_late_test_progress.json` | Rich test results: work begins before test evidence exists, then rich outcomes show real repairs. |
+| `healthy/rich_new_target_progress.json` | Rich test results: a new red target progresses locally without competing with an older target's absolute score. |
+| `healthy/rich_legacy_revert_recovers.json` | Rich test results: the producer drops per-test outcomes for a few runs (guarded reversion reverts the target to aggregate tracking instead of staying wedged), then resumes rich mode and ends fully green. |
 
 ### `anc4/` (coding-contract probe outage)
 
 | File | Why it must NOT fire |
 | --- | --- |
-| `anc4/probe_outage_mid_run.json` | ANC-4: a productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the ANC-3 benchmark seals. |
+| `anc4/probe_outage_mid_run.json` | A productive agent under a compiled coding contract breaks its module's syntax for ten consecutive calls mid-refactor; the probe observes the file but no test, so each call carries a `progress_proof_unobserved` marker. With `ProofProgressAnchor` those calls are gaps and the run completes; with the markers stripped the frozen level STOPs at call 17 (`tests/test_anc4_outage_trace.py`). Kept outside `healthy/`, whose exact contents the progress-proof corpus measurement seals. |
 
-## Optional rich test-result contract (NOP-5)
+## Optional rich test-result contract
 
 Aggregate ``passed``/``failed`` counts remain supported unchanged. A test tool
 can additionally emit stable per-test outcomes when it can guarantee identity
@@ -188,21 +191,22 @@ None of the above is silent. A malformed payload, a capacity cap reached, a
 guarded-reversion streak progressing or committing are all reported as
 human-readable notes in ``Signal.diagnostics`` (see
 [`pathlayer/detectors/base.py`](../pathlayer/detectors/base.py)), surfaced by
-the existing OBS-1 structured logging (``pathlayer/observability.py``) on
+the existing structured logging (``pathlayer/observability.py``) on
 every tick -- including the common silent (confidence 0) one, so an operator
 can see a degraded producer without the run first having to look stalled.
 Diagnostics never feed arbitration; they are purely observational.
 
 These fixtures are synthetic boundary cases, not production recordings. Runs
-without any deterministic ground truth remain outside NOP-5 and are tracked by
-ANC-1.
+without any deterministic ground truth remain outside this contract; an
+operator-supplied progress-proof contract can cover them conditionally (next
+section).
 
-## ANC-3 progress-proof measurement
+## Progress-proof corpus measurement
 
-ANC-3 replays the 20 healthy and 8 no-progress traces twice: unchanged under
+This measurement replays the 20 healthy and 8 no-progress traces twice: unchanged under
 zero-config, then on freshly loaded copies enriched by an external deterministic
 producer following explicit per-trace checkpoint schedules. The source traces
 remain byte-for-byte unchanged. See
-[`docs/anc-3-corpus-measurement.md`](../docs/anc-3-corpus-measurement.md) for the
+[`docs/progress-proof-corpus-measurement.md`](../docs/progress-proof-corpus-measurement.md) for the
 reproduction command, before/after metrics, per-trace outcomes and the one
 documented short-trace false negative.
