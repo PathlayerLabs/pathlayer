@@ -12,10 +12,12 @@ Three properties this module owes its callers, all of them load-bearing:
   order is not guaranteed. It is appended to the run's ``late.jsonl`` annex and
   the derived ``report.json`` rebuilt; it never reaches a detector, and every
   other file of the run stays byte-for-byte as it was.
-- **A passive STOP ends analysis, not observation.** Pathlayer is a passive
-  observer of OpenClaw (V1 never blocks a tool call), so events keep arriving
-  after a STOP. They stay normalized, ordered and written to ``trace.json``;
-  only the detectors and the arbitration stop running.
+- **A STOP ends analysis, not observation.** By default Pathlayer is a passive
+  observer of OpenClaw; with ``enforce=True`` a STOP also blocks the run's
+  later tool calls (see :meth:`OpenClawRunRecorder.tool_call_decision`). Either
+  way events keep arriving after a STOP -- blocked calls included. They stay
+  normalized, ordered and written to ``trace.json``; only the detectors and the
+  arbitration stop running.
 - **A live recording has no inferred ground truth.** Reaching ``agent_end`` or
   receiving a Pathlayer decision describes the observed outcome, not whether
   the run was truly healthy or pathological. The trace therefore stays at the
@@ -250,6 +252,7 @@ class OpenClawRunRecorder:
         monotonic: Callable[[], float] = time.monotonic,
         scheduler: Scheduler | None = None,
         sample_rss: Callable[[], int | None] = sample_rss_bytes,
+        enforce: bool = False,
     ) -> None:
         """Record runs under ``runs_root``, one pipeline per ``ctx.runId``.
 
@@ -257,6 +260,10 @@ class OpenClawRunRecorder:
         :func:`~pathlayer.config.load_config`); omitting it keeps the built-in
         defaults. ``pipeline_factory`` stays available for tests and custom
         wiring and is mutually exclusive with ``config``.
+
+        ``enforce`` makes a STOP block the run's later tool calls through the
+        plugin's ``before_tool_call`` query (:meth:`tool_call_decision`). It is
+        off by default: the recorder then never blocks anything.
 
         An invalid configuration raises :class:`~pathlayer.config.ConfigError`
         here, at construction: per-run pipelines are built lazily, and the HTTP
@@ -319,6 +326,7 @@ class OpenClawRunRecorder:
         self._monotonic = monotonic
         self._scheduler = scheduler
         self._sample_rss = sample_rss
+        self._enforce = enforce
         self._lock = threading.Lock()
         self._runs: dict[str, _ActiveRun] = {}
         self._orphan_counters: dict[str, int] = {}
@@ -506,6 +514,10 @@ class OpenClawRunRecorder:
         if payload.get("hook") == _PROOF_HOOK:
             raise ValueError(f"OpenClaw hook {_PROOF_HOOK!r} is reserved for Pathlayer")
         hook_kind = classify_openclaw_hook(payload)
+        if hook_kind is OpenClawHookKind.TOOL_DECISION:
+            # A decision query (see tool_call_decision), not an observation:
+            # never journaled, never analyzed, and it never creates a run.
+            return
         run_id = extract_openclaw_run_id(payload)
         if run_id is None:
             run_id = self._orphan_run_id(payload)
@@ -556,8 +568,57 @@ class OpenClawRunRecorder:
             else:
                 active.directory.update_manifest(event_count=active.sequence)
 
+    def tool_call_decision(self, payload: Any) -> dict[str, Any] | None:
+        """Answer a ``before_tool_call`` query: block the tool calls of a stopped run.
+
+        Without ``enforce`` the answer is always ``None``: OpenClaw runs every
+        tool call. With it, every tool call of a run whose pipeline has stopped
+        gets ``{"block": True, "blockReason": ...}``; any other run, an unknown
+        run, a finished run and any other hook get ``None``.
+
+        The query reads the run's pipeline state and writes nothing: no raw
+        journal line, no decision, no new run, so recordings and their replay
+        are the same with or without enforcement. A STOP is enforced from the
+        first query that arrives after the event that triggered it has been
+        processed; the reference plugin waits (for a bounded time) for its
+        previous forward of the run before asking.
+        """
+        if (
+            not self._enforce
+            or classify_openclaw_hook(payload) is not OpenClawHookKind.TOOL_DECISION
+        ):
+            return None
+        run_id = extract_openclaw_run_id(payload)
+        if run_id is None:
+            return None
+        with self._lock:
+            active = self._runs.get(run_id)
+        if active is None:
+            return None
+        with active.lock:
+            if active.completed or not active.pipeline.stopped:
+                return None
+            post_mortem = active.pipeline.post_mortem
+            reason = post_mortem.reason if post_mortem is not None else "stop"
+        logger.info(
+            "blocking tool call %r of stopped OpenClaw run %r (%s)",
+            _hook_part(payload, "event").get("toolName"),
+            run_id,
+            reason,
+        )
+        return {
+            "block": True,
+            "blockReason": (
+                f"Pathlayer stopped this run ({reason}). Do not call more tools: "
+                "report your progress and what blocked you."
+            ),
+        }
+
     def attach_http(self, *, host: str = "127.0.0.1", port: int = 0) -> HttpIngestAdapter:
-        """Start loopback ingest that routes payloads to this recorder."""
+        """Start loopback ingest that routes payloads to this recorder.
+
+        Responses carry :meth:`tool_call_decision`'s answer under ``decision``.
+        """
 
         def _ingest_translator(payload: Any) -> list[ToolEvent]:
             self.process_payload(payload)
@@ -568,6 +629,7 @@ class OpenClawRunRecorder:
             translators={SOURCE: _ingest_translator},
             host=host,
             port=port,
+            deciders={SOURCE: self.tool_call_decision},
         )
         adapter.attach()
         return adapter

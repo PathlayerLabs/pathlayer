@@ -12,12 +12,14 @@ reviewed and unit-tested without needing a live OpenClaw instance. See
 ``examples/openclaw_plugin/`` for the reference plugin and the runbook used to
 validate it against a real OpenClaw instance.
 
-Scope (V1): ``after_tool_call`` is translated into a tool event (observation-only,
-matches the "passive observer" contract -- V1 never blocks or rewrites a tool
-call). ``llm_output`` is translated separately only when it contains a model and
-a non-negative total-token counter. When the provider does not expose the
-input/output split, the configured input ratio yields a clearly labelled first
-cost approximation; it is not an invoice-grade measurement. Lifecycle hooks
+Scope: ``after_tool_call`` is translated into a tool event. This adapter only
+observes: it never blocks or rewrites a tool call. Blocking the tool calls of
+a stopped run is an opt-in decision of the run recorder (see
+``OpenClawRunRecorder.tool_call_decision``). ``llm_output`` is translated
+separately only when it contains a model and a non-negative total-token counter.
+When the provider does not expose the input/output split, the configured input
+ratio yields a clearly labelled first cost approximation; it is not an
+invoice-grade measurement. Lifecycle hooks
 (``before_agent_run``, ``agent_end``) are handled by
 :mod:`pathlayer.adapters.openclaw_recorder`. Other hook names are ignored rather
 than raising.
