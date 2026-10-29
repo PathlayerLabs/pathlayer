@@ -76,7 +76,7 @@ How to read it:
 
 ## How to run it yourself
 
-You need Python 3.10 or later.
+You need Python 3.11 or later.
 
 ```bash
 # 1. Get the project

@@ -37,7 +37,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -703,7 +703,7 @@ def _select_runs(
             raise LookupError("no recorded run found")
         return [runs[-1]]
     if today:
-        stamp = datetime.now(timezone.utc).date().isoformat()
+        stamp = datetime.now(UTC).date().isoformat()
         return [run for run in runs if _sort_key(run)[0].startswith(stamp)]
     return runs
 

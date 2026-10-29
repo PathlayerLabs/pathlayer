@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import tarfile
+import tomllib
 import zipfile
 from collections import Counter
 from collections.abc import Iterable
@@ -14,11 +15,6 @@ from typing import Any
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - covered by the Python 3.10 CI job
-    import tomli as tomllib
 
 _SDIST_ALLOWED_ROOTS = {
     ".gitignore",

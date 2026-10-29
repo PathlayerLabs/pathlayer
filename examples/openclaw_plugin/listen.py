@@ -25,7 +25,7 @@ import os
 import signal
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pathlayer.adapters.openclaw import DEFAULT_PORT, OpenClawAdapter
 from pathlayer.events import ToolEvent
@@ -37,7 +37,7 @@ PORT = int(os.environ.get("PATHLAYER_PORT", DEFAULT_PORT))
 
 
 def _print_event(event: ToolEvent) -> None:
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now = datetime.now(UTC).strftime("%H:%M:%S")
     print(f"[{now}] tool   = {event.tool!r}")
     print(f"           args   = {event.args}")
     if event.result is not None:

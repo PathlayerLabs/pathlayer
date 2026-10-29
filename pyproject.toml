@@ -3,7 +3,7 @@ name = "pathlayer"
 version = "0.1.0"
 description = "Runtime guardrail layer for AI agents: detect loops, retries, cost explosions and lack of progress, and intervene during execution."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Pathlayer" }]
@@ -13,7 +13,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -41,7 +40,7 @@ pathlayer-replay = "pathlayer.validation.replay:main"
 # (pathlayer.policies.langgraph_actuator, ACT-0). Not a runtime dependency of
 # the core pipeline. Upper bounds are pinned because CI runs
 # `pip install -e ".[dev]"` without a lockfile (see .github/workflows/ci.yml)
-# across the 3.10-3.14 matrix -- an open floor would break on a breaking
+# across the 3.11-3.14 matrix -- an open floor would break on a breaking
 # major release. Both packages declare requires-python >=3.10.
 # Floor raised to 1.2 (ACT-0): langgraph.runtime.RunControl / request_drain /
 # langgraph.errors.GraphDrained (cooperative graceful shutdown) only exist
@@ -66,7 +65,6 @@ dev = [
     "mypy>=1.11",
     "types-PyYAML>=6",
     "packaging>=24",
-    "tomli>=2; python_version < '3.11'",
     "pre-commit>=3.8",
     # Bring in the LangGraph adapter deps so the smoke test runs in dev/CI.
     "pathlayer[langgraph]",
@@ -88,12 +86,16 @@ packages = ["pathlayer"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear,
 # SIM = flake8-simplify, C4 = comprehensions, RUF = ruff-specific.
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+# UP042 would turn the (str, Enum) classes into StrEnum, which changes what
+# str() and format() return for their members: event and decision encodings
+# must not change with a lint target.
+ignore = ["UP042"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -112,7 +114,7 @@ exclude_lines = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 packages = ["pathlayer"]
 strict = true
 warn_unused_ignores = true

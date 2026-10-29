@@ -68,7 +68,7 @@ WARN → SUMMARIZE → STOP intervention, see
 
 ## Install
 
-Pathlayer is currently alpha software. Install it from PyPI (Python 3.10+),
+Pathlayer is currently alpha software. Install it from PyPI (Python 3.11+),
 with only the optional extras your integration needs:
 
 ```bash
@@ -96,7 +96,7 @@ uv build
 python -m pip install dist/pathlayer-*.whl
 ```
 
-Release CI currently tests Python 3.10, 3.11, 3.12, 3.13, and 3.14.
+Release CI currently tests Python 3.11, 3.12, 3.13, and 3.14.
 
 ## Quickstart
 
@@ -624,7 +624,7 @@ run's later tool calls (see
 ## Development
 
 Install a source checkout with its development dependencies in a virtual
-environment using Python 3.10 or later:
+environment using Python 3.11 or later:
 
 ```bash
 python -m pip install -e ".[dev]"

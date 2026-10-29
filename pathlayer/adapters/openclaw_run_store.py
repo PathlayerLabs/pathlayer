@@ -8,7 +8,7 @@ import tempfile
 import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,7 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "interrupted"})
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def runs_root_from_env() -> Path:
