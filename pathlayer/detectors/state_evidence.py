@@ -1,4 +1,4 @@
-"""Minimal ``StateEvidence`` contract (ARCH-1A).
+"""Minimal ``StateEvidence`` contract.
 
 COMP-1 asked whether state-guided parameterized subtraces reuse better
 than full replay without raising false positives on healthy runs. Answering
@@ -112,7 +112,7 @@ _MAX_JSON_INT_BITS = 256
 
 @dataclass(slots=True, frozen=True)
 class StateEvidence:
-    """Validated V1 ``StateEvidence`` record (ARCH-1A). See module docstring.
+    """Validated V1 ``StateEvidence`` record. See module docstring.
 
     Not guaranteed hashable, unlike ANC-1's ``ProofSpec``/``ProgressProof``:
     ``raw_fingerprint``/``canonical_fingerprint``/``delta`` stay generic JSON

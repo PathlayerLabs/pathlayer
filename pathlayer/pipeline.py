@@ -1,4 +1,4 @@
-"""Event pipeline (INF-3): wire capture -> detectors -> policy -> action.
+"""Event pipeline: wire capture -> detectors -> policy -> action.
 
 The pipeline is the minimal in-memory backbone of Pathlayer. It receives
 normalized ``ToolEvent``s (typically from an :class:`~pathlayer.adapters.Adapter`),
@@ -7,7 +7,7 @@ resulting :class:`~pathlayer.detectors.base.Signal`s through a
 :class:`~pathlayer.policies.Policy`, and returns the graded :class:`Action`.
 
 It performs no I/O and no LLM calls; given the same event sequence it produces
-the same action sequence. Arbitration is graded (ARB-3): the policy maps fused
+the same action sequence. Arbitration is graded: the policy maps fused
 confidence to a tier and the pipeline threads the :class:`HysteresisState` so a
 brief spike does not flip the action. Only ``STOP`` halts the run; a compatible
 actuator may enforce intermediate tiers (LangGraph implements WARN/SUMMARIZE),
@@ -22,7 +22,7 @@ the consumer's job: INF-1 journals it, and OBS-2 projects it onto a
 :class:`~pathlayer.postmortem.TickRecord` for the OpenClaw recorder's
 ``decisions.jsonl``. Both read the same arbitration rather than recomputing it.
 
-PERF-2: each detector's incremental state (:meth:`Detector.create_state` /
+Each detector's incremental state (:meth:`Detector.create_state` /
 :meth:`Detector.step`) lives here, one slot per detector instance, **never** on
 the shared ``Detector`` object itself -- the same ``Detector`` instance can
 (and, per the tests, must be able to) sit in two different ``Pipeline``s at
@@ -81,7 +81,7 @@ class _EvidenceEntry:
 
 @dataclass(slots=True, frozen=True)
 class _EvidenceState:
-    """Immutable incremental state backing :meth:`Pipeline._evidence` (PERF-2).
+    """Immutable incremental state backing :meth:`Pipeline._evidence`.
 
     Equivalent-by-construction to ``is_advancing(progress_anchors, history)`` on
     the full history at every tick (see the module docstring on ``step``'s
@@ -108,7 +108,7 @@ def _create_evidence_state(anchors: Sequence[ProgressAnchor]) -> _EvidenceState:
 def _step_evidence(
     state: _EvidenceState, anchors: Sequence[ProgressAnchor], event: ToolEvent
 ) -> tuple[_EvidenceState, bool]:
-    """Pure fold step behind :meth:`Pipeline._evidence`'s replacement (PERF-2).
+    """Pure fold step behind :meth:`Pipeline._evidence`'s replacement.
 
     See ``_EvidenceState``.
     """
@@ -226,7 +226,7 @@ class Pipeline:
         self._dry_run = dry_run
         self._stopped = False
         self._post_mortem: PostMortem | None = None
-        # ACT-1: the context of the last emitted non-NONE action, consumed by
+        # The context of the last emitted non-NONE action, consumed by
         # wire() to drive an Actuator. None until the first non-NONE action, and
         # always None in dry-run (nothing is emitted there).
         self._last_context: ActuationContext | None = None
@@ -235,7 +235,7 @@ class Pipeline:
         self._would_be_actions: list[WouldBeAction] = []
         # Last arbitrated action, to record would-be actions only on transition.
         self._last_would_be: Action = Action.NONE
-        # Hysteresis machine state (ARB-3), threaded across events by the policy.
+        # Hysteresis machine state, threaded across events by the policy.
         self._hysteresis = HysteresisState()
         # LOOP-2 precision: anchors used to compute the positive-progress
         # evidence fed to the policy (never a Detector, never in `signals`).
@@ -245,7 +245,7 @@ class Pipeline:
         self._evidence_state: _EvidenceState | None = (
             _create_evidence_state(self._progress_anchors) if self._progress_anchors else None
         )
-        # PERF-2: a detector that overrides `step` (together with
+        # A detector that overrides `step` (together with
         # `create_state`) gets its own incremental state slot, threaded here --
         # never on the shared Detector instance (see the module docstring). A
         # detector still using the default fallback (`type(d).step is
@@ -256,7 +256,7 @@ class Pipeline:
             d.create_state() if inc else None
             for d, inc in zip(self._detectors, self._incremental, strict=True)
         ]
-        # RES-2: validated once, here, so a misconfigured pipeline (two
+        # Validated once, here, so a misconfigured pipeline (two
         # RuntimeLimitProvider detectors) fails at construction -- not
         # silently later, the first time something reads max_duration_seconds
         # (e.g. mid-run, from OpenClawRunRecorder's pipeline_factory path).
@@ -320,7 +320,7 @@ class Pipeline:
 
     @property
     def actuation_context(self) -> ActuationContext | None:
-        """Context of the last emitted non-NONE action (ACT-1), else None.
+        """Context of the last emitted non-NONE action, else None.
 
         Consumed by :func:`~pathlayer.policies.wiring.wire` right after
         :meth:`process` to drive an :class:`~pathlayer.policies.actuators.Actuator`.
@@ -361,7 +361,7 @@ class Pipeline:
         run never halts, so the full would-be trajectory can be inspected via
         :attr:`would_be_actions`.
 
-        PERF-2: an incremental detector (see the module docstring) is advanced
+        An incremental detector (see the module docstring) is advanced
         via ``step(state, event)`` -- no full-history rebuild. Any detector
         still on the batch fallback shares one ``tuple(self._history)`` build,
         computed only if at least one such detector remains -- identical to the
@@ -568,7 +568,7 @@ class Pipeline:
     ) -> str:
         """Human-readable reason for an action, from the driving signal.
 
-        When a priority override (ARB-4) *determined* the committed action (its
+        When a priority override *determined* the committed action (its
         tier equals ``action``), name the signal that triggered it
         (:meth:`~pathlayer.policies.Policy.override_signal`) so the post-mortem
         matches the override -- e.g. "budget" -- even if that detector carries a

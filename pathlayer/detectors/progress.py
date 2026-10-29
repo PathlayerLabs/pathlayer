@@ -1,4 +1,4 @@
-"""ProgressAnchor interface and the built-in coding anchors (NOP-1).
+"""ProgressAnchor interface and the built-in coding anchors.
 
 A :class:`ProgressAnchor` turns the observed event history into a *progress
 level*: a scalar that rises when the agent makes real, verifiable headway and
@@ -29,14 +29,14 @@ whenever any test evidence is present, so tests take precedence and a
 never-decreasing success count can never mask a real test stall under the
 detector's optimistic (most-progress-wins) aggregation.
 
-``GitProgressAnchor`` (NOP-4) adds a third coding ground truth: the size of the
+``GitProgressAnchor`` adds a third coding ground truth: the size of the
 git working diff, for coding agents that edit but never run tests. It defers to
 tests (abstains while test evidence is present) but *not* to exit codes: when no
 tests are present, git and the exit-code anchor are both applicable and the
 detector takes the most-progress-wins view across them. The deferring shape was
 validated on labeled traces (``tests/test_nop4_git_experiment.py``).
 
-PERF-2: ``measure``/``is_satisfied`` stay the pure specification -- an anchor's
+``measure``/``is_satisfied`` stay the pure specification -- an anchor's
 observable behaviour is defined by them, forever. ``create_state``/``step``
 (see :class:`AnchorState`) are an optional, *equivalent-by-construction* fold:
 folding ``step`` one event at a time must reproduce, after each event, the same
@@ -95,7 +95,7 @@ _GIT_KEYS = (_INSERTIONS, _DELETIONS, _NET_LINES)
 
 @dataclass(slots=True, frozen=True)
 class AnchorSnapshot:
-    """Incremental echo of ``(measure, is_satisfied)`` after one event (PERF-2).
+    """Incremental echo of ``(measure, is_satisfied)`` after one event.
 
     ``level`` mirrors ``measure(prefix)``, ``satisfied`` mirrors
     ``is_satisfied(prefix)``, for the prefix ending at the event that produced
@@ -114,7 +114,7 @@ class AnchorSnapshot:
 
 
 class AnchorState(ABC):
-    """Pure incremental state for one :class:`ProgressAnchor` (PERF-2).
+    """Pure incremental state for one :class:`ProgressAnchor`.
 
     Immutable: :meth:`advance` returns a *new* state, never mutates ``self``,
     so a caller (``NoProgressDetector``, ``Pipeline``) can compute the next
@@ -191,7 +191,7 @@ class ProgressAnchor(ABC):
         return False
 
     def create_state(self) -> Any:
-        """Return a fresh incremental state for :meth:`step` (PERF-2).
+        """Return a fresh incremental state for :meth:`step`.
 
         Default: an empty tuple, consumed by the default :meth:`step` below as
         the batch-rebuild fallback. A built-in coding anchor overriding both
@@ -247,7 +247,7 @@ def _has_test_evidence(event: ToolEvent) -> bool:
 
 @dataclass(slots=True, frozen=True)
 class _RichTestResult:
-    """Validated per-test result carried by one tool event (NOP-5)."""
+    """Validated per-test result carried by one tool event."""
 
     outcomes: tuple[tuple[str, str], ...]
     scope_id: str
@@ -310,7 +310,7 @@ def _target_is_green(passed: int, failed: int) -> bool:
 
 @dataclass(slots=True, frozen=True)
 class _RichTargetState:
-    """Immutable per-target debt ledger for rich test outcomes (NOP-5)."""
+    """Immutable per-target debt ledger for rich test outcomes."""
 
     legacy_offset: float
     debts: frozenset[str] = frozenset()
@@ -655,7 +655,7 @@ class TestProgressAnchor(ProgressAnchor):
 
 @dataclass(slots=True, frozen=True)
 class _ExitCodeAnchorState(AnchorState):
-    """Incremental state for :class:`ExitCodeProgressAnchor` (PERF-2).
+    """Incremental state for :class:`ExitCodeProgressAnchor`.
 
     ``saw_test`` is sticky (once ``True``, forever ``True``): the moment any
     event carries test evidence, ``measure`` defers to
@@ -721,7 +721,7 @@ class ExitCodeProgressAnchor(ProgressAnchor):
 
 
 class GitProgressAnchor(ProgressAnchor):
-    """No-test fallback coding progress from the git working diff (NOP-4).
+    """No-test fallback coding progress from the git working diff.
 
     The level is the **size** of the cumulative diff versus the run's starting
     commit: ``insertions + deletions`` of the latest git evidence in the
@@ -796,7 +796,7 @@ def _diff_size(source: Mapping[str, Any]) -> float:
 
 @dataclass(slots=True, frozen=True)
 class _GitAnchorState(AnchorState):
-    """Incremental state for :class:`GitProgressAnchor` (PERF-2).
+    """Incremental state for :class:`GitProgressAnchor`.
 
     ``saw_test`` is sticky, mirroring :class:`_ExitCodeAnchorState`: the git
     anchor defers to tests forever once any test evidence is seen. Never
@@ -829,7 +829,7 @@ def coding_anchors() -> list[ProgressAnchor]:
     """The built-in coding anchors, ready to wire into ``NoProgressDetector``.
 
     Tests first (the stronger signal), exit codes as the fallback for agents that
-    report process status but no test results, and the git diff (NOP-4) as the
+    report process status but no test results, and the git diff as the
     fallback for coding agents that edit but never run tests. The git anchor
     defers to tests, so it only speaks when no test evidence is present.
     """

@@ -1,4 +1,4 @@
-"""Wiring (ACT-0): connect a Pipeline's decisions to an Actuator's effects.
+"""Wiring: connect a Pipeline's decisions to an Actuator's effects.
 
 ``Pipeline.process()`` already computes and returns the graded
 :class:`~pathlayer.policies.Action` for each event; :meth:`Pipeline.sink`

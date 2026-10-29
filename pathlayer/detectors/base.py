@@ -87,7 +87,7 @@ class Detector(ABC):
         raise NotImplementedError
 
     def create_state(self) -> Any:
-        """Return a fresh incremental state for :meth:`step` (PERF-2).
+        """Return a fresh incremental state for :meth:`step`.
 
         Default: an empty tuple, consumed by the default :meth:`step` below as
         the batch-rebuild fallback. A detector overriding both this and

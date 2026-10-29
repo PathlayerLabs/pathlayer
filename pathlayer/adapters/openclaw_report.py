@@ -1,4 +1,4 @@
-"""Post-session reports for recorded OpenClaw runs (OBS-2), plus ``pathlayer-report``.
+"""Post-session reports for recorded OpenClaw runs, plus ``pathlayer-report``.
 
 After a run ends the user needs one view of what happened: what it cost, which
 detectors reacted and how strongly, what Pathlayer did, and how the run ended.
@@ -314,7 +314,7 @@ def _build_cost(
     indeterminate rather than blamed on a detector that may well have been on.
 
     ``events_from_journal`` marks events read back from ``events.raw.jsonl``
-    because the run never wrote a ``trace.json`` (OBS-5): its model calls were
+    because the run never wrote a ``trace.json``: its model calls were
     captured all the same, and leaving them out would report a spend that
     happened as unmeasured.
     """
@@ -358,29 +358,29 @@ def _build_cost(
         )
     if manifest_estimated is None and budget_status == COST_BUDGET_DISABLED:
         reasons.append(
-            "no BUD-3 estimate: the budget detector was not enabled for this run, "
+            "no configured cost estimate: the budget detector was not enabled for this run, "
             "so no per-tool estimate was ever computed"
         )
     elif manifest_estimated is None and budget_status == COST_BUDGET_UNKNOWN:
         reasons.append(
-            "the BUD-3 estimate is indeterminate: this run used a custom pipeline factory, "
-            "so the recorder cannot establish whether a budget detector was enabled"
+            "the configured cost estimate is indeterminate: this run used a custom pipeline "
+            "factory, so the recorder cannot establish whether a budget detector was enabled"
         )
     elif manifest_estimated is None and legacy_journal:
         reasons.append(
-            "the BUD-3 estimate is indeterminate: this run was recorded before Pathlayer "
+            "the configured cost estimate is indeterminate: this run was recorded before Pathlayer "
             "persisted cost components, so whether the budget detector was enabled cannot "
             "be established from this directory"
         )
     elif manifest_estimated is None and not completed:
         reasons.append(
-            "the BUD-3 estimate is indeterminate: this run never reached its end, and no "
+            "the configured cost estimate is indeterminate: this run never reached its end, and no "
             "estimate was journaled before the cut, so whether the budget detector was "
             "enabled cannot be established from this directory"
         )
     elif manifest_estimated is None:
         reasons.append(
-            "the BUD-3 estimate is indeterminate: this run directory does not record "
+            "the configured cost estimate is indeterminate: this run directory does not record "
             "whether the budget detector was enabled"
         )
     elif manifest_estimated == 0.0:
@@ -403,7 +403,7 @@ def _build_cost(
 
 
 # --------------------------------------------------------------------------- #
-# Cost attribution (OBS-5)
+# Cost attribution
 # --------------------------------------------------------------------------- #
 
 
@@ -497,7 +497,7 @@ def _source_trigger(payload: dict[str, Any]) -> str:
 
 
 def build_cost_attribution(run: RunDirectory) -> CostAttribution:
-    """Attribute every cost hook this run directory recorded (OBS-5).
+    """Attribute every cost hook this run directory recorded.
 
     Read from the hook journals -- ``events.raw.jsonl`` and the ``late.jsonl``
     annex -- because only the raw payload says whether the *source* named the
@@ -624,7 +624,8 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
     if legacy:
         notes.append(
-            f"{len(legacy)} of {len(analyzed)} analyzed line(s) were journaled before OBS-2: "
+            f"{len(legacy)} of {len(analyzed)} analyzed line(s) were journaled before "
+            "end-of-run reports existed: "
             "they carry the action Pathlayer emitted, but no fused score and no detector "
             "confidence except on a STOP, so what the detectors saw there is unknown, not silent"
         )

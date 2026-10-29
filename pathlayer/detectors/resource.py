@@ -6,7 +6,7 @@ its signal is actionable and can select STOP under the configured policy.
 Memory enforcement remains deferred to a later runtime phase.
 
 Signals: sub-agent spawn count, delegation depth, run-restart count, a hard
-runtime timeout (RES-2) and peak RSS memory (RES-3). Time is represented by
+runtime timeout and peak RSS memory. Time is represented by
 lifecycle events injected at the runtime boundary; RSS is sampled at the same
 boundary (see ``pathlayer.resource_sampling``) and carried in
 ``event.metadata["rss_bytes"]`` -- this detector never reads a clock, samples

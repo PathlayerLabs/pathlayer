@@ -1,4 +1,4 @@
-"""Git workspace and command ``StateEvidence`` collectors (STATE-1).
+"""Git workspace and command ``StateEvidence`` collectors.
 
 ARCH-1B collects one file and one pytest selection. A coding preset needs two
 more deterministic observations, kept here rather than in

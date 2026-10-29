@@ -28,7 +28,7 @@ the (possibly non-thread-safe) downstream sink sees one event at a time and the
 which calls *complete*, which under genuinely parallel tools may differ from the
 order in which they started.
 
-Progress proofs (ANC-4): given a ``progress_proof`` producer (ANC-2), the
+Progress proofs: given a ``progress_proof`` producer, the
 adapter runs its probe once after every ``TOOL_CALL`` ends -- errors included,
 never for progress summaries or LLM calls -- and attaches the proof to that
 event's ``metadata``, as the OpenClaw recorder does. The probe runs inside the
@@ -38,7 +38,7 @@ the agent step, waits for the probe. A failing probe yields an event without a
 proof (ANC-2's fail-soft contract); an unexpected producer error is logged and
 never reaches the agent. Replays read the recorded proof and never re-probe.
 
-State evidence (ARCH-2, STATE-1): given a ``state_evidence`` producer, the
+State evidence: given a ``state_evidence`` producer, the
 adapter brackets every ``TOOL_CALL`` with a ``before``/``after`` observation
 and embeds the validated envelope in that event's ``metadata``. A producer
 built on a planner (the STATE-1 coding preset) is asked, at each ``before``

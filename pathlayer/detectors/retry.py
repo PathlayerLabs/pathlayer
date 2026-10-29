@@ -1,4 +1,4 @@
-"""RetryDetector (RET-1 + RET-2 + RET-3).
+"""RetryDetector.
 
 Catches two flavours of the "keep hammering, expect a different result" failure,
 folded into a single ``retry`` signal (``confidence = max`` of the two):
@@ -161,7 +161,7 @@ class RetryDetector(Detector):
         burst of one tool (exploration, polling) stays silent even if unrelated
         calls fail.
 
-        RET-3: only the trailing run of the *same* tool counts. A genuinely
+        Only the trailing run of the *same* tool counts. A genuinely
         different tool anywhere in the window breaks the run, so an old storm
         that the agent has since moved past no longer counts -- the counter
         resets on a genuinely different action instead of accumulating a bag of
