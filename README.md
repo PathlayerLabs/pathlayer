@@ -68,8 +68,17 @@ WARN → SUMMARIZE → STOP intervention, see
 
 ## Install
 
-Pathlayer is currently alpha software. The most direct way to try the demos
-is from a local source checkout, in a virtual environment (Python 3.10+):
+Pathlayer is currently alpha software. Install it from PyPI (Python 3.10+),
+with only the optional extras your integration needs:
+
+```bash
+python -m pip install pathlayer
+python -m pip install "pathlayer[langgraph,yaml]"  # LangGraph integration, YAML config
+```
+
+The demos live in the repository, not in the package. To try them, use a
+source checkout in a virtual environment; the development extra includes the
+dependencies they need:
 
 ```bash
 git clone https://github.com/PathlayerLabs/pathlayer.git
@@ -80,24 +89,12 @@ python -m pip install -e ".[dev]"
 python examples/demo_coding_contract.py
 ```
 
-The development extra includes the dependencies needed for the demos; for an
-application integration, install only the optional extras you need:
-
-```bash
-python -m pip install -e ".[langgraph,yaml]"
-```
-
-For a packaged source installation instead of editable mode, build a wheel
-and install it:
+To install a package built from the checkout instead of editable mode:
 
 ```bash
 uv build
 python -m pip install dist/pathlayer-*.whl
 ```
-
-Once a release is published to PyPI, the package can be installed with
-`pip install pathlayer` (and optional extras such as
-`pathlayer[langgraph]`).
 
 Release CI currently tests Python 3.10, 3.11, 3.12, 3.13, and 3.14.
 
