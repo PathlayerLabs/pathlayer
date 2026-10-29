@@ -67,7 +67,10 @@ dev = [
     "types-PyYAML>=6",
     "packaging>=24",
     "tomli>=2; python_version < '3.11'",
-    "pre-commit>=3.8",
+    # Not on Python 3.10: pre-commit pulls in filelock (through virtualenv),
+    # whose security fixes require Python 3.11. Neither CI nor the tests use it;
+    # contributors on 3.10 install pre-commit on its own (see CONTRIBUTING.md).
+    "pre-commit>=3.8; python_version >= '3.11'",
     # Bring in the LangGraph adapter deps so the smoke test runs in dev/CI.
     "pathlayer[langgraph]",
     # Bring in PyYAML so the YAML config path is exercised in dev/CI.

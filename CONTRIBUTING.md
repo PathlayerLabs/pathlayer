@@ -38,6 +38,10 @@ pip install -e ".[dev]"
 pre-commit install
 ```
 
+On Python 3.10, the development extra leaves `pre-commit` out, because its
+dependency filelock has no security fix for 3.10: install it on its own first,
+for example with `pipx install pre-commit`.
+
 `pre-commit install` sets up two hooks from `.pre-commit-config.yaml`. Each
 commit runs the whitespace, YAML and TOML checks, `ruff check --fix` and
 `ruff format`; each push also runs `mypy`, which takes a few seconds. The push
