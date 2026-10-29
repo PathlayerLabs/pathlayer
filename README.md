@@ -29,7 +29,7 @@ Git diff size.
 checked test results to distinguish productive retries from repeated activity
 that does not advance a task.
 
-The [coding contract demonstration](examples/demo_coding_contract.py) runs a
+The [coding contract demonstration](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_coding_contract.py) runs a
 scripted LangGraph coding agent with real file edits and real pytest runs. Its
 tools return plain text, as a shell tool would, so without help Pathlayer
 cannot tell a productive run from a stuck one. A five-line contract declares
@@ -62,9 +62,9 @@ python examples/demo_coding_contract.py
 Everything runs locally, with no LLM API or network dependency.
 
 For a simpler loop example, see
-[`demo_loop.py`](examples/demo_loop.py). For graded
+[`demo_loop.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_loop.py). For graded
 WARN → SUMMARIZE → STOP intervention, see
-[`demo_no_progress.py`](examples/demo_no_progress.py).
+[`demo_no_progress.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_no_progress.py).
 
 ## Install
 
@@ -170,7 +170,7 @@ Pathlayer discovers exactly one of `.pathlayer/config.json`,
 `.pathlayer/config.yaml` or `.pathlayer/config.yml` from the current project.
 JSON uses only the Python standard library; YAML requires `pathlayer[yaml]`.
 
-Copy [`examples/pathlayer.config.yaml`](examples/pathlayer.config.yaml) for the
+Copy [`examples/pathlayer.config.yaml`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/pathlayer.config.yaml) for the
 complete commented reference. Override only the values your traces justify.
 For example, budget enforcement is disabled by default:
 
@@ -381,7 +381,7 @@ Keep the bundle outside the observed agent's write boundary. Test checkpoints
 execute the workspace's own tests and `conftest.py` files with the workspace on
 the import path, so an agent that can edit that test code -- or add a module
 shadowing one pytest imports, or alter a `.venv` inside the workspace -- can
-forge a passing test: protect it when test checkpoints must be trusted. [`examples/demo_coding_contract.py`](examples/demo_coding_contract.py)
+forge a passing test: protect it when test checkpoints must be trusted. [`examples/demo_coding_contract.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_coding_contract.py)
 runs a complete example.
 
 ### Crash-safe run state
@@ -611,7 +611,7 @@ The fragment assumes `graph` and `initial_state` already exist. For WARN to
 reach the model, add `actuator.injection_node()` before the model node.
 SUMMARIZE additionally requires `summary_tool()`, `summary_gate_node(sink)` and
 the conditional route returned by `summary_route()`. The complete runnable
-wiring lives in [`examples/demo_no_progress.py`](examples/demo_no_progress.py).
+wiring lives in [`examples/demo_no_progress.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_no_progress.py).
 
 At a duration timeout, `LangGraphActuator` requests cooperative drain. It does
 not forcibly cancel a provider request that is already blocked; the STOP is
@@ -619,7 +619,7 @@ applied as soon as the runtime can observe/cooperate with that request. The
 OpenClaw recorder persists the timeout, STOP decision, trace and report. It
 never terminates the separate OpenClaw process; with `--enforce` it blocks the
 run's later tool calls (see
-[`examples/openclaw_plugin/README.md`](examples/openclaw_plugin/README.md#enforce-stop-opt-in)).
+[`examples/openclaw_plugin/README.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/openclaw_plugin/README.md#enforce-stop-opt-in)).
 
 ## Development
 
@@ -639,21 +639,21 @@ COVERAGE_CORE=sysmon pytest --cov-config=.coveragerc.fast --cov-fail-under=0
 
 This fast profile does not measure branch coverage and is not the project gate.
 Before submitting or merging a change, run plain `pytest` and the complete
-validation gate documented in [`CONTRIBUTING.md`](CONTRIBUTING.md#validation).
+validation gate documented in [`CONTRIBUTING.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/CONTRIBUTING.md#validation).
 
 ## Demos
 
-- [`examples/demo_loop.py`](examples/demo_loop.py): a repeated loop stopped
+- [`examples/demo_loop.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_loop.py): a repeated loop stopped
   through the core runtime path, plus a healthy counterexample.
-- [`examples/demo_no_progress.py`](examples/demo_no_progress.py): a real,
+- [`examples/demo_no_progress.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_no_progress.py): a real,
   deterministic LangGraph run that receives WARN, SUMMARIZE and STOP while
   repetition detectors remain silent.
-- [`docs/no-progress-demo.md`](docs/no-progress-demo.md): a non-technical
+- [`docs/no-progress-demo.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/docs/no-progress-demo.md): a non-technical
   walkthrough of the no-progress demo and what it proves.
-- [`examples/demo_coding_contract.py`](examples/demo_coding_contract.py): a
+- [`examples/demo_coding_contract.py`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/demo_coding_contract.py): a
   five-line coding contract on a real LangGraph agent whose tools return plain
   text -- productive repetition left alone, stagnation stopped.
-- [`docs/coding-alpha-demo.md`](docs/coding-alpha-demo.md): a coding contract
+- [`docs/coding-alpha-demo.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/docs/coding-alpha-demo.md): a coding contract
   combined with the coding state preset, with a per-scenario explanation.
 
 The no-progress demo relies on deterministic ground truth from tests. Detecting
@@ -661,7 +661,7 @@ slow burns with no tests, exit codes, code evidence or other objective signal is
 outside the zero-config V1 claim. An operator-supplied progress-proof contract
 can cover such a run conditionally; the sealed corpus measurement and its
 remaining short-trace limitation are documented in
-[`docs/progress-proof-corpus-measurement.md`](docs/progress-proof-corpus-measurement.md).
+[`docs/progress-proof-corpus-measurement.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/docs/progress-proof-corpus-measurement.md).
 
 ## License
 
