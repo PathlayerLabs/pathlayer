@@ -23,6 +23,15 @@ const server = createServer((req, res) => {
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 process.env.PATHLAYER_URL = `http://127.0.0.1:${server.address().port}/ingest`;
+// A Node process's first fetch also starts its HTTP client, and once on a busy
+// CI runner that took longer than the gate's 500 ms budget: the first test's
+// block was abandoned and the call allowed. In OpenClaw a run's lifecycle
+// events are forwarded before its first tool call, so a decision query is
+// never the process's first request. Warm the client up the same way.
+await fetch(process.env.PATHLAYER_URL, {
+  method: "POST",
+  body: JSON.stringify({ payload: { hook: "warm-up" } }),
+});
 const { default: plugin, _internals } = await import(
   "../../examples/openclaw_plugin/pathlayer-plugin/index.js"
 );
