@@ -1,4 +1,4 @@
-"""Structured logging (OBS-1): record every signal, decision and action.
+"""Structured logging: record every signal, decision and action.
 
 Built on the standard library ``logging`` (zero dependencies, local-first).
 Each record carries a structured ``pathlayer`` payload (kind, event index,
@@ -67,9 +67,9 @@ def log_decision(
 ) -> None:
     """Log an arbitration decision: the action, the fused confidence, the signals.
 
-    ``fused`` is the policy's weighted noisy-OR over the actionable signals
-    (ARB-1) -- the value actually compared to ``stop_threshold`` -- so an offline
-    reader sees *why* the decision was taken, not just the loudest raw signal.
+       ``fused`` is the policy's weighted noisy-OR over the actionable signals
+    -- the value actually compared to ``stop_threshold`` -- so an offline
+       reader sees *why* the decision was taken, not just the loudest raw signal.
     """
     _emit(
         logger,

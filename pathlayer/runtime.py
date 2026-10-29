@@ -1,4 +1,4 @@
-"""Runtime lifecycle, hard-duration watchdog (RES-2) and RSS sampling (RES-3).
+"""Runtime lifecycle, hard-duration watchdog and RSS sampling.
 
 Both live outside detectors, policy and Pipeline. The watchdog owns the
 clocks and scheduler, while RSS sampling owns the one platform-specific read
@@ -74,7 +74,7 @@ def stamp_rss(
 
 
 class RssSamplingEventSink:
-    """Stamp ``event.metadata["rss_bytes"]`` onto every forwarded event (RES-3).
+    """Stamp ``event.metadata["rss_bytes"]`` onto every forwarded event.
 
     A plain :data:`EventSink`, not a :class:`RunAwareEventSink`: it is always
     composed as the *inner* sink, underneath :class:`WatchdogEventSink`, which
@@ -100,7 +100,7 @@ def wrap_with_rss_sampling(
 ) -> EventSink:
     """Compose ``sink`` with :class:`RssSamplingEventSink`, or return it as is.
 
-    The single source of truth for "is RSS sampling wanted" (RES-3), so
+    The single source of truth for "is RSS sampling wanted", so
     ``policies/wiring.py::wire()`` and
     ``adapters/openclaw_recorder.py::_arm_runtime()`` -- the two places that
     each build a per-run sink chain -- share one decision instead of each
@@ -177,7 +177,7 @@ class WatchdogEventSink(RunAwareEventSink):
                 return
             if fallback and not self._fallback_warned:
                 self._logger.warning(
-                    "run lifecycle was not started explicitly; starting the RES-2 "
+                    "run lifecycle was not started explicitly; starting the duration "
                     "watchdog at the first event, so earlier duration was not measured"
                 )
                 self._fallback_warned = True
@@ -287,7 +287,9 @@ class WatchdogEventSink(RunAwareEventSink):
                 self._fire_or_schedule(recovered_remaining)
                 return True
         except Exception:
-            self._logger.exception("RES-2 watchdog could not recover its committed lifecycle start")
+            self._logger.exception(
+                "duration watchdog could not recover its committed lifecycle start"
+            )
         return False
 
     def _recover_from_start_failure(self, started_at: float | None, fallback: bool) -> None:
@@ -296,7 +298,7 @@ class WatchdogEventSink(RunAwareEventSink):
             self._timer.cancel()
             self._timer = None
         self._logger.exception(
-            "RES-2 watchdog start failed; checking for a committed lifecycle start"
+            "duration watchdog start failed; checking for a committed lifecycle start"
         )
         # The downstream may have committed RUN_START before a later side
         # effect raised. Recover from that canonical fact instead of leaving
@@ -309,10 +311,12 @@ class WatchdogEventSink(RunAwareEventSink):
         self._started_at = None
         self._deadline_monotonic = None
         if callable(self._history) and self._start_attempts < 2:
-            self._logger.error("RES-2 RUN_START rolled back; retrying the lifecycle sink once")
+            self._logger.error(
+                "duration watchdog RUN_START rolled back; retrying the lifecycle sink once"
+            )
             self.start_run(started_at=anchor, fallback=fallback)
             return
-        self._logger.error("RES-2 watchdog will retry at the next lifecycle event")
+        self._logger.error("duration watchdog will retry at the next lifecycle event")
 
     def end_run(self) -> None:
         with self._lock:
@@ -375,22 +379,23 @@ class WatchdogEventSink(RunAwareEventSink):
                     _, observed = self._durable_lifecycle()
                 except Exception:
                     self._logger.exception(
-                        "RES-2 could not verify timeout persistence after sink failure"
+                        "duration watchdog could not verify timeout persistence after sink failure"
                     )
                 terminal = False
                 try:
                     terminal = self._terminal()
                 except Exception:
                     self._logger.exception(
-                        "RES-2 could not verify terminal state after sink failure"
+                        "duration watchdog could not verify terminal state after sink failure"
                     )
                 if observed or terminal or self._timeout_attempts >= 2:
                     self._timed_out = True
                     self._logger.exception(
-                        "RES-2 timeout sink failed; timeout retry is unsafe or exhausted"
+                        "duration watchdog timeout sink failed; "
+                        "timeout retry is unsafe or exhausted"
                     )
                     return
-                self._logger.exception("RES-2 timeout sink failed; retrying once")
+                self._logger.exception("duration watchdog timeout sink failed; retrying once")
                 self._on_timeout()
             else:
                 self._timed_out = True

@@ -20,7 +20,7 @@ burned ~90% of the budget -- an early brake rather than a post-mortem once the
 money is already gone.
 
 The accumulator itself is public (:class:`BudgetState`, :meth:`accumulate`) so an
-end-of-run report (OBS-2) can attribute a cost figure to its source instead of
+end-of-run report can attribute a cost figure to its source instead of
 printing one total and leaving the reader to assume it was measured.
 """
 
@@ -48,7 +48,7 @@ def _validated_cost(value: float, name: str) -> float:
 
 @dataclass(frozen=True, slots=True)
 class BudgetState:
-    """Public, immutable cost fold shared by BUD and persisted reports.
+    """Public, immutable cost fold shared by the budget detector and persisted reports.
 
     ``priced_events`` counts valid, strictly positive captured costs. Under the
     normalized event contract, zero means no captured price rather than a
@@ -145,12 +145,12 @@ class BudgetDetector(Detector):
     def baseline_usd(self) -> float:
         """Cross-run spend seeded into every accumulation (0.0 for a single run).
 
-        An explicit external seed for spend that is *not* present in the event
-        history this detector folds. Public alongside :class:`BudgetState`
-        (OBS-2) so a report can show the third component of the effective spend
-        instead of implying the run started from zero. A store that restores a
-        run by replaying its journal must never feed its own counters back here:
-        the replay already recounts them.
+               An explicit external seed for spend that is *not* present in the event
+               history this detector folds. Public alongside :class:`BudgetState`
+        so a report can show the third component of the effective spend
+               instead of implying the run started from zero. A store that restores a
+               run by replaying its journal must never feed its own counters back here:
+               the replay already recounts them.
         """
         return self._baseline_usd
 

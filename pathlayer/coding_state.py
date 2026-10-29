@@ -1,4 +1,4 @@
-"""The opt-in ``coding`` StateEvidence preset (STATE-1).
+"""The opt-in ``coding`` StateEvidence preset.
 
 ARCH-2 and VAL-5 proved that a before/after observation can improve a Pathlayer
 decision, but the integrator had to name every resource up front. This module

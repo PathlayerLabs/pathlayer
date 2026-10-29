@@ -1,7 +1,7 @@
-"""LangGraph actuator (ACT-0/ACT-1/ACT-2): drain on STOP, inject on WARN,
+"""LangGraph actuator: drain on STOP, inject on WARN,
 gate a forced summary on SUMMARIZE.
 
-STOP (ACT-0) uses LangGraph's native cooperative graceful-shutdown mechanism
+STOP uses LangGraph's native cooperative graceful-shutdown mechanism
 (>= 1.2, ``langgraph.runtime.RunControl`` / ``langgraph.errors.GraphDrained``):
 thread-safe (a single attribute write), checkpointed, no new network endpoint,
 no new timeout-safety problem. This is why LangGraph is the first concrete
@@ -9,7 +9,7 @@ actuator (see the ACT-0 plan): unlike an OpenClaw ``before_tool_call`` actuator,
 it needs neither PERF-2 (no synchronous blocking hook waiting on Pathlayer) nor
 a new authenticated endpoint.
 
-WARN (ACT-1) injects a concise, non-sensitive advisory into the agent's own
+WARN injects a concise, non-sensitive advisory into the agent's own
 context **without interrupting the run**. Because a graph node -- not the
 actuator -- owns the agent's state, the actuator cannot mutate ``messages``
 directly and stay within the layering guardrail (an actuator executes a decision,
@@ -21,7 +21,7 @@ buffer and returns the messages as ``SystemMessage``\\ s. The actuator still
 never decides anything: the WARN tier is already arbitrated by ``Policy`` and
 arrives in the :class:`~pathlayer.policies.actuation.ActuationContext`.
 
-SUMMARIZE (ACT-2) forces the agent to emit a *structured* progress summary
+SUMMARIZE forces the agent to emit a *structured* progress summary
 before any further tool runs -- a **strict gate**. On a SUMMARIZE transition the
 actuator (a) arms a thread-safe ``summary_pending`` flag and (b) buffers a safe
 instruction (delivered by the same :meth:`injection_node` as WARN) telling the
@@ -180,7 +180,7 @@ class LangGraphActuator(Actuator):
             self._control.request_drain(reason)
 
     def apply_with_context(self, context: ActuationContext) -> None:
-        """Enforce a graded action from its full context (ACT-1/ACT-2).
+        """Enforce a graded action from its full context.
 
         STOP delegates to :meth:`apply` (unchanged ACT-0 drain); WARN buffers a
         concise advisory for :meth:`injection_node` to deliver; SUMMARIZE arms
@@ -230,7 +230,7 @@ class LangGraphActuator(Actuator):
         return _inject
 
     def summary_tool(self) -> BaseTool:
-        """Return the Pathlayer structured-summary tool (ACT-2).
+        """Return the Pathlayer structured-summary tool.
 
         A plain LangChain tool named ``PROGRESS_SUMMARY_TOOL`` taking exactly
         ``completed``/``blocker``/``next_action``. Add it to the agent's tool set
