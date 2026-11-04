@@ -41,9 +41,9 @@ const DECISION_TIMEOUT_MS = 500;
 // far above the most this handler can wait: ORDERING_WAIT_MS + DECISION_TIMEOUT_MS.
 const DECISION_HOOK_TIMEOUT_MS = 5000;
 
-// `llm_output` is required for the bounded total-token cost estimate. The
-// Python side will only price it when a non-negative `usage.total` is present;
-// it never infers a model call from `after_tool_call`.
+// `llm_output` is required for the model cost estimate. The Python side prices
+// the token counters it reports (input, output, cache) or, failing those, a
+// non-negative `usage.total`; it never infers a model call from `after_tool_call`.
 const FORWARDED_HOOKS = ["before_agent_run", "llm_output", "after_tool_call", "agent_end"];
 const DECISION_HOOK = "before_tool_call";
 

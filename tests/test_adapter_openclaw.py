@@ -164,6 +164,7 @@ def test_llm_total_tokens_are_priced_as_an_explicit_estimate() -> None:
         "output_tokens": 25,
         "reported_total_tokens": 100,
         "input_ratio": 0.75,
+        "token_split": "input_ratio",
         "cost_measurement": "estimated_total_tokens",
         "session_key": "session-1",
     }
@@ -178,6 +179,90 @@ def test_llm_total_missing_or_unknown_price_is_never_a_fabricated_cost() -> None
     )
     assert unknown[0].cost_usd == 0.0
     assert unknown[0].metadata["cost_measurement"] == "unmeasured_unknown_model"
+
+
+# The usage OpenClaw 2026.7.1 reported for a live run on Bedrock: four model
+# calls, almost all of the tokens served from or written to the prompt cache.
+_LIVE_USAGE = {"input": 31, "output": 621, "cacheRead": 79260, "cacheWrite": 20182, "total": 100094}
+_BEDROCK_SONNET = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+def _llm_payload(usage: dict[str, Any], model: str = _BEDROCK_SONNET) -> dict[str, Any]:
+    return {
+        "hook": "llm_output",
+        "event": {"model": model, "usage": usage},
+        "ctx": {"runId": "run-1"},
+    }
+
+
+def test_llm_reported_split_prices_each_counter_at_its_rate() -> None:
+    [event] = translate_openclaw_llm_event(_llm_payload(_LIVE_USAGE))
+    # Sonnet 4.5: $3 input, $15 output, $0.30 cache read, $3.75 cache write.
+    expected = (31 * 3.0 + 621 * 15.0 + 79260 * 0.30 + 20182 * 3.75) / 1_000_000
+    assert event.cost_usd == pytest.approx(expected)
+    assert event.metadata == {
+        "input_tokens": 31,
+        "output_tokens": 621,
+        "cache_read_tokens": 79260,
+        "cache_write_tokens": 20182,
+        "token_split": "reported",
+        "reported_total_tokens": 100094,
+        "cost_measurement": "estimated_total_tokens",
+    }
+
+
+def test_llm_split_pricing_can_be_turned_off_for_runs_recorded_before_it() -> None:
+    # The total split prices every token at the input or output rate: for this
+    # cached run, about five times the split estimate.
+    [event] = translate_openclaw_llm_event(_llm_payload(_LIVE_USAGE), split_usage=False)
+    assert event.metadata["token_split"] == "input_ratio"
+    assert event.cost_usd == pytest.approx((80075 * 3.0 + 20019 * 15.0) / 1_000_000)
+
+
+def test_llm_counters_omitted_at_zero_count_as_zero() -> None:
+    # OpenClaw leaves a counter out when it is zero (here: no cache write).
+    [event] = translate_openclaw_llm_event(
+        _llm_payload({"input": 9, "output": 95, "cacheRead": 20514})
+    )
+    assert event.metadata["cache_write_tokens"] == 0
+    assert "reported_total_tokens" not in event.metadata
+    assert event.cost_usd == pytest.approx((9 * 3.0 + 95 * 15.0 + 20514 * 0.30) / 1_000_000)
+
+
+@pytest.mark.parametrize("bad", [-5, True, 1.5, "10"])
+def test_llm_malformed_split_counter_falls_back_to_the_total(bad: object) -> None:
+    [event] = translate_openclaw_llm_event(_llm_payload({"input": 10, "output": bad, "total": 100}))
+    assert event.metadata["token_split"] == "input_ratio"
+    assert "cache_read_tokens" not in event.metadata
+    # Without a usable total either, nothing is invented.
+    assert translate_openclaw_llm_event(_llm_payload({"input": 10, "output": bad})) == []
+
+
+def test_llm_cache_tokens_without_a_cache_rate_stay_unpriced() -> None:
+    usage = {"input": 1000, "output": 100, "cacheRead": 4000, "cacheWrite": 500}
+    no_cache = {"house": ModelPrice(1.0, 2.0)}
+    [event] = translate_openclaw_llm_event(_llm_payload(usage, "house"), prices=no_cache)
+    assert event.cost_usd == pytest.approx((1000 * 1.0 + 100 * 2.0) / 1_000_000)
+    assert event.metadata["unpriced_cache_tokens"] == 4500
+    assert event.metadata["cost_measurement"] == "estimated_total_tokens"
+
+    read_only = {"house": ModelPrice(1.0, 2.0, cache_read_usd_per_mtok=0.1)}
+    [event] = translate_openclaw_llm_event(_llm_payload(usage, "house"), prices=read_only)
+    assert event.metadata["unpriced_cache_tokens"] == 500
+
+
+def test_llm_reasoning_tokens_are_evidence_not_billed_twice() -> None:
+    usage = {"input": 10, "output": 100, "reasoningTokens": 40}
+    [event] = translate_openclaw_llm_event(_llm_payload(usage))
+    assert event.metadata["reasoning_tokens"] == 40
+    assert event.cost_usd == pytest.approx((10 * 3.0 + 100 * 15.0) / 1_000_000)
+
+
+def test_llm_split_for_an_unknown_model_is_unmeasured() -> None:
+    [event] = translate_openclaw_llm_event(_llm_payload(_LIVE_USAGE, "house"))
+    assert event.cost_usd == 0.0
+    assert event.metadata["cost_measurement"] == "unmeasured_unknown_model"
+    assert "unpriced_cache_tokens" not in event.metadata
 
 
 def test_missing_params_defaults_to_empty_args() -> None:

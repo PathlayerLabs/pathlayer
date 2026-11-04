@@ -507,8 +507,14 @@ finally:
 
 `from_config()` applies `config.pricing.effective_prices()` to LLM calls.
 `OpenClawAdapter.from_config(sink, config)` provides the same pricing wiring.
-For an OpenClaw `llm_output` carrying only total tokens, Pathlayer estimates
-the input/output split with `pricing.openclaw_input_ratio` (default `0.8`).
+An OpenClaw `llm_output` reports its input, output, cache-read and cache-write
+tokens; each is priced at its own rate, so a cached run is not billed as if
+every token were fresh input. Built-in Claude entries carry the published cache
+rates; a `pricing.models` entry may add `cache_read_usd_per_mtok` and
+`cache_write_usd_per_mtok`, and without them its cache tokens stay unpriced
+(counted in the event's `unpriced_cache_tokens`). When only a total is
+reported, Pathlayer estimates the input/output split with
+`pricing.openclaw_input_ratio` (default `0.8`).
 Budget signals and reports identify that cost as estimated; it is not a
 provider invoice. Estimates count toward the configured budget brake, like
 per-tool budget estimates, and can select STOP. On OpenClaw, that STOP blocks

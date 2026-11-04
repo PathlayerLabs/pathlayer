@@ -1389,6 +1389,35 @@ def test_pricing_zero_rate_is_a_valid_free_model() -> None:
     assert config.pricing.models["local"] == ModelPrice(0.0, 0.0)
 
 
+def test_pricing_cache_rates_are_optional() -> None:
+    config = PathlayerConfig.from_mapping(
+        {
+            "pricing": {
+                "models": {
+                    "cached": {
+                        "input_usd_per_mtok": 3.0,
+                        "output_usd_per_mtok": 15.0,
+                        "cache_read_usd_per_mtok": 0.3,
+                        "cache_write_usd_per_mtok": 3.75,
+                    },
+                    "read-only": {
+                        "input_usd_per_mtok": 3.0,
+                        "output_usd_per_mtok": 15.0,
+                        "cache_read_usd_per_mtok": 0.0,
+                    },
+                    # Overriding a default entry drops its cache rates: they
+                    # followed the input rate this entry replaces.
+                    "claude-sonnet-4-5": {"input_usd_per_mtok": 3.3, "output_usd_per_mtok": 16.5},
+                }
+            }
+        }
+    )
+    models = config.pricing.models
+    assert models["cached"] == ModelPrice(3.0, 15.0, 0.3, 3.75)
+    assert models["read-only"] == ModelPrice(3.0, 15.0, 0.0, None)
+    assert models["claude-sonnet-4-5"] == ModelPrice(3.3, 16.5)
+
+
 def test_openclaw_input_ratio_is_configurable_and_bounded() -> None:
     config = PathlayerConfig.from_mapping({"pricing": {"openclaw_input_ratio": 0.65}})
     assert config.pricing.openclaw_input_ratio == 0.65
@@ -1407,6 +1436,30 @@ def test_openclaw_input_ratio_is_configurable_and_bounded() -> None:
         (
             {"models": {"m": {"input_usd_per_mtok": -1.0, "output_usd_per_mtok": 1.0}}},
             r">= 0",
+        ),
+        (
+            {
+                "models": {
+                    "m": {
+                        "input_usd_per_mtok": 1.0,
+                        "output_usd_per_mtok": 1.0,
+                        "cache_read_usd_per_mtok": -0.1,
+                    }
+                }
+            },
+            r"cache_read_usd_per_mtok': must be finite and >= 0",
+        ),
+        (
+            {
+                "models": {
+                    "m": {
+                        "input_usd_per_mtok": 1.0,
+                        "output_usd_per_mtok": 1.0,
+                        "cache_write_usd_per_mtok": "free",
+                    }
+                }
+            },
+            "expected number",
         ),
         (
             {"models": {"m": {"input_usd_per_mtok": "free", "output_usd_per_mtok": 1.0}}},

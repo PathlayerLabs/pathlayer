@@ -37,6 +37,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -420,14 +421,26 @@ def _pinned_rate(value: Any) -> float | None:
     return rate if math.isfinite(rate) and rate >= 0.0 else None
 
 
-def _pinned_pricing(manifest: dict[str, Any]) -> tuple[dict[str, ModelPrice], float] | None:
+@dataclass(frozen=True, slots=True)
+class _PinnedPricing:
+    """The pricing a run was recorded with: rates, total split ratio and rule."""
+
+    prices: dict[str, ModelPrice]
+    input_ratio: float
+    split_usage: bool
+
+
+def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
     """The price table this run was recorded with, or ``None`` if none is usable.
 
     Never the current configuration: repricing an old run with today's table
     would report a figure nobody computed when the call was made. A snapshot
     with any rate that is not a finite number ``>= 0`` (negative, ``NaN``,
     infinite, a string) is unusable as a whole: pricing with it would print a
-    negative or ``NaN`` cost, so its calls stay counted but unmeasured.
+    negative or ``NaN`` cost, so its calls stay counted but unmeasured. The
+    cache rates may be absent or ``null`` (unknown), and a snapshot without
+    ``split_usage: true`` predates split pricing, so its runs keep the total
+    split they were priced with.
     """
     snapshot = manifest.get("llm_pricing_snapshot")
     if not isinstance(snapshot, dict):
@@ -444,13 +457,18 @@ def _pinned_pricing(manifest: dict[str, Any]) -> tuple[dict[str, ModelPrice], fl
         output_rate = _pinned_rate(raw.get("output_usd_per_mtok"))
         if input_rate is None or output_rate is None:
             return None
-        prices[str(name)] = ModelPrice(input_rate, output_rate)
-    return prices, ratio
+        cache_rates: list[float | None] = []
+        for key in ("cache_read_usd_per_mtok", "cache_write_usd_per_mtok"):
+            value = raw.get(key)
+            cache_rate = None if value is None else _pinned_rate(value)
+            if value is not None and cache_rate is None:
+                return None
+            cache_rates.append(cache_rate)
+        prices[str(name)] = ModelPrice(input_rate, output_rate, *cache_rates)
+    return _PinnedPricing(prices, ratio, snapshot.get("split_usage") is True)
 
 
-def _llm_events(
-    payload: dict[str, Any], pricing: tuple[dict[str, ModelPrice], float] | None
-) -> list[ToolEvent]:
+def _llm_events(payload: dict[str, Any], pricing: _PinnedPricing | None) -> list[ToolEvent]:
     """The cost event(s) of one ``llm_output`` payload, exactly as recording made them.
 
     Empty when nothing can be computed -- no pinned price table, an invalid one,
@@ -458,9 +476,13 @@ def _llm_events(
     """
     if pricing is None:
         return []
-    prices, ratio = pricing
     try:
-        return translate_openclaw_llm_event(payload, prices=prices, input_ratio=ratio)
+        return translate_openclaw_llm_event(
+            payload,
+            prices=pricing.prices,
+            input_ratio=pricing.input_ratio,
+            split_usage=pricing.split_usage,
+        )
     except ValueError:
         return []
 

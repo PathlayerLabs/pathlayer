@@ -1322,10 +1322,15 @@ class OpenClawRunRecorder:
         active.directory.update_manifest(event_count=active.sequence, **self._cost_fields(active))
 
     def _pricing_snapshot(self) -> dict[str, Any] | None:
-        """Pin the effective rates, including built-ins, for safe raw-journal replay."""
+        """Pin the effective rates, including built-ins, for safe raw-journal replay.
+
+        ``split_usage`` pins the pricing rule as well: a report rebuilt later
+        prices a reported input/output/cache split only for a run recorded with it.
+        """
         if self._config is None:
             return None
         return {
+            "split_usage": True,
             "input_ratio": self._config.pricing.openclaw_input_ratio,
             "models": {
                 name: asdict(price)
