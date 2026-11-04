@@ -14,16 +14,26 @@ small, **non-exhaustive**, and overridable two ways via ``cost_of``:
   more model" (e.g. a 2026 model not yet listed, or a house model).
 
 There is no network lookup -- a stale price is preferable to a runtime dependency
-on a pricing API in the detection path. The table is updated by hand; newer
-models (2026+) are expected to be supplied by the caller via ``extra_prices``
+on a pricing API in the detection path. The table is updated by hand; a model it
+does not list yet is expected to be supplied by the caller via ``extra_prices``
 rather than being guessed here.
 
 Watch out for *family price drops*: prefix matching resolves a dated/sub-version
-id to its base key (``claude-opus-4-5-...`` -> ``claude-opus-4``). If a newer
+id to its base key (``claude-opus-4-1-...`` -> ``claude-opus-4``). If a newer
 sub-version is cheaper than its base, that inherits the **older, higher** price
-and over-charges -- which could trip a wrongful budget STOP. Pin the correct
-price explicitly via ``extra_prices`` (e.g. ``{"claude-opus-4-5": ModelPrice(
-5.0, 25.0)}``) rather than relying on the inherited base rate.
+and over-charges -- which could trip a wrongful budget STOP. That is why every
+Claude sub-version is listed explicitly (Opus 4.5 is $5 / $25, not Opus 4's
+$15 / $75). For a model the table does not list, pin the price via
+``extra_prices`` rather than relying on an inherited base rate.
+
+Cloud providers wrap the vendor's own id: Amazon Bedrock
+(``eu.anthropic.claude-sonnet-4-5-20250929-v1:0``), Google Vertex AI
+(``claude-opus-4-5@20251101``), routing prefixes (``bedrock/...``,
+``anthropic/...``) and dotted versions (``anthropic/claude-sonnet-4.5``). They
+resolve to the vendor's id (see :func:`normalize_model_id`) and are priced at
+the vendor's first-party list rates. A partner platform bills separately
+(Bedrock regional endpoints add about 10 percent), so such a cost is an
+estimate that errs low, never high.
 
 Unknown model or missing token usage resolves to ``0.0`` (documented, never a
 crash): we would rather under-count spend than guess. The trade-off is that a
@@ -33,6 +43,7 @@ for that call.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -45,10 +56,13 @@ class ModelPrice:
     output_usd_per_mtok: float
 
 
-# Static, versioned price table (USD per 1M tokens). Common OpenAI / Anthropic
-# models as of 2025. Keys are matched case-insensitively and by longest known
-# prefix (see ``_lookup``) so dated aliases like ``gpt-4o-2024-08-06`` resolve to
-# ``gpt-4o``. Override or extend via the ``prices`` argument of ``cost_of``.
+# Static, versioned price table (USD per 1M tokens). Keys are matched
+# case-insensitively and by longest known prefix (see ``_lookup``) so dated
+# aliases like ``gpt-4o-2024-08-06`` resolve to ``gpt-4o``. Override or extend via
+# the ``prices`` argument of ``cost_of``. Anthropic rates checked against
+# https://platform.claude.com/docs/en/about-claude/pricing on 2026-11-04. Claude
+# Haiku 5.5 is left out: its rate depends on the prompt length, which a flat
+# per-token entry cannot express.
 DEFAULT_PRICES: dict[str, ModelPrice] = {
     "gpt-4o": ModelPrice(2.5, 10.0),
     "gpt-4o-mini": ModelPrice(0.15, 0.6),
@@ -64,10 +78,63 @@ DEFAULT_PRICES: dict[str, ModelPrice] = {
     "claude-3-opus": ModelPrice(15.0, 75.0),
     "claude-3-haiku": ModelPrice(0.25, 1.25),
     "claude-sonnet-4": ModelPrice(3.0, 15.0),
+    "claude-sonnet-4-5": ModelPrice(3.0, 15.0),
+    "claude-sonnet-4-6": ModelPrice(3.0, 15.0),
+    "claude-sonnet-5": ModelPrice(2.0, 10.0),
+    "claude-sonnet-5-5": ModelPrice(2.0, 10.0),
     "claude-opus-4": ModelPrice(15.0, 75.0),
+    "claude-opus-4-1": ModelPrice(15.0, 75.0),
+    "claude-opus-4-5": ModelPrice(5.0, 25.0),
+    "claude-opus-4-6": ModelPrice(5.0, 25.0),
+    "claude-opus-4-7": ModelPrice(5.0, 25.0),
+    "claude-opus-4-8": ModelPrice(5.0, 25.0),
+    "claude-opus-5": ModelPrice(5.0, 25.0),
+    "claude-opus-5-5": ModelPrice(4.0, 20.0),
+    "claude-haiku-4-5": ModelPrice(1.0, 5.0),
+    "claude-fable-5": ModelPrice(10.0, 50.0),
+    "claude-fable-5-1": ModelPrice(10.0, 50.0),
 }
 
 _PER_MTOK = 1_000_000.0
+
+# Amazon Bedrock ids: an optional cross-region inference profile (``eu.``,
+# ``us.``, ``apac.``, ``global.``, ``us-gov.``...) then the vendor segment.
+_BEDROCK_ANTHROPIC = re.compile(r"^(?:[a-z]{2,6}(?:-[a-z]{2,6})?\.)?anthropic\.(?P<model>.+)$")
+# Bedrock's version suffix once the ``:...`` qualifiers are gone (``-v1``).
+_BEDROCK_VERSION = re.compile(r"-v\d+$")
+
+
+def normalize_model_id(model: str) -> str:
+    """The vendor's own id for a provider-wrapped model id, lowered.
+
+    Drops a routing prefix up to the last ``/`` (``bedrock/``, ``anthropic/``),
+    a Vertex AI snapshot (``@20251101``), and a Bedrock wrapper (region profile,
+    ``anthropic.`` vendor segment, ``-v1:0`` version). A Claude id with a dotted
+    version (``claude-sonnet-4.5``) gets dashes, its first-party spelling; other
+    ids keep their dots (``gpt-4.1``). An id with no wrapper comes back lowered
+    and otherwise unchanged.
+    """
+    normalized = model.lower().rsplit("/", 1)[-1].split("@", 1)[0]
+    bedrock = _BEDROCK_ANTHROPIC.match(normalized)
+    if bedrock is not None:
+        normalized = _BEDROCK_VERSION.sub("", bedrock.group("model").split(":", 1)[0])
+    if normalized.startswith("claude-"):
+        normalized = normalized.replace(".", "-")
+    return normalized
+
+
+def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
+    """Exact key, else the longest key ``model`` is a dated snapshot of."""
+    exact = table.get(model)
+    if exact is not None:
+        return exact
+    best_key = ""
+    for key in table:
+        prefix = f"{key}-"
+        suffix = model[len(prefix) :]
+        if model.startswith(prefix) and suffix[:1].isdigit() and len(key) > len(best_key):
+            best_key = key
+    return table[best_key] if best_key else None
 
 
 def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice | None:
@@ -86,6 +153,16 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     custom ``prices`` override with upper-case keys (``{"GPT-4O": ...}``) is
     matched too -- otherwise the case-insensitive promise would silently hold
     for the model id but not for caller-supplied keys, mispricing to ``$0``.
+
+    A key equal to the raw id wins first, so a key that names a provider-wrapped
+    id exactly (one Bedrock profile's rate, say) applies to that id alone. Then
+    the id is normalized (:func:`normalize_model_id`) and matched as above
+    against the vendor ids of the table, so ``claude-sonnet-4-5`` prices every
+    wrapper of that model. The keys themselves are not normalized: a rate
+    written for ``eu.anthropic....`` must not leak to other profiles or to
+    first-party calls. The raw id never goes through the snapshot rule either:
+    ``claude-opus-4-5@20251101`` would read as a snapshot of ``claude-opus-4``
+    and borrow its higher price.
     """
     if not model:
         return None
@@ -94,13 +171,7 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     exact = table.get(lowered)
     if exact is not None:
         return exact
-    best_key = ""
-    for key in table:
-        prefix = f"{key}-"
-        suffix = lowered[len(prefix) :]
-        if lowered.startswith(prefix) and suffix[:1].isdigit() and len(key) > len(best_key):
-            best_key = key
-    return table[best_key] if best_key else None
+    return _match(normalize_model_id(lowered), table)
 
 
 def has_price(model: str | None, prices: Mapping[str, ModelPrice] | None = None) -> bool:

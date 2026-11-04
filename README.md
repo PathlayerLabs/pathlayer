@@ -516,6 +516,13 @@ the run's later tool calls only when the listener enforces STOP (`--enforce`);
 it never terminates the external agent. Missing token
 counters or unknown prices remain unmeasured; an explicitly configured
 per-call budget estimate may still apply where an event exists.
+Provider-wrapped model ids (Amazon Bedrock's
+`eu.anthropic.claude-sonnet-4-5-20250929-v1:0`, Vertex AI's
+`claude-opus-4-5@20251101`, routing prefixes such as `bedrock/`) are priced as
+the vendor's model at its first-party list rates. Partner platforms bill
+separately (Bedrock regional endpoints cost about 10 percent more), so that
+estimate errs low. A `pricing.models` key equal to the full wrapped id prices
+that id alone.
 State semantics version 2 rejects older durable scopes: estimated token costs
 now belong to the estimated counter, and a known zero estimate no longer
 receives a fallback charge. Start a new state key for runs created with the
