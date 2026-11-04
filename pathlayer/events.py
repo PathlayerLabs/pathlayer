@@ -36,7 +36,7 @@ class EventKind(str, Enum):
     RUN_TIMEOUT = "run_timeout"
 
 
-# Stable name of the Pathlayer progress-summary tool (ACT-2). The adapter keys
+# Stable name of the Pathlayer progress-summary tool. The adapter keys
 # on it to classify a captured tool call as ``EventKind.PROGRESS_SUMMARY``, and
 # the LangGraph gate keys on it to let a valid summary through. A constant (not
 # a string literal scattered across layers) so capture and enforcement can never
@@ -64,7 +64,7 @@ class ToolEvent:
     metadata such as timestamps, UUIDs, PIDs, pagination cursors) happens in
     the extraction layer (`pathlayer.detectors`), not at capture time.
 
-    Contract (PERF-2): once an event has been handed to
+    Contract: once an event has been handed to
     `Pipeline.process`/`sink`, treat it -- and its `args`/`result`/`metadata`
     mappings -- as immutable, and treat the stream as append-only (no removal,
     no reordering of already-processed events). Nothing enforces this at

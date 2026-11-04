@@ -1,4 +1,4 @@
-"""OpenClaw adapter (ADP-1): first real-agent capture adapter.
+"""OpenClaw adapter: first real-agent capture adapter.
 
 OpenClaw (https://github.com/openclaw/openclaw) runs as a separate Node.js
 process (the Gateway), so there is no shared Python call stack to hook into

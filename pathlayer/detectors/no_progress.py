@@ -150,7 +150,7 @@ def _push_level(
     window: int,
     level: float | None,
 ) -> tuple[tuple[tuple[int, float], ...], int, int]:
-    """Pure step of one anchor's sliding-window running-maximum (PERF-2).
+    """Pure step of one anchor's sliding-window running-maximum.
 
     ``entries`` is a monotone-decreasing-with-ties deque of ``(index, level)``,
     oldest first; ``count`` is the number of relevant events fed so far
@@ -192,7 +192,7 @@ def _push_level(
 
 @dataclass(slots=True, frozen=True)
 class _AnchorRuntime:
-    """Immutable per-anchor incremental state inside ``NoProgressDetector`` (PERF-2)."""
+    """Immutable per-anchor incremental state inside ``NoProgressDetector``."""
 
     anchor_state: object
     entries: tuple[tuple[int, float], ...]
@@ -201,7 +201,7 @@ class _AnchorRuntime:
 
 @dataclass(slots=True, frozen=True)
 class _NoProgressState:
-    """Immutable incremental state for ``NoProgressDetector.step`` (PERF-2).
+    """Immutable incremental state for ``NoProgressDetector.step``.
 
     ``last_signal`` lets a non-``TOOL_CALL`` event (e.g. an LLM-cost event)
     pass through unchanged in O(1), matching ``evaluate``'s own filtering: the
@@ -302,7 +302,7 @@ class NoProgressDetector(Detector):
             for anchor in self._anchors
             for message in anchor.diagnose(history)
         )
-        # ANC-4: an anchor that lost its measurement at this event holds the
+        # An anchor that lost its measurement at this event holds the
         # detector silent (see the module docstring), whatever the others say.
         if any(anchor.is_unavailable(history) for anchor in self._anchors):
             return Signal(self.name, confidence=0.0, diagnostics=diagnostics)

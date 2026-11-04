@@ -1,4 +1,4 @@
-"""Opt-in runtime capture and transport for ``StateEvidence`` (ARCH-2).
+"""Opt-in runtime capture and transport for ``StateEvidence``.
 
 Collection happens at an adapter's tool boundary. The resulting closed-schema
 records are embedded in ``ToolEvent.metadata`` so the pure pipeline, durable
@@ -157,7 +157,7 @@ class StateEvidenceProducer:
     prevents concurrent runs from sharing or confusing observations.
 
     Built with ``sensors``, every tool call observes those same resources.
-    Built with a ``planner`` (STATE-1), each call observes what its own
+    Built with a ``planner``, each call observes what its own
     arguments make observable, and a call the planner abstains on carries no
     evidence at all. A planner is an integration boundary like a sensor: an
     invalid or raising plan leaves the call unobserved and is logged, never

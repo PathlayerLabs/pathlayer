@@ -30,10 +30,10 @@ from pathlayer.events import EventKind, ToolEvent
 HEALTHY_LABEL = "healthy"
 
 # Neutral label for a trace whose class was never established -- a run recorded
-# live (ADP-2) is the case that needs it: reaching the end of a run proves the
+# live is the case that needs it: reaching the end of a run proves the
 # agent finished, never that it was healthy. It is deliberately **not** part of
-# :data:`CURATED_LABELS`: the golden set (VAL-2) requires a minimum number of
-# traces per curated class, and the replay harness (VAL-3) scores
+# :data:`CURATED_LABELS`: the golden set requires a minimum number of
+# traces per curated class, and the replay harness scores
 # ``healthy`` against everything else -- neither statement is meaningful for an
 # unclassified run, so such a trace never belongs to the scored corpus.
 UNKNOWN_LABEL = "unknown"

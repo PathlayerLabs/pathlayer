@@ -1,4 +1,4 @@
-"""Configuration system (INF-4): one file for every tunable threshold.
+"""Configuration system: one file for every tunable threshold.
 
 Pathlayer is zero-config by default -- with no file present, :func:`load_config`
 returns the built-in defaults, which match the values previously hardcoded in
@@ -89,7 +89,7 @@ _KNOWN_SIGNALS: frozenset[str] = frozenset(
     }
 )
 
-# Config-facing names for the intermediate ladder tiers (ARB-3) -> Action.
+# Config-facing names for the intermediate ladder tiers -> Action.
 # STOP is intentionally excluded: its threshold is ``policy.stop_threshold``
 # (single source of truth); NONE is the absence of action, not a tier.
 _LADDER_TIER_NAMES: dict[str, Action] = {
@@ -99,7 +99,7 @@ _LADDER_TIER_NAMES: dict[str, Action] = {
     Action.ESCALATE.name.lower(): Action.ESCALATE,
 }
 
-# Config-facing action names an override rule (ARB-4) may target. Unlike the
+# Config-facing action names an override rule may target. Unlike the
 # ladder tiers, STOP is included: the headline override is budget -> stop.
 _OVERRIDE_ACTION_NAMES: dict[str, Action] = {
     **_LADDER_TIER_NAMES,
@@ -245,22 +245,22 @@ class LoopConfig:
     enabled: bool = True
     k: int = 2
     window: int = 256
-    # LOOP-2: n-gram coverage fallback, only ever consulted when the exact
-    # (LOOP-1) component above is silent. ``ngram_sizes`` stays code-level (like
+    # N-gram coverage fallback, only ever consulted when the exact
+    # component above is silent. ``ngram_sizes`` stays code-level (like
     # no_progress's anchors) -- these scalar thresholds are what's tunable.
     ngram_min_hits: int = 3
     ngram_min_coverage: float = 0.3
     ngram_max_confidence: float = 0.85
-    # LOOP-3: steepness of the sigmoid ramp centered on ngram_min_hits.
+    # Steepness of the sigmoid ramp centered on ngram_min_hits.
     ngram_steepness: float = 3.0
 
 
 @dataclass(slots=True)
 class RetryConfig:
     enabled: bool = True
-    # RET-1: consecutive identical failing retries.
+    # Consecutive identical failing retries.
     threshold: int = 3
-    # RET-2: one tool dominating the recent window regardless of args/error.
+    # One tool dominating the recent window regardless of args/error.
     window: int = 16
     dominance_min_calls: int = 5
     dominance_ratio: float = 0.75
@@ -308,7 +308,7 @@ class ResourceConfig:
 class ProgressProofConfig:
     # Disabled by default: the ANC-1 checkpoint_set anchor stays out of
     # coding_anchors() until an operator opts in with a concrete manifest and
-    # probe (ANC-2). Exactly one producer slot -- no selection/priority logic
+    # probe. Exactly one producer slot -- no selection/priority logic
     # between multiple manifests, since V1 cannot have more than one.
     enabled: bool = False
     manifest_path: str = ""
@@ -325,7 +325,7 @@ class ProgressProofConfig:
 
 @dataclass(frozen=True, slots=True)
 class ToolRuleConfig:
-    """What one tool call is declared to change (STATE-1).
+    """What one tool call is declared to change.
 
     ``effect`` is ``write`` (it changes the files named by ``paths``), ``read``
     (it changes nothing) or ``workspace`` (it changes the workspace, but its
@@ -365,7 +365,7 @@ class DetectorsConfig:
 
 @dataclass(slots=True)
 class CanonicalizationConfig:
-    # Per-tool keep/mask overrides (CAN-2). Empty by default = default heuristics.
+    # Per-tool keep/mask overrides. Empty by default = default heuristics.
     tool_masks: dict[str, ToolMask] = field(default_factory=dict)
 
 
@@ -373,15 +373,15 @@ class CanonicalizationConfig:
 class PolicySection:
     stop_threshold: float = 0.9
     advisory_signals: frozenset[str] = frozenset()
-    # Per-detector fusion weights (ARB-1) in [0, 1]; missing names default to 1.0.
+    # Per-detector fusion weights in [0, 1]; missing names default to 1.0.
     weights: dict[str, float] = field(default_factory=dict)
-    # Intermediate ladder tiers (ARB-3): tier name (warn/summarize/fallback/
+    # Intermediate ladder tiers: tier name (warn/summarize/fallback/
     # escalate) -> fused-confidence threshold. Empty by default = only STOP.
     tier_thresholds: dict[str, float] = field(default_factory=dict)
     # Consecutive confirming ticks before committing a tier change (1 = none).
     escalate_ticks: int = 1
     deescalate_ticks: int = 1
-    # Priority overrides (ARB-4): detector name -> rule (threshold + action).
+    # Priority overrides: detector name -> rule (threshold + action).
     # Empty by default; hard-ceiling budget/runtime-duration -> STOP rules are
     # auto-wired by build_pipeline only while their detector is enabled and
     # actionable. Explicit user rules still win.
@@ -391,7 +391,7 @@ class PolicySection:
 @dataclass(slots=True)
 class PipelineSection:
     recent_history: int = 10
-    # Dry-run (OBS-3): detectors and arbitration run and are logged, but no
+    # Dry-run: detectors and arbitration run and are logged, but no
     # action is emitted and the run never halts -- the observe-only mode for
     # tuning before trusting enforcement.
     dry_run: bool = False
@@ -554,7 +554,7 @@ def _parse_detectors(data: Mapping[str, Any]) -> DetectorsConfig:
 
 
 def _parse_state_evidence(data: Mapping[str, Any]) -> StateEvidenceConfig:
-    """Parse ``detectors.state_evidence`` (STATE-1).
+    """Parse ``detectors.state_evidence``.
 
     Structure and types only, like every other section: what the values *mean*
     (a workspace that exists, a git repository, a usable pytest selection) is
@@ -647,7 +647,7 @@ def _reject_unknown_tiers(names: Iterable[str], where: str) -> None:
 
 
 def _parse_override_rules(raw: Mapping[str, Any]) -> dict[str, OverrideRule]:
-    """Parse ``policy.overrides``: name -> {threshold, action} (ARB-4).
+    """Parse ``policy.overrides``: name -> {threshold, action}.
 
     ``threshold`` defaults to 1.0 (fire only at a maxed-out signal, the budget
     ceiling case) and ``action`` to ``stop``. Range/type of ``threshold`` is
@@ -937,7 +937,7 @@ def build_pipeline(
                 )
                 anchors.append(ProofProgressAnchor())
             if spec.state_evidence.enabled:
-                # STATE-1: an unclaimed call (a read, an unknown tool) is a gap
+                # An unclaimed call (a read, an unknown tool) is a gap
                 # here, never a stagnant step -- an exploration phase must not
                 # be counted as standing still. The anchor also steps aside for
                 # test results and progress proofs, so an observed effect can
@@ -969,7 +969,7 @@ def build_pipeline(
         }
         overrides = dict(config.policy.overrides)
         conditional_overrides: dict[str, tuple[str, OverrideRule]] = {}
-        # ARB-4: budget at ceiling = stop now. Auto-wire the budget->stop
+        # Budget at ceiling = stop now. Auto-wire the budget->stop
         # override when the detector is enabled, unless the user already set a
         # budget rule (theirs wins) or made budget observe-only (advisory wins).
         if (
@@ -978,7 +978,7 @@ def build_pipeline(
             and BudgetDetector.name not in config.policy.advisory_signals
         ):
             overrides[BudgetDetector.name] = OverrideRule(threshold=1.0, action=Action.STOP)
-        # RES-2: RUN_TIMEOUT is deliberately a single lifecycle fact. Map its
+        # RUN_TIMEOUT is deliberately a single lifecycle fact. Map its
         # ceiling signal straight to STOP so policy hysteresis cannot turn a
         # hard runtime limit into a request for another (possibly impossible)
         # confirming event. Explicit overrides and advisory mode remain
@@ -1094,7 +1094,7 @@ def build_pipeline(
             resolved_logger.warning(
                 "build_pipeline: detectors.loop.ngram_max_confidence * "
                 "policy.weights.loop (%s * %s = %s) >= policy.stop_threshold (%s): "
-                "the LOOP-2 n-gram fallback, an uncalibrated heuristic, can now "
+                "the n-gram loop fallback, an uncalibrated heuristic, can now "
                 "solo-STOP an agent on its own -- see audit finding M-1",
                 spec.loop.ngram_max_confidence,
                 loop_weight,
@@ -1105,7 +1105,7 @@ def build_pipeline(
             resolved_logger.warning(
                 "build_pipeline: detectors.loop is enabled but detectors.no_progress "
                 "is disabled: the loop<-progress suppression that protects against "
-                "LOOP-2 false positives on routine checkpoint patterns (see "
+                "n-gram fallback false positives on routine checkpoint patterns (see "
                 "traces/healthy/repeated_checkpoint_pair.json) will not be wired -- "
                 "see audit finding M-1"
             )
@@ -1123,7 +1123,7 @@ def build_pipeline(
             "build_pipeline: the WARN tier is enabled with no hysteresis "
             "(policy.escalate_ticks == policy.deescalate_ticks == 1): a fused score "
             "flapping across the warn threshold re-fires WARN on every crossing, "
-            "which an ACT-1 actuator turns into repeated context injections. "
+            "which a WARN actuator turns into repeated context injections. "
             "Set escalate_ticks / deescalate_ticks > 1 to debounce."
         )
     # ACT-2 anti-noise guard: same rationale as WARN above. An enabled SUMMARIZE
@@ -1140,7 +1140,7 @@ def build_pipeline(
         resolved_logger.warning(
             "build_pipeline: the SUMMARIZE tier is enabled with no hysteresis "
             "(policy.escalate_ticks == policy.deescalate_ticks == 1): a fused score "
-            "flapping across the summarize threshold re-arms the ACT-2 strict gate on "
+            "flapping across the summarize threshold re-arms the strict summary gate on "
             "every crossing, forcing the agent to re-summarize repeatedly. "
             "Set escalate_ticks / deescalate_ticks > 1 to debounce."
         )
@@ -1186,7 +1186,7 @@ def build_pipeline(
     if suppressions:
         progress_anchors = list(loop_suppression_anchors())
         if spec.state_evidence.enabled:
-            # STATE-1: here an unclaimed call holds the last level instead of
+            # Here an unclaimed call holds the last level instead of
             # dropping it. Suppression needs a baseline to compare against, and
             # a read between two edits must not cost the next edit its evidence
             # of progress. Holding never suppresses on its own: only a strictly

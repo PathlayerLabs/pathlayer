@@ -1,4 +1,4 @@
-"""Deterministic ``checkpoint_set`` progress contract (ANC-1).
+"""Deterministic ``checkpoint_set`` progress contract.
 
 Four ``no_progress`` traces (``no_progress_trivial``, ``replan_churn``,
 ``research_rabbit_hole``, ``slow_burn_47k``) carry no native ground
@@ -58,7 +58,7 @@ one more step without progress:
 
 - a genuine epoch transition -- a proof for a different ``spec_hash`` than the
   currently active one -- where the two levels live on unrelated scales;
-- an explicit ``progress_proof_unobserved`` marker (ANC-4): the producer ran
+- an explicit ``progress_proof_unobserved`` marker: the producer ran
   its probe and could *not* observe one or more required checkpoints (probe
   timed out, test module no longer importable, interpreter gone...). Without
   the marker the anchor kept its last known level and a probe outage of ~10
@@ -132,7 +132,7 @@ _MAX_DIAGNOSED_CHECKPOINTS = 5
 
 @dataclass(slots=True, frozen=True)
 class ProofSpec:
-    """Validated V1 ``proof_spec`` contract (ANC-1). See module docstring."""
+    """Validated V1 ``proof_spec`` contract. See module docstring."""
 
     schema_version: int
     task_id: str
@@ -144,7 +144,7 @@ class ProofSpec:
 
 @dataclass(slots=True, frozen=True)
 class ProgressProof:
-    """Validated V1 ``progress_proof`` contract (ANC-1). See module docstring."""
+    """Validated V1 ``progress_proof`` contract. See module docstring."""
 
     spec_hash: str
     sequence: int
@@ -153,7 +153,7 @@ class ProgressProof:
 
 @dataclass(slots=True, frozen=True)
 class UnobservedMarker:
-    """Validated ``progress_proof_unobserved`` marker (ANC-4). See module docstring.
+    """Validated ``progress_proof_unobserved`` marker. See module docstring.
 
     ``unobserved`` names the required checkpoints the probe could not observe
     this tick; ``reason`` is the producer's fixed-vocabulary category, never
@@ -412,7 +412,7 @@ def _lookup_spec(
 
 @dataclass(slots=True, frozen=True)
 class _ProofAnchorState(AnchorState):
-    """Immutable state for :class:`ProofProgressAnchor` (PERF-2).
+    """Immutable state for :class:`ProofProgressAnchor`.
 
     ``known_specs`` is a bounded ``spec_hash -> ProofSpec`` cache populated by
     any event carrying a valid ``proof_spec``, independent of which epoch is
@@ -603,7 +603,7 @@ def _proof_snapshot(history: Sequence[ToolEvent]) -> AnchorSnapshot:
 
 
 class ProofProgressAnchor(ProgressAnchor):
-    """Deterministic, framework-agnostic ``checkpoint_set`` progress anchor (ANC-1).
+    """Deterministic, framework-agnostic ``checkpoint_set`` progress anchor.
 
     Zero-argument constructor: see the module docstring for why ``ProofSpec``
     is never pre-configured but discovered dynamically from the event stream.

@@ -1,7 +1,7 @@
 """Capture-time evaluator for compiled ANC-4 coding contracts.
 
-``pathlayer.coding_contracts`` compiles a declarative contract into an ANC
-bundle whose ``probe.py`` only carries the compiled contract as data and calls
+``pathlayer.coding_contracts`` compiles a declarative contract into a
+progress-proof bundle whose ``probe.py`` only carries the compiled contract as data and calls
 :func:`run_compiled_contract`. This module is that probe's body: it observes the
 workspace once and prints the ANC-2 wire shape ``{"checkpoints": {id: bool}}``.
 

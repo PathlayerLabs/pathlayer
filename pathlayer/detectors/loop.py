@@ -217,7 +217,7 @@ class LoopDetector(Detector):
         several sizes describing the same underlying cycle must not inflate the
         score.
 
-        LOOP-3: candidate sizes are ranked by raw coverage down to the
+        Candidate sizes are ranked by raw coverage down to the
         hard structural floor (``_NGRAM_HITS_FLOOR``, 2 occurrences -- a single
         occurrence is not a repeat and can trivially dominate a short window).
         ``ngram_min_hits`` is no longer a hard gate on top of that floor: it is

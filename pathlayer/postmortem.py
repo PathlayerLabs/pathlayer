@@ -1,11 +1,11 @@
-"""Structured run records: the STOP post-mortem (ACT-5) and the session report (OBS-2).
+"""Structured run records: the STOP post-mortem and the session report.
 
 Two records, two moments, one module:
 
-- :class:`PostMortem` (ACT-5) is written *at* a STOP: the triggering action, a
+- :class:`PostMortem` is written *at* a STOP: the triggering action, a
   human-readable reason, where in the stream it fired, the detector signals at
   that step, and a tail of recent events. A run that never stops has none.
-- :class:`SessionReport` (OBS-2) is written *after* a run ends, whether it
+- :class:`SessionReport` is written *after* a run ends, whether it
   stopped or not: identity and duration, the final outcome, the cost with its
   provenance, which detectors reacted and how strongly, the grouped findings,
   the actions taken, and the stop reason if there was one. :class:`TickRecord`
@@ -299,7 +299,7 @@ class PostMortem:
 
 
 # --------------------------------------------------------------------------- #
-# OBS-2: the per-tick record a session report aggregates
+# The per-tick record a session report aggregates
 # --------------------------------------------------------------------------- #
 
 
@@ -348,7 +348,7 @@ class TickRecord:
     This is the OBS-2 persistence contract: an adapter writes :meth:`to_dict`
     (or its columns) to a durable journal, and a report is rebuilt from those
     rows alone. It is the shape the OpenClaw recorder persists today. A store
-    that keeps its own decision row (INF-1) can project it onto this shape; the
+    that keeps its own decision row can project it onto this shape; the
     projection is the store's, and it needs the event's ``ts``, which a per-tick
     row does not have to carry.
 
@@ -439,7 +439,7 @@ class TickRecord:
 
 
 # --------------------------------------------------------------------------- #
-# OBS-2: the session report
+# The session report
 # --------------------------------------------------------------------------- #
 
 # Manifest execution status of a run that reached its documented end.
@@ -585,7 +585,7 @@ class CostBreakdown:
         return line
 
 
-# OBS-5: the one reason a captured cost is left unattributed. It is a property of
+# The one reason a captured cost is left unattributed. It is a property of
 # the source telemetry -- the hook carried neither ``ctx.runId`` nor
 # ``event.runId`` -- so nothing Pathlayer could do would recover the turn without
 # inventing it. Association losses Pathlayer itself caused are fixed at capture
@@ -664,7 +664,7 @@ class UnattributedCost:
 
 @dataclass(frozen=True, slots=True)
 class CostAttribution:
-    """Where every captured cost-bearing event landed: a turn, or none (OBS-5).
+    """Where every captured cost-bearing event landed: a turn, or none.
 
     A cost is *attributed* when the source named its run (``runId``). Two
     subsets of it are reported as evidence, never as a reason to move the cost:

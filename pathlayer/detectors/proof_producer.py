@@ -16,7 +16,7 @@ Two failure philosophies, matching two different moments:
   :class:`~pathlayer.config.ConfigError` in ``build_pipeline``.
 - Capture time (:meth:`ProgressProofProducer.probe`): a probe hiccup (missing
   binary, timeout, garbled stdout) is not a reason to interrupt a live agent
-  run that the HTTP ingest path (SEC-3) would otherwise swallow anyway -- it
+  run that the HTTP ingest path would otherwise swallow anyway -- it
   degrades to "nothing observed this tick".
 
 ANC-4 makes that degradation explicit, in two places. Every tick that yields
@@ -127,7 +127,7 @@ class ProgressProofProducer:
           output that is not that shape, or an empty report: the marker alone,
           naming every required checkpoint.
 
-        The marker's ``reason`` is a fixed category (ANC-4), and the same
+        The marker's ``reason`` is a fixed category, and the same
         category is logged as a warning; the probe's own output is never
         echoed. The exception handling is deliberately wide (``ValueError``
         covers ``json.JSONDecodeError`` and a non-UTF-8-decodable
@@ -296,7 +296,7 @@ def producer_from_config(config: PathlayerConfig) -> ProgressProofProducer | Non
     """The producer ``config.detectors.progress_proof`` describes, or ``None`` if disabled.
 
     For integrations that run the probe themselves -- ``LangGraphAdapter``'s
-    ``progress_proof`` argument (ANC-4) -- so they build the exact producer
+    ``progress_proof`` argument -- so they build the exact producer
     ``build_pipeline`` validated, from the same section. Raises
     :class:`ManifestError` like :func:`build_producer`.
     """

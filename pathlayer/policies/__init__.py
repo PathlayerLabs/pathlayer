@@ -1,4 +1,4 @@
-"""Policy layer: arbitration + graded actions + their execution (ACT-0).
+"""Policy layer: arbitration + graded actions + their execution.
 
 Fuses detector signals into a single decision and maps the continuous
 confidence to a graded action (warn -> summarize -> fallback -> escalate ->

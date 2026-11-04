@@ -1,4 +1,4 @@
-"""Actuation context (ACT-1): the immutable explanation handed to an Actuator.
+"""Actuation context: the immutable explanation handed to an Actuator.
 
 ACT-0 wired an already-arbitrated :class:`~pathlayer.policies.actions.Action` to
 ``Actuator.apply(action, post_mortem)``, but a non-STOP tier received no
@@ -24,7 +24,7 @@ from pathlayer.events import EventKind
 from pathlayer.policies.actions import Action
 from pathlayer.postmortem import PostMortem
 
-# The exact, closed set of fields a valid progress summary carries (ACT-2). Any
+# The exact, closed set of fields a valid progress summary carries. Any
 # other key the model passes to the summary tool is ignored, and all three must
 # be present and non-blank for the summary to count -- see
 # :meth:`ProgressSummary.from_tool_args`.
@@ -33,7 +33,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = ("completed", "blocker", "next_action")
 
 @dataclass(slots=True, frozen=True)
 class ProgressSummary:
-    """A validated structured progress summary (ACT-2).
+    """A validated structured progress summary.
 
     The three fields are exactly what the Pathlayer summary tool
     (``PROGRESS_SUMMARY_TOOL``) asks the agent for: what it ``completed``, what

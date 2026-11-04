@@ -1,4 +1,4 @@
-"""RSS memory sampling (RES-3).
+"""RSS memory sampling.
 
 Isolated from ``pathlayer.runtime``/``pathlayer.detectors.resource`` so the
 "gracefully unavailable" contract lives in exactly one place: every caller

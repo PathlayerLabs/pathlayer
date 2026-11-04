@@ -73,7 +73,7 @@ def _validated_spec(
     }
     spec = validate_proof_spec(raw_spec)
     if spec is None:
-        raise ScaffoldError("generated proof_spec failed ANC-1 schema validation")
+        raise ScaffoldError("generated proof_spec failed schema validation")
     return spec
 
 
@@ -188,7 +188,7 @@ Run Pathlayer from this directory or replace the relative paths below:
 }}
 ```
 
-The manifest was validated against the ANC-1 `ProofSpec` schema when this
+The manifest was validated against the `ProofSpec` schema when this
 scaffold was generated. Pathlayer validates it again before a run starts.
 """
 

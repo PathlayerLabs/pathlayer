@@ -7,7 +7,7 @@ Three properties this module owes its callers, all of them load-bearing:
   hook for that ``runId`` -- a duplicated ``agent_end``, a late tool call -- is
   ignored instead of reopening it. Reopening would restart the sequence counter
   and rewrite ``trace.json`` / ``final.json`` from an empty in-memory run. One
-  thing is kept rather than ignored (OBS-5): an ``llm_output`` that lost the
+  thing is kept rather than ignored: an ``llm_output`` that lost the
   race with ``agent_end`` -- both hooks are fire-and-forget, so their arrival
   order is not guaranteed. It is appended to the run's ``late.jsonl`` annex and
   the derived ``report.json`` rebuilt; it never reaches a detector, and every
@@ -109,7 +109,7 @@ logger = logging.getLogger(__name__)
 
 PipelineFactory = Callable[[], Pipeline]
 _LIFECYCLE_HOOK = "pathlayer_lifecycle"
-# ANC-2: reserved hook name for a durable proof sidecar record (see
+# Reserved hook name for a durable proof sidecar record (see
 # _handle_tool/_restore_recorded_events). A probe result cannot be recomputed
 # from the raw wire payload alone -- replaying it must reconstruct the exact
 # enriched event a live PersistentPipeline durably committed, or a resumed
@@ -267,7 +267,7 @@ class OpenClawRunRecorder:
 
         An invalid configuration raises :class:`~pathlayer.config.ConfigError`
         here, at construction: per-run pipelines are built lazily, and the HTTP
-        ingest path deliberately swallows handler errors (SEC-3), so a config
+        ingest path deliberately swallows handler errors, so a config
         rejected on the first hook instead of at startup would be silent.
         """
         if config is not None and pipeline_factory is not None:
@@ -301,7 +301,7 @@ class OpenClawRunRecorder:
             if effective_config.detectors.progress_proof.enabled:
                 # Same fail-fast boundary as build_pipeline above: a malformed
                 # manifest must reject the recorder at construction, not the
-                # first swallowed HTTP hook (SEC-3).
+                # first swallowed HTTP hook.
                 self._proof_producer = build_producer(
                     effective_config.detectors.progress_proof.manifest_path,
                     effective_config.detectors.progress_proof.probe_command,
@@ -637,7 +637,7 @@ class OpenClawRunRecorder:
     def _record_late_cost(
         self, finished: _FinishedRun, payload: dict[str, Any], hook_kind: OpenClawHookKind
     ) -> None:
-        """Keep a cost hook addressed to an already finished run (OBS-5).
+        """Keep a cost hook addressed to an already finished run.
 
         Only ``llm_output`` carries a cost; any other late hook is still ignored.
         The payload goes to the append-only ``late.jsonl`` annex -- never to the
@@ -857,7 +857,7 @@ class OpenClawRunRecorder:
         return active
 
     def _arm_runtime(self, active: _ActiveRun) -> None:
-        # RES-3: tool-call events never reach this sink -- OpenClaw processes
+        # Tool-call events never reach this sink -- OpenClaw processes
         # tool hooks itself, see _handle_tool -- so they are stamped directly
         # there via self._sample_rss instead. RSS sampling is stateless (a
         # live current reading, not a growth delta), so no per-run object
@@ -906,7 +906,7 @@ class OpenClawRunRecorder:
             return 0, []
         lines = directory.raw_events_path.read_text(encoding="utf-8").splitlines()
         # Whichever of PROOF_METADATA_KEYS the sidecar carries: a proof, a
-        # proof plus an unobserved marker, or (ANC-4) a marker alone. Sidecars
+        # proof plus an unobserved marker, or a marker alone. Sidecars
         # journaled before the marker existed carry the first two keys only.
         proofs_by_event_id: dict[str, dict[str, dict[str, Any]]] = {}
         for line in lines:
@@ -1286,14 +1286,14 @@ class OpenClawRunRecorder:
         if payload.get("hook") != AFTER_TOOL_CALL:
             return
         for offset, event in enumerate(translate_openclaw_event(payload)):
-            # RES-3: tool-call events never reach runtime_sink ("OpenClaw
+            # Tool-call events never reach runtime_sink ("OpenClaw
             # processes tool hooks itself", see process_payload above), so
             # stamp them here directly instead. Same "is RSS sampling
             # wanted" gate as wrap_with_rss_sampling (see its docstring).
             if active.pipeline.max_duration_seconds is not None:
                 event = stamp_rss(event, sample=self._sample_rss)
             event_id = _openclaw_event_id(_as_int(record.get("sequence")), offset)
-            # ANC-2: probe live, once per captured tool-call event, same as RSS
+            # Probe live, once per captured tool-call event, same as RSS
             # above. Unlike RSS (a real resource cost that keeps accruing after
             # a passive STOP), a proof is pure detector input: once the
             # pipeline has stopped, detectors never run again, so probing
@@ -1304,7 +1304,7 @@ class OpenClawRunRecorder:
                 # A raw-journal replay can never re-derive a live probe
                 # result (nor should it re-invoke the probe -- see
                 # _restore_recorded_events). Durably journal exactly what was
-                # attached -- a proof, or (ANC-4) the unobserved marker a
+                # attached -- a proof, or the unobserved marker a
                 # failed probe leaves instead -- as its own sidecar record,
                 # correlated by event_id, so a resumed run reconstructs the
                 # identical enriched event a live PersistentPipeline already
@@ -1475,14 +1475,14 @@ class OpenClawRunRecorder:
             **self._cost_fields(active),
         )
         active.completed = True
-        # OBS-2: written last, from the finalized directory, so the report is
+        # Written last, from the finalized directory, so the report is
         # exactly what a later ``pathlayer-report`` rebuilds from the same files.
         _write_report(active.directory)
         with self._lock:
             self._runs.pop(active.directory.original_run_id, None)
 
     def _advance_cost(self, active: _ActiveRun, event: ToolEvent) -> None:
-        """Fold one event into the run's cost accumulator (OBS-2), if any.
+        """Fold one event into the run's cost accumulator, if any.
 
         Every recorded event counts, analyzed or not: a call made after a passive
         STOP still spent money. The arbitration side of
@@ -1524,7 +1524,7 @@ class OpenClawRunRecorder:
         line up event for event -- including past a passive STOP, where
         ``analyzed`` is ``False``.
 
-        OBS-2: every *analyzed* line also carries the tick Pathlayer just
+        Every *analyzed* line also carries the tick Pathlayer just
         computed (every detector's confidence, the fused score, the arbitrated
         action and its reason -- see
         :func:`~pathlayer.adapters.openclaw_report.tick_columns`). This journal is

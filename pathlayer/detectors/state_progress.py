@@ -1,12 +1,12 @@
-"""Opt-in novelty anchors over recorded ``StateEvidence`` (VAL-5, STATE-1).
+"""Opt-in novelty anchors over recorded ``StateEvidence``.
 
 A new fingerprint is evidence of a new state, not proof of task success. Use
 these anchors only where state novelty is an appropriate progress proxy. They
 are deliberately absent from the default coding/suppression sets.
 
-:class:`StateEvidenceProgressAnchor` (VAL-5) watches one explicitly selected
+:class:`StateEvidenceProgressAnchor` watches one explicitly selected
 filesystem artifact observed around every tool call.
-:class:`CodingStateProgressAnchor` (STATE-1) watches whatever the coding preset
+:class:`CodingStateProgressAnchor` watches whatever the coding preset
 planned for each call -- a set of resources that changes from call to call --
 and so has to answer two questions VAL-5 never faced:
 

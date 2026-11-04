@@ -128,7 +128,7 @@ _LADDER_TIERS: tuple[Action, ...] = (
 # the STOP decision. Empty by default since NOP-3: no_progress earns STOP
 # authority because anchor success suppression (``ProgressAnchor.is_satisfied``)
 # resolves the "done vs stuck" ambiguity that previously kept it advisory.
-# Kept as a configurable knob -- a minimal precursor to dry-run mode (OBS-3),
+# Kept as a configurable knob -- a minimal precursor to dry-run mode,
 # and any detector can be made observe-only per deployment.
 DEFAULT_ADVISORY_SIGNALS: frozenset[str] = frozenset()
 
@@ -144,7 +144,7 @@ _OVERRIDE_ACTIONS: frozenset[Action] = frozenset(_LADDER_TIERS) | {Action.STOP}
 
 @dataclass(slots=True, frozen=True)
 class OverrideRule:
-    """A priority-override rule (ARB-4): confidence threshold -> immediate action.
+    """A priority-override rule: confidence threshold -> immediate action.
 
     When an actionable signal from the matched detector reaches ``threshold``,
     the policy commits ``action`` at once, bypassing fusion and hysteresis.
@@ -175,7 +175,7 @@ class SuppressionRule:
 
 @dataclass(slots=True, frozen=True)
 class HysteresisState:
-    """Explicit, threaded state of the hysteresis machine (ARB-3).
+    """Explicit, threaded state of the hysteresis machine.
 
     Immutable so a tick produces a *new* state rather than mutating shared state:
     the pipeline owns the latest one and feeds it back. ``up_count`` /
@@ -207,7 +207,7 @@ class PolicyConfig:
     # 1 = no hysteresis (follow the target immediately, like ARB-1).
     escalate_ticks: int = 1
     deescalate_ticks: int = 1
-    # Priority overrides (ARB-4): detector name -> rule. An actionable signal at
+    # Priority overrides: detector name -> rule. An actionable signal at
     # or above its rule threshold commits the rule action immediately, bypassing
     # fusion and hysteresis. Empty by default: zero-config stays exactly ARB-1/2
     # (NONE/STOP via stop_threshold). The budget->stop override is wired by the
@@ -325,7 +325,7 @@ class PolicyConfig:
         return validated
 
     def _validate_overrides(self) -> dict[str, OverrideRule]:
-        """Validate and defensively copy the priority-override rules (ARB-4).
+        """Validate and defensively copy the priority-override rules.
 
         Each value must be an :class:`OverrideRule` whose ``threshold`` is a
         number in [0, 1] and whose ``action`` is an actionable tier (WARN..STOP,
@@ -500,7 +500,7 @@ class Policy:
     def override_action(
         self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
     ) -> Action | None:
-        """The most severe overriding action for these signals, else ``None`` (ARB-4).
+        """The most severe overriding action for these signals, else ``None``.
 
         Scans the configured :class:`OverrideRule`\\ s: an *actionable* signal at
         or above its rule threshold yields that rule's action; the most severe
@@ -515,7 +515,7 @@ class Policy:
     def override_signal(
         self, signals: Sequence[Signal], evidence: Mapping[str, float] = _NO_EVIDENCE
     ) -> Signal | None:
-        """The signal that drove the winning override, for reporting (ARB-4).
+        """The signal that drove the winning override, for reporting.
 
         The actionable signal behind the most severe fired rule (tie-broken by
         weighted contribution ``weight * confidence``), so a post-mortem names
@@ -577,7 +577,7 @@ class Policy:
         intentional: a sustained, rising signal escalates promptly, while a lone
         spike from baseline still resets and never escalates.
 
-        Priority overrides (ARB-4) come first: if a rule fires, we commit at once
+        Priority overrides come first: if a rule fires, we commit at once
         -- bypassing the hysteresis counters -- to ``max(override_action,
         target_tier)``. Taking the max means an override never *downgrades* a more
         severe action the fusion would reach on its own (non-override signals
@@ -621,7 +621,7 @@ class Policy:
         upstream; with no actionable signal the run is never stopped (you cannot
         stop on nothing).
 
-        Priority overrides (ARB-4) are honoured here too, for parity with
+        Priority overrides are honoured here too, for parity with
         :meth:`step`: the result is ``max(override_action, base)`` where ``base``
         is the usual NONE/STOP, so an override can escalate but never downgrade.
         """

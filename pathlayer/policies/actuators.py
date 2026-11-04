@@ -1,4 +1,4 @@
-"""Actuator contract (ACT-0): turn an already-arbitrated Action into a real effect.
+"""Actuator contract: turn an already-arbitrated Action into a real effect.
 
 An :class:`Actuator` never decides -- the :class:`~pathlayer.policies.Action` is
 computed upstream by :class:`~pathlayer.policies.Policy`/`Pipeline`. It only
@@ -49,7 +49,7 @@ class Actuator(ABC):
         raise NotImplementedError
 
     def apply_with_context(self, context: ActuationContext) -> None:
-        """Execute an arbitrated action with full context (ACT-1).
+        """Execute an arbitrated action with full context.
 
         Default: delegate to :meth:`apply` for backward compatibility. This is
         the method :func:`~pathlayer.policies.wiring.wire` invokes, never

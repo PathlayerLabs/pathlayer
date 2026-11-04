@@ -1516,7 +1516,7 @@ def test_a_legacy_journal_reports_an_unknown_fused_score_not_a_zero(tmp_path: Pa
     # and the gap is named rather than passed off as detector silence.
     peaks = {activity.name: activity.peak_confidence for activity in report.detectors}
     assert peaks["loop"] == pytest.approx(0.94)
-    assert any("journaled before OBS-2" in note for note in report.notes)
+    assert any("journaled before end-of-run reports existed" in note for note in report.notes)
     assert any("unknown, not silent" in note for note in report.notes)
     # The old listener never persisted cost components either, so the absence of
     # an estimate here says nothing about whether the budget detector was on.
@@ -1533,14 +1533,19 @@ def test_a_legacy_journal_does_not_claim_its_analyzed_events_were_never_analyzed
     assert report.events_analyzed == 3
     assert report.events_recorded == 4
     assert report.ticks_with_signals == 1
-    assert "3 of 3 analyzed line(s) were journaled before OBS-2" in report.notes[0]
+    assert (
+        "3 of 3 analyzed line(s) were journaled before end-of-run reports existed"
+        in report.notes[0]
+    )
 
 
 def test_an_obs2_journal_is_not_mistaken_for_a_legacy_one(tmp_path: Path) -> None:
     _record_run(tmp_path, "run-modern", _looping("run-modern"))
 
     report = build_run_report(_run(tmp_path, "run-modern"))
-    assert report.notes == () or all("before OBS-2" not in note for note in report.notes)
+    assert report.notes == () or all(
+        "before end-of-run reports existed" not in note for note in report.notes
+    )
     assert report.peak_fused is not None and report.peak_fused > 0.9
 
 

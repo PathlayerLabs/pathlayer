@@ -1,4 +1,4 @@
-"""Canonicalization (CAN-1): turn a tool call into a stable action token.
+"""Canonicalization: turn a tool call into a stable action token.
 
 This is the extraction step that ~80% of the real engineering difficulty lives
 in. Two genuinely identical calls must produce the *same* token even when they
@@ -66,7 +66,7 @@ VOLATILE_KEYS: frozenset[str] = frozenset(
 
 # Suffixes that mark a key as volatile (e.g. ``started_at``, ``page_cursor``).
 # ``_id`` is deliberately excluded: ids like ``file_id`` usually distinguish two
-# different calls, so masking them by suffix causes false merges (CAN-3). A
+# different calls, so masking them by suffix causes false merges. A
 # genuinely volatile id is either listed by name above or declared per tool.
 VOLATILE_KEY_SUFFIXES: tuple[str, ...] = ("_at", "_uuid", "_ts", "_cursor", "_token")
 
@@ -93,7 +93,7 @@ class ToolMask:
     ``mask`` lists argument key names that must always be masked for this tool,
     even when the default heuristic would keep them. This force-masks a field
     that is just noise for that tool -- e.g. an incrementing ``attempt_id`` --
-    so two calls differing only by it collapse to the same token (CAN-2).
+    so two calls differing only by it collapse to the same token.
 
     Matching is case-insensitive. ``keep`` and ``mask`` are contradictory by
     construction, so a key declared in both raises ``ValueError``.
