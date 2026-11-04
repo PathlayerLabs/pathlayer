@@ -2,8 +2,8 @@
 
 This script needs NO Python to be written or changed: it starts
 `OpenClawAdapter`, prints the port it listens on, then prints each event live,
-as OpenClaw sends them through the reference plugin (`pathlayer-plugin/`, in
-this same folder).
+as OpenClaw sends them through the Pathlayer plugin (installed with
+`pathlayer-openclaw install-plugin`).
 
 Run it on the SAME machine as the OpenClaw gateway (see this folder's
 README.md for the installation steps):
@@ -32,7 +32,7 @@ from pathlayer.events import ToolEvent
 
 # Changes the port without touching the code, if 8787 is already taken on the
 # host -- then set the same port in PATHLAYER_URL on the JavaScript plugin side
-# (see pathlayer-plugin/index.js).
+# (see pathlayer/adapters/openclaw_plugin/index.js).
 PORT = int(os.environ.get("PATHLAYER_PORT", DEFAULT_PORT))
 
 
@@ -56,7 +56,7 @@ def main() -> None:
     print("=" * 60)
     print(f"Listening on: http://127.0.0.1:{adapter.port}/ingest")
     print("The OpenClaw plugin must post to this same URL: if you changed the")
-    print("port, set PATHLAYER_URL for the gateway (see pathlayer-plugin/index.js).")
+    print("port, set PATHLAYER_URL in the gateway's environment.")
     print()
     print("Now give OpenClaw a simple task (e.g. read a file) and")
     print("watch the events appear below.")

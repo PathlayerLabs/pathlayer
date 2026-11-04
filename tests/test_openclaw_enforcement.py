@@ -9,21 +9,16 @@ is recorded.
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from pathlayer.adapters import openclaw_cli
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
 from pathlayer.adapters.openclaw_run_store import RunStore
 from pathlayer.config import DetectorsConfig, PathlayerConfig, ResourceConfig
-
-_RECORD_LISTENER = (
-    Path(__file__).resolve().parents[1] / "examples" / "openclaw_plugin" / "record.py"
-)
 
 
 def _ctx(run_id: str) -> dict[str, Any]:
@@ -274,21 +269,13 @@ def test_the_http_ingest_returns_the_block_to_the_plugin(tmp_path: Path) -> None
             assert answer == {"ok": True}
 
 
-def _load_listener() -> Any:
-    spec = importlib.util.spec_from_file_location("openclaw_record_enforce", _RECORD_LISTENER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_the_recording_listener_enforces_only_with_enforce(tmp_path: Path) -> None:
-    listener = _load_listener()
     for argv, expected in (([], False), (["--enforce"], True)):
-        args = listener.parse_args(["--runs-root", str(tmp_path / str(expected)), *argv])
+        args = openclaw_cli.parse_args(
+            ["record", "--runs-root", str(tmp_path / str(expected)), *argv]
+        )
         assert args.enforce is expected
-        recorder = listener.build_recorder(args)
+        recorder = openclaw_cli.build_recorder(args)
         recorder.startup()
         answers = _loop_until_stop(recorder, "run-a")
         assert (answers[-1] is not None) is expected

@@ -6,9 +6,13 @@ import argparse
 import importlib.util
 import json
 import os
+import queue
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from importlib.metadata import version
 from pathlib import Path
 
@@ -278,6 +282,76 @@ def _exercise_replay_entrypoint() -> None:
         assert "Warning" not in completed.stderr, completed.stderr
 
 
+_OPENCLAW_PLUGIN_FILES = ("index.js", "openclaw.plugin.json", "package.json")
+
+
+def _exercise_openclaw_entrypoint() -> None:
+    """An OpenClaw host needs nothing but the installed package: command and plugin."""
+    executable_name = "pathlayer-openclaw.exe" if os.name == "nt" else "pathlayer-openclaw"
+    executable = Path(sys.executable).with_name(executable_name)
+    assert executable.is_file(), f"missing installed entry point: {executable}"
+    for command in (["--help"], ["record", "--help"]):
+        subprocess.run([str(executable), *command], check=True, capture_output=True, text=True)
+
+    completed = subprocess.run(
+        [str(executable), "plugin-path"], check=True, capture_output=True, text=True
+    )
+    plugin = Path(completed.stdout.strip())
+    # The installed package's own copy of the plugin, at the package's version.
+    assert plugin.is_relative_to(Path(pathlayer.__file__).resolve().parent), plugin
+    assert sorted(path.name for path in plugin.iterdir()) == sorted(_OPENCLAW_PLUGIN_FILES)
+    package = json.loads((plugin / "package.json").read_text(encoding="utf-8"))
+    assert package["version"] == version("pathlayer"), package["version"]
+    manifest = json.loads((plugin / "openclaw.plugin.json").read_text(encoding="utf-8"))
+    assert manifest["activation"] == {"onStartup": True}
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        dest = root / "extensions" / "pathlayer-plugin"
+        install = [str(executable), "install-plugin", "--dest", str(dest)]
+        subprocess.run(install, check=True, capture_output=True, text=True)
+        for name in _OPENCLAW_PLUGIN_FILES:
+            assert (dest / name).read_bytes() == (plugin / name).read_bytes(), name
+        refused = subprocess.run(install, capture_output=True, text=True)
+        assert refused.returncode == 1 and "--force" in refused.stderr, refused.stderr
+        subprocess.run([*install, "--force"], check=True, capture_output=True, text=True)
+        if os.name != "nt":
+            _exercise_openclaw_record(executable, root / "runs")
+    assert Path.cwd().joinpath(".pathlayer").exists() is False
+
+
+def _exercise_openclaw_record(executable: Path, runs_root: Path) -> None:
+    """Start the listener on a free port, then stop it the way a service manager does."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PATHLAYER_")}
+    process = subprocess.Popen(
+        [str(executable), "record", "--port", "0", "--runs-root", str(runs_root)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    lines: queue.Queue[str] = queue.Queue()
+    stdout = process.stdout
+    assert stdout is not None
+    threading.Thread(target=lambda: [lines.put(line) for line in stdout], daemon=True).start()
+    output: list[str] = []
+    try:
+        deadline = time.monotonic() + 60
+        while not output or not output[-1].startswith("Ingest URL : http://127.0.0.1:"):
+            try:
+                output.append(lines.get(timeout=1))
+            except queue.Empty:
+                if process.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError(f"the listener did not start: {''.join(output)}") from None
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == 0, "".join(output)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    assert runs_root.is_dir()
+
+
 def _exercise_contract_compiler_entrypoint() -> None:
     """ANC-4: the installed compiler writes a bundle whose probe runs from the install."""
     executable_name = (
@@ -372,6 +446,7 @@ def main() -> None:
     _exercise_scaffolder_entrypoint()
     _exercise_contract_compiler_entrypoint()
     _exercise_replay_entrypoint()
+    _exercise_openclaw_entrypoint()
     if args.readme is not None:
         _exercise_readme(args.readme)
     if args.extras == "core":
