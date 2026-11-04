@@ -141,6 +141,10 @@ What this does and does not do:
   run to be answered before asking, so the tool call that follows the event
   that triggered the STOP is the first one blocked. If that forward times out,
   one more call can run.
+- **Several attempts.** OpenClaw can run one `runId` in several attempts
+  (after a compaction, a timeout or a provider failover), each ending with its
+  own `agent_end`. A run stopped in one attempt stays blocked in the next ones
+  (see *Runs with several attempts* below).
 - **Restarts.** A listener restart marks the runs in progress as interrupted:
   they are no longer analyzed, so a run stopped before the restart is no
   longer blocked after it.
@@ -221,12 +225,13 @@ release.
 
 | field               | meaning                                                       |
 | ------------------- | ------------------------------------------------------------- |
-| `status`            | `started` / `orphan` / `completed` / `interrupted`             |
+| `status`            | `started` / `orphan` / `awaiting_retry` / `completed` / `interrupted` |
 | `stopped`           | whether Pathlayer emitted a STOP during the run               |
 | `state_durable`     | whether SQLite contains every analyzed tick recorded so far   |
 | `persistence_error` | storage error category after fail-open, otherwise `null`      |
 | `health`            | curated verdict; live recordings remain `unknown`             |
 | `health_reason`     | observed OpenClaw/Pathlayer outcome awaiting human curation   |
+| `failed_attempts`   | attempts that ended with `success: false` (absent when none)  |
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
 was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
@@ -234,6 +239,39 @@ decision in `health_reason`, but always keeps `health` and the trace label
 at `unknown` until an explicit human curation step assigns ground truth. An
 absence of intervention is not evidence that the run was healthy, and a STOP
 is a detector outcome rather than a curated failure class.
+
+**Runs with several attempts.** An OpenClaw run is a loop of attempts sharing
+one `runId`: after a context-overflow compaction, a timeout compaction or a
+provider failover, OpenClaw starts another attempt, and every attempt sends its
+own `agent_end` and then its own `llm_output`. An `agent_end` whose `success` is
+exactly `false` therefore ends an attempt, not the run:
+
+- The run becomes `awaiting_retry`. This status is not terminal: no `final.json`,
+  no `trace.json`. A provisional `report.json` (outcome `in_progress`) is written
+  from the journals, and rebuilt when the failed attempt's `llm_output` arrives.
+- The next attempt's `before_agent_run` or first tool call resumes the run (back
+  to `started`): same pipeline, same sequence, same cost, same STOP. A usage
+  report alone does not resume it, since OpenClaw sends one after every attempt.
+  Usage received between two attempts counts in-run and reaches the budget.
+- The run ends for good at an `agent_end` with any other `success` value (an
+  absent value included, as before), or when the next run of its session starts:
+  OpenClaw runs one run at a time per session, so the waiting run's failed
+  attempt was its end (`ended_by: next_run_in_session` in the manifest). A run
+  still waiting at the next listener startup is marked `interrupted`; its
+  `trace.json` is then written with every recorded event.
+- A duplicated failed `agent_end` is dropped, like a duplicated final one.
+- The duration watchdog counts from the first attempt. It pauses while the run
+  waits: OpenClaw sends no signal when a failed attempt was the run's last, and
+  a live timer would otherwise fire on a run that has already ended. If the
+  deadline has passed, it fires at the next attempt's first hook.
+- The report's duration of a multi-attempt run is the sum of the attempts'
+  durations as OpenClaw measured them; the time between attempts (compaction,
+  backoff) is in no measurement. A run left waiting has no duration until it
+  ends.
+
+This behavior is derived from OpenClaw's source (2026.7.1 and 2026.10.10) and
+tested with synthetic payloads; a real compaction or provider failover has not
+been recorded yet.
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being
@@ -292,7 +330,8 @@ cat "/var/lib/pathlayer/runs/$RUN/report.json"
 
 A finalized run normally carries a `report.json`: what it cost, which detectors
 reacted and how strongly, what Pathlayer did, and how the run ended. It is
-written at `agent_end`, and for a run that was cut short during the next
+written at `agent_end` (provisionally at the end of a failed attempt, then
+rewritten when the run ends), and for a run that was cut short during the next
 listener startup — nothing else will ever speak for it. That startup sweep only
 reads the directory; it invents no cost figure, because the process that knew the
 run's budget configuration is the one that disappeared. A run whose journal was
@@ -397,10 +436,12 @@ actions: 1 arbitrated
 stop reason: loop: 5x repeat of 1-action block
 ```
 
-The four outcomes are `completed` (reached its end without being halted — the
+The five outcomes are `completed` (reached its end without being halted — the
 actions section says what was emitted), `stopped`, `escalated` (reached the
-ESCALATE tier without stopping) and `interrupted` (never reached its end). A run
-nobody saw finish is never filed as `completed`.
+ESCALATE tier without stopping), `interrupted` (never reached its end) and
+`in_progress` (a provisional report of a run waiting for another attempt; it is
+rewritten when the run ends). A run nobody saw finish is never filed as
+`completed`.
 
 **What the report will not claim.** A figure nothing computed is reported as
 absent rather than as zero — and, symmetrically, a figure that *was* computed is

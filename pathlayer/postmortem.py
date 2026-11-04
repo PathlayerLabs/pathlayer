@@ -444,6 +444,10 @@ class TickRecord:
 
 # Manifest execution status of a run that reached its documented end.
 COMPLETED_STATUS = "completed"
+# Manifest execution status of a run between two attempts: its last attempt
+# ended without success, and the runtime may start another one under the same
+# run id. Not terminal; the recorder that sets it writes a provisional report.
+AWAITING_RETRY_STATUS = "awaiting_retry"
 
 
 class SessionOutcome(str, Enum):
@@ -452,13 +456,15 @@ class SessionOutcome(str, Enum):
     ``interrupted`` is not in the OBS-2 issue text but cannot be dropped:
     without it, a run whose listener died mid-flight would have to be filed as
     ``completed``, which is exactly the kind of claim this report refuses to
-    make.
+    make. ``in_progress`` is the one non-final outcome: a provisional report of
+    a run waiting for another attempt, rewritten when the run ends.
     """
 
     COMPLETED = "completed"
     STOPPED = "stopped"
     ESCALATED = "escalated"
     INTERRUPTED = "interrupted"
+    IN_PROGRESS = "in_progress"
 
 
 _OUTCOME_MEANING: dict[SessionOutcome, str] = {
@@ -469,6 +475,10 @@ _OUTCOME_MEANING: dict[SessionOutcome, str] = {
     ),
     SessionOutcome.ESCALATED: "arbitration reached the ESCALATE tier; no actuator applies it in V1",
     SessionOutcome.INTERRUPTED: "the run never reached its end, so its record is partial",
+    SessionOutcome.IN_PROGRESS: (
+        "the run's last attempt ended without success and the run may continue; this "
+        "report is provisional and is rewritten when the run ends"
+    ),
 }
 
 
@@ -1270,20 +1280,24 @@ class SessionReport:
 def _resolve_outcome(
     *, status: str, stopped: bool, severest_emitted: Action | None
 ) -> SessionOutcome:
-    """Pick the single most informative of the four outcomes.
+    """Pick the single most informative of the five outcomes.
 
-    Priority ``stopped > escalated > interrupted > completed``. A run can be
-    both stopped and interrupted; ``stopped`` is the stronger statement about
-    what Pathlayer did, and ``status`` is reported alongside so the partial
-    record is never hidden. Any status other than ``completed`` -- including a
-    run still in flight -- maps to ``interrupted`` rather than to ``completed``:
-    claiming a run finished cleanly because we never saw it finish is exactly
-    the lie this report exists to avoid.
+    Priority ``stopped > escalated > in_progress > interrupted > completed``. A
+    run can be both stopped and interrupted; ``stopped`` is the stronger
+    statement about what Pathlayer did, and ``status`` is reported alongside so
+    the partial record is never hidden. Only :data:`AWAITING_RETRY_STATUS` maps
+    to ``in_progress``. Any other status than ``completed`` -- including a run
+    still in flight, which a report cannot tell from one whose listener died --
+    maps to ``interrupted`` rather than to ``completed``: claiming a run
+    finished cleanly because we never saw it finish is exactly the lie this
+    report exists to avoid.
     """
     if stopped:
         return SessionOutcome.STOPPED
     if severest_emitted is not None and severest_emitted >= Action.ESCALATE:
         return SessionOutcome.ESCALATED
+    if status == AWAITING_RETRY_STATUS:
+        return SessionOutcome.IN_PROGRESS
     if status != COMPLETED_STATUS:
         return SessionOutcome.INTERRUPTED
     return SessionOutcome.COMPLETED

@@ -44,11 +44,14 @@ from typing import Any
 
 from pathlayer.adapters.openclaw import translate_openclaw_llm_event
 from pathlayer.adapters.openclaw_lifecycle import (
+    AGENT_END,
     BEFORE_AGENT_RUN,
     LLM_OUTPUT,
     extract_openclaw_run_id,
 )
 from pathlayer.adapters.openclaw_run_store import (
+    ENDED_BY_NEXT_RUN,
+    INTERRUPTED_WHILE_AWAITING_RETRY,
     RunDirectory,
     RunStore,
     atomic_write_json,
@@ -59,6 +62,7 @@ from pathlayer.events import ToolEvent
 from pathlayer.policies import Action
 from pathlayer.policies.actions import action_from_export, action_name
 from pathlayer.postmortem import (
+    AWAITING_RETRY_STATUS,
     COMPLETED_STATUS,
     TRIGGER_ABSENT,
     UNATTRIBUTED_MISSING_RUN_ID,
@@ -265,6 +269,44 @@ def _duration_seconds(
     if start is None or end is None:
         return None
     return (end - start).total_seconds()
+
+
+def _attempt_ends(run: RunDirectory) -> list[dict[str, Any]]:
+    """The ``event`` of every ``agent_end`` the run journaled, in order.
+
+    One per attempt that ended: a duplicated ``agent_end`` is never journaled.
+    A corrupt journal yields none, and the run is reported as a single attempt;
+    the cost attribution already names that corruption.
+    """
+    try:
+        records, _ = _read_journal(run.raw_events_path)
+    except ValueError:
+        return []
+    ends: list[dict[str, Any]] = []
+    for record in records:
+        payload = _record_payload(record)
+        if payload.get("hook") == AGENT_END:
+            event = payload.get("event")
+            ends.append(event if isinstance(event, dict) else {})
+    return ends
+
+
+def _attempts_duration_seconds(ends: Sequence[dict[str, Any]]) -> float | None:
+    """Sum of the attempts' own durations, or ``None`` if one is unknown.
+
+    OpenClaw measures each attempt from its prompt to its ``agent_end``; the
+    time between two attempts (a compaction, a backoff) is in no measurement,
+    and no listener timestamp stands in for it.
+    """
+    total = 0.0
+    for end in ends:
+        value = end.get("durationMs")
+        if value is None:
+            value = end.get("duration_ms")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        total += float(value)
+    return total / 1000.0
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -591,21 +633,65 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     ticks = [tick for tick in (_tick_from_decision(record) for record in decisions) if tick]
     final = _read_json_object(run.final_path)
 
-    trace_available = run.trace_path.is_file()
+    status = str(manifest.get("status") or "")
+    completed = status == COMPLETED_STATUS
+    # A run between two attempts has no final trace yet. A trace.json it holds
+    # is a runtime-timeout snapshot, older than its journals: the provisional
+    # report reads the journals instead of passing that snapshot off as the
+    # whole history.
+    provisional = status == AWAITING_RETRY_STATUS
+    trace_available = run.trace_path.is_file() and not provisional
     events: list[ToolEvent] = list(load_trace(run.trace_path).events) if trace_available else []
     events_recorded = len(events) if trace_available else len(decisions)
 
-    status = str(manifest.get("status") or "")
-    completed = status == COMPLETED_STATUS
     ended_at = manifest.get("ended_at")
-    duration = _duration_seconds(final, manifest.get("started_at"), ended_at, completed=completed)
+    attempt_ends = _attempt_ends(run)
+    failed_attempts = sum(1 for end in attempt_ends if end.get("success") is False)
+    if provisional:
+        duration = None
+    elif completed and len(attempt_ends) > 1:
+        duration = _attempts_duration_seconds(attempt_ends)
+    else:
+        duration = _duration_seconds(
+            final, manifest.get("started_at"), ended_at, completed=completed
+        )
     notes: list[str] = []
     if truncated_journal:
         notes.append(
             "the last journal line was truncated and was dropped: this run's record "
             "stops one event short"
         )
-    if duration is None and not completed:
+    if provisional:
+        notes.append(
+            f"provisional report: attempt {len(attempt_ends)} of this run ended with "
+            "success=false. OpenClaw may start another attempt of the same run (after a "
+            "compaction, a timeout or a provider failover); this report is rewritten when "
+            "the run ends, and until then its figures come from the hook journals"
+        )
+    if completed and manifest.get("ended_by") == ENDED_BY_NEXT_RUN:
+        notes.append(
+            "this run ended when the next run of its session started: OpenClaw runs one run "
+            "at a time per session, so its last attempt, which reported success=false, "
+            "was its end"
+        )
+    if completed and len(attempt_ends) > 1:
+        measured = (
+            "its duration is the sum of the attempts' durations as measured by OpenClaw, "
+            "without the time between attempts (compaction, backoff)"
+            if duration is not None
+            else "its duration is unknown: at least one attempt reported none"
+        )
+        notes.append(
+            f"OpenClaw ran this run in {len(attempt_ends)} attempts, {failed_attempts} of "
+            f"which ended with success=false; {measured}"
+        )
+    if manifest.get(INTERRUPTED_WHILE_AWAITING_RETRY) is True:
+        notes.append(
+            f"the listener restarted while this run waited for another attempt after "
+            f"{failed_attempts} failed one(s): the run may have ended with its failed "
+            "attempt, or a later attempt went unobserved"
+        )
+    if duration is None and not completed and not provisional:
         # The recorded end is only named when there is one: a run still in flight
         # has none, and claiming otherwise would invent the very stamp this note
         # exists to distrust.
@@ -663,7 +749,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             f"detectors only analyzed {len(ticks)}: a passive STOP ends analysis, not the "
             "run, so the per-tick budget signal stops short of the run's own total"
         )
-    if not trace_available:
+    if not trace_available and not provisional:
         notes.append("trace.json is absent: this run never reached agent_end")
 
     return build_session_report(

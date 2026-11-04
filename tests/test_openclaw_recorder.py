@@ -520,6 +520,10 @@ def test_unsuccessful_run_is_not_healthy(tmp_path: Path) -> None:
 
     run = RunStore(tmp_path).resolve_run("run-failed")
     assert run is not None
+    # A failed agent_end ends an attempt; the next run of the session proves no
+    # other attempt follows, and the run ends with that failed attempt.
+    assert run.read_manifest()["status"] == "awaiting_retry"
+    recorder.process_payload(_before("run-next"))
     manifest = run.read_manifest()
     assert manifest["status"] == "completed"
     assert manifest["health"] == UNKNOWN_LABEL
