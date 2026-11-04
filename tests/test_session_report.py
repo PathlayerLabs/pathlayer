@@ -1734,7 +1734,7 @@ def test_adapter_estimates_are_reported_once(amount: float, manifest_mode: str) 
     assert cost.captured_usd is None
     assert cost.priced_events == 0
     assert cost.estimated_usd == pytest.approx(amount + (0.1 if manifest_mode == "legacy" else 0))
-    assert "estimated from total tokens" in cost.source
+    assert "estimated from reported token counters" in cost.source
     assert "estimated" in cost.describe()
 
 

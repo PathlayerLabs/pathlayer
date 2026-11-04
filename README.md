@@ -522,6 +522,15 @@ the run's later tool calls only when the listener enforces STOP (`--enforce`);
 it never terminates the external agent. Missing token
 counters or unknown prices remain unmeasured; an explicitly configured
 per-call budget estimate may still apply where an event exists.
+On OpenClaw 2026.7.1, model usage is reported after `agent_end`, aggregated
+per attempt. The per-run budget only sees events received while the run is
+active; it cannot stop that run based on model spend received afterward.
+The report's headline total includes this spend at the pinned local rates,
+separating estimates recorded during the run (`estimated_usd`) from estimates
+received after it ended (`post_run_estimated_usd`). No finished decision or
+trace is rewritten. Applying this spend to the next run's session budget is
+planned in [#29](https://github.com/PathlayerLabs/pathlayer/issues/29).
+
 Provider-wrapped model ids (Amazon Bedrock's
 `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`, Vertex AI's
 `claude-opus-4-5@20251101`, routing prefixes such as `bedrock/`) are priced as

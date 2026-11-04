@@ -1619,14 +1619,22 @@ def _detect_commit_sha() -> str | None:
 def _extract_model(payload: dict[str, Any]) -> Any:
     hook_event = _hook_part(payload, "event")
     hook_ctx = _hook_part(payload, "ctx")
-    return hook_event.get("model") or hook_ctx.get("model") or hook_ctx.get("resolvedModel")
+    return (
+        hook_event.get("model")
+        or hook_ctx.get("model")
+        or hook_ctx.get("resolvedModel")
+        or hook_ctx.get("modelId")
+    )
 
 
 def _extract_provider(payload: dict[str, Any]) -> Any:
     hook_event = _hook_part(payload, "event")
     hook_ctx = _hook_part(payload, "ctx")
     return (
-        hook_event.get("provider") or hook_ctx.get("provider") or hook_ctx.get("resolvedProvider")
+        hook_event.get("provider")
+        or hook_ctx.get("provider")
+        or hook_ctx.get("resolvedProvider")
+        or hook_ctx.get("modelProviderId")
     )
 
 

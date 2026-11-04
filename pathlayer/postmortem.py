@@ -490,6 +490,10 @@ class CostBreakdown:
       times the number of eligible calls. ``None`` when no estimate was ever
       computed; ``0.0`` when the budget detector ran and no configured price
       applied to the recorded calls, which is a result rather than a gap.
+    - ``post_run_estimated_usd``: model spend reported after the run ended,
+      estimated at the recording's pinned prices. Added to the total, but never
+      to the in-run estimate or the budget detector. ``None`` if no post-run
+      cost could be computed.
     - ``baseline_usd``: the configured cross-run seed
       (``detectors.budget.baseline_usd``) that this run's detection actually
       started from, ``0.0`` being the ordinary single-run value.
@@ -511,6 +515,7 @@ class CostBreakdown:
     baseline_usd: float | None = None
     carried_over_usd: float | None = None
     source: str = ""
+    post_run_estimated_usd: float | None = None
 
     @property
     def measured(self) -> bool:
@@ -530,6 +535,7 @@ class CostBreakdown:
         return (
             (self.priced_events is not None and self.priced_events > 0)
             or self.estimated_usd is not None
+            or self.post_run_estimated_usd is not None
             or self.baseline_usd is not None
         )
 
@@ -544,7 +550,12 @@ class CostBreakdown:
         """
         if not self.measured:
             return None
-        components = (self.captured_usd, self.estimated_usd, self.baseline_usd)
+        components = (
+            self.captured_usd,
+            self.estimated_usd,
+            self.baseline_usd,
+            self.post_run_estimated_usd,
+        )
         return sum((value for value in components if value is not None), 0.0)
 
     def to_dict(self) -> dict[str, Any]:
@@ -554,6 +565,7 @@ class CostBreakdown:
             "captured_usd": self.captured_usd,
             "priced_events": self.priced_events,
             "estimated_usd": self.estimated_usd,
+            "post_run_estimated_usd": self.post_run_estimated_usd,
             "baseline_usd": self.baseline_usd,
             "carried_over_usd": self.carried_over_usd,
             "source": self.source,
@@ -573,7 +585,9 @@ class CostBreakdown:
             over = f" over {self.priced_events} priced event(s)" if self.priced_events else ""
             parts.append(f"${self.captured_usd:.4f} captured{over}")
         if self.estimated_usd is not None:
-            parts.append(f"${self.estimated_usd:.4f} estimated")
+            parts.append(f"${self.estimated_usd:.4f} estimated during run")
+        if self.post_run_estimated_usd is not None:
+            parts.append(f"${self.post_run_estimated_usd:.4f} estimated received after run")
         if self.baseline_usd is not None:
             parts.append(f"${self.baseline_usd:.4f} configured baseline")
         total = self.total_usd

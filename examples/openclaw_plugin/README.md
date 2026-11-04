@@ -267,12 +267,19 @@ than as `0.00`. The report names how many lines are in that older format.
 Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
 `agent_end` or a late tool call for such a run is logged and dropped, never
 replayed onto the run directory. The one exception is a late `llm_output`.
-OpenClaw dispatches `llm_output` and `agent_end` fire-and-forget, the
-plugin forwards each without waiting, and the ingest server handles requests
-concurrently, so the last model call of a run can arrive after its `agent_end`.
-That payload is appended to the run's `late.jsonl` annex and `report.json` is
-rebuilt; it never reaches a detector, and every other file of the run stays
-byte-for-byte as it was.
+OpenClaw 2026.7.1 reports model usage aggregated per attempt after `agent_end`;
+post-run usage is therefore expected, not just a delivery race. That payload
+is appended to the run's `late.jsonl` annex and `report.json` is rebuilt; it
+never reaches a detector, and every other file stays byte-for-byte unchanged.
+The headline cost includes the priced usage, separating estimates recorded
+during the run (`estimated_usd`) from estimates received after the end
+(`post_run_estimated_usd`). Unknown usage stays unmeasured; a priced zero is
+shown as zero. A usage report can cover several model calls.
+
+The **per-run budget** only sees events received while the run is active.
+Model usage received after the end cannot trigger a budget STOP for that run.
+Applying this spend to subsequent runs is planned in the
+[session budget (#29)](https://github.com/PathlayerLabs/pathlayer/issues/29).
 
 ```bash
 RUN=run-abc123   # original ctx.runId from manifest.json

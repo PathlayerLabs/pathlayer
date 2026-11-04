@@ -37,7 +37,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -391,7 +391,7 @@ def _build_cost(
         )
     if adapter_estimate is not None:
         reasons.append(
-            f"${adapter_estimate:.6f} estimated from total tokens and an input/output ratio"
+            f"${adapter_estimate:.6f} estimated from reported token counters at pinned local rates"
         )
     return CostBreakdown(
         captured_usd=captured,
@@ -638,11 +638,17 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         events_from_journal=from_journal,
     )
     late = attribution.late if attribution is not None else CostShare()
+    if late.costed_events:
+        # Only the annex is added: in-run estimates already come from the trace
+        # or raw journal and, when enabled, the budget accumulator.
+        cost = replace(cost, post_run_estimated_usd=late.estimated_usd)
     if late.costed_events or late.unmeasured_events:
         notes.append(
-            f"{late.costed_events + late.unmeasured_events} model call(s) reached Pathlayer after "
-            "this run had ended: they are attributed to it below, but were never analyzed and "
-            "are not part of the cost figure above"
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer "
+            "after this run had ended. OpenClaw can report aggregated model usage after "
+            "agent_end; priced usage is included in the total as received after run, "
+            "but was not available to the in-run budget detector. Unpriced usage stays unmeasured"
         )
     if legacy:
         notes.append(
