@@ -29,10 +29,24 @@ normally, and during the startup sweep for one that was cut short, since nothing
 else will ever speak for it. Every analyzed line of ``decisions.jsonl`` now
 carries the tick that produced it, so the detector chronology a report needs is
 durable rather than reconstructed from a live pipeline.
+
+**A failed attempt does not end the run.** OpenClaw runs a loop of attempts
+under one ``runId``: after a context-overflow compaction, a timeout compaction
+or a provider failover it starts another attempt, and every attempt sends its
+own ``agent_end``. An ``agent_end`` whose ``success`` is exactly ``False`` is
+therefore the end of an attempt: the run becomes ``awaiting_retry`` (not
+terminal), gets a provisional report, and keeps its pipeline, sequence, cost
+and STOP. A later ``before_agent_run`` of the same ``runId`` resumes it; a
+model usage report does not, since OpenClaw sends one after every attempt, nor
+does a tool call, which can arrive after the failed end it preceded. The run
+ends for good at an ``agent_end`` with any other ``success`` value, when the
+next run of its session starts (OpenClaw runs one run at a time per session),
+or at the startup sweep.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -55,6 +69,7 @@ from pathlayer.adapters.openclaw import (
 )
 from pathlayer.adapters.openclaw_lifecycle import (
     AFTER_TOOL_CALL,
+    AGENT_END,
     OpenClawHookKind,
     classify_openclaw_hook,
     extract_openclaw_context,
@@ -70,6 +85,8 @@ from pathlayer.adapters.openclaw_report import (
     write_run_report,
 )
 from pathlayer.adapters.openclaw_run_store import (
+    ENDED_BY_NEXT_RUN,
+    INTERRUPTED_WHILE_AWAITING_RETRY,
     LISTENER_VERSION,
     SCHEMA_VERSION,
     TERMINAL_STATUSES,
@@ -87,7 +104,7 @@ from pathlayer.detectors.session import SESSION_METADATA_KEY
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action, action_name
-from pathlayer.postmortem import TickRecord
+from pathlayer.postmortem import AWAITING_RETRY_STATUS, TickRecord
 from pathlayer.resource_sampling import sample_rss_bytes
 from pathlayer.runtime import Scheduler, WatchdogEventSink, stamp_rss, wrap_with_rss_sampling
 from pathlayer.session import SessionJournal
@@ -147,6 +164,21 @@ class _ActiveRun:
     runtime_records: dict[EventKind, tuple[dict[str, Any], ToolEvent, int]] = field(
         default_factory=dict
     )
+    # An OpenClaw run is a loop of attempts sharing one runId (compaction,
+    # timeout, provider failover). A failed agent_end ends an attempt, not the
+    # run: the run waits for another attempt with its pipeline, sequence and
+    # STOP intact, and its duration watchdog paused (see _end_attempt).
+    awaiting_retry: bool = False
+    failed_attempts: int = 0
+    # The last failed agent_end, (payload, raw record): the run's end if no
+    # attempt follows and the next run of its session closes it.
+    last_attempt_end: tuple[dict[str, Any], dict[str, Any]] | None = None
+    # Digest of the failed agent_end the run is waiting after. The same end
+    # arriving again before any new attempt is a repeated delivery, dropped
+    # before anything is written (like a duplicated final end). Once a new
+    # attempt has started, an identical end is that attempt's own: two attempts
+    # can fail with the same error, snapshot and duration.
+    last_attempt_end_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +385,12 @@ class OpenClawRunRecorder:
         report reads the last durable value. When even that is missing, the cost
         section reports the estimate as indeterminate rather than blaming a
         detector that may well have been enabled.
+
+        A run left waiting for another attempt also gets its ``trace.json`` here,
+        with every recorded event: it used to end at its first failed
+        ``agent_end`` with a trace, and keeping it open must not lose that.
         """
+        restored: dict[str, tuple[Pipeline, list[ToolEvent]]] = {}
         try:
             if self._session_journal is not None:
                 for run in self._store.list_runs():
@@ -382,7 +419,8 @@ class OpenClawRunRecorder:
                     try:
                         try:
                             pipeline = self._new_pipeline(run.original_run_id)
-                            self._restore_recorded_events(run, pipeline)
+                            _, events = self._restore_recorded_events(run, pipeline)
+                            restored[run.dir_name] = (pipeline, events)
                             assert isinstance(pipeline, PersistentPipeline)
                             pipeline.close("interrupted")
                             self._record_pipeline_durability(run, pipeline)
@@ -403,8 +441,67 @@ class OpenClawRunRecorder:
                         )
                         self._record_persistence_error(run, error)
         finally:
+            self._seal_awaiting_runs(restored)
             for run in self._store.mark_unfinished_as_interrupted():
                 _write_report(run)
+
+    def _seal_awaiting_runs(self, restored: dict[str, tuple[Pipeline, list[ToolEvent]]]) -> None:
+        """Write the final trace of every run the sweep finds after a failed attempt.
+
+        That is a run waiting for another attempt, or one cut during a later
+        attempt: either already journaled an ``agent_end``, and would have had a
+        trace had its first attempt been its end.
+
+        The trace holds every recorded event, rebuilt from the raw journal --
+        the same events a live run would have written. ``restored`` reuses a
+        replay the durable-state pass already made, so the session journal is
+        never consulted twice for one run. A failure only costs that run its
+        trace: the sweep still marks it interrupted and writes its report.
+        """
+        try:
+            runs = self._store.list_runs()
+        except (OSError, ValueError):
+            logger.exception("could not list OpenClaw runs to seal those awaiting an attempt")
+            return
+        for run in runs:
+            try:
+                manifest = run.read_manifest()
+                waiting = manifest.get("status") == AWAITING_RETRY_STATUS
+                if not waiting and (
+                    manifest.get("status") in TERMINAL_STATUSES or not _failed_attempt_ends(run)
+                ):
+                    continue
+                entry = restored.get(run.dir_name)
+                if entry is None:
+                    pipeline = self._memory_pipeline()
+                    _, events = self._restore_recorded_events(run, pipeline)
+                else:
+                    pipeline, events = entry
+                health, health_reason = evaluate_health(pipeline, success=False)
+                metadata: dict[str, Any] = {
+                    "run_id": run.original_run_id,
+                    "session_key": manifest.get("session_key"),
+                    "agent_id": manifest.get("agent_id"),
+                    "recorded_at": utc_now_iso(),
+                    "health_reason": health_reason,
+                    "failed_attempts": len(_failed_attempt_ends(run)),
+                }
+                if waiting:
+                    metadata[INTERRUPTED_WHILE_AWAITING_RETRY] = True
+                trace = Trace(
+                    label=health,
+                    description=f"Recorded OpenClaw run {run.original_run_id}",
+                    events=list(events),
+                    metadata=metadata,
+                )
+                atomic_write_json(run.trace_path, trace_to_dict(trace))
+                if waiting:
+                    run.update_manifest(**{INTERRUPTED_WHILE_AWAITING_RETRY: True})
+            except (OSError, ValueError, KeyError, TypeError, StateStoreError):
+                logger.exception(
+                    "could not write the trace of OpenClaw run %r, left waiting for an attempt",
+                    run.original_run_id,
+                )
 
     def _new_pipeline(self, run_id: str) -> Pipeline:
         if self._pipeline_factory is not None:
@@ -521,6 +618,8 @@ class OpenClawRunRecorder:
         run_id = extract_openclaw_run_id(payload)
         if run_id is None:
             run_id = self._orphan_run_id(payload)
+        elif hook_kind is OpenClawHookKind.RUN_START:
+            self._close_superseded_runs(run_id, payload)
         active = self._get_or_create_run(run_id, payload, hook_kind)
         if isinstance(active, _FinishedRun):
             self._record_late_cost(active, payload, hook_kind)
@@ -531,6 +630,24 @@ class OpenClawRunRecorder:
             if active.completed:
                 self._record_late_cost(_FinishedRun(active.directory), payload, hook_kind)
                 return
+            if (
+                hook_kind is OpenClawHookKind.RUN_END
+                and active.awaiting_retry
+                and _attempt_end_digest(payload) == active.last_attempt_end_digest
+            ):
+                # The end the run is already waiting after, delivered again: no
+                # new attempt started in between, so it ends nothing new. It is
+                # dropped before anything is written, exactly like a duplicated
+                # end of a finished run.
+                return
+            if active.awaiting_retry and hook_kind is OpenClawHookKind.RUN_START:
+                # Only a new attempt's start proves the run is alive again. A
+                # usage report does not: OpenClaw sends one after every attempt,
+                # failed or not. Nor does a tool call: the plugin posts hooks
+                # without ordering them, so the failed attempt's last tool call
+                # can arrive after its end. It is recorded and analyzed like any
+                # other, but leaves the run waiting and the watchdog paused.
+                self._resume_attempt(active)
             assert active.runtime_sink is not None
             if any(event.kind is EventKind.RUN_START for event in active.pipeline.history):
                 # Reattachment happens under the recorder's global map lock;
@@ -561,8 +678,18 @@ class OpenClawRunRecorder:
                 self._handle_run_start(active, payload, record)
             elif hook_kind is OpenClawHookKind.TOOL:
                 self._handle_tool(active, payload, record)
+                if active.awaiting_retry and not active.completed:
+                    # A late tool call of the failed attempt can still select a
+                    # STOP: the provisional manifest and report say so now, not
+                    # only once the run is closed.
+                    active.directory.update_manifest(stopped=active.pipeline.stopped)
+                    _write_report(active.directory)
             elif hook_kind is OpenClawHookKind.LLM:
                 self._handle_llm(active, payload, record)
+                if active.awaiting_retry and not active.completed:
+                    # The usage of the attempt that just failed: still this
+                    # run's spend, so the provisional report is rebuilt with it.
+                    _write_report(active.directory)
             elif hook_kind is OpenClawHookKind.RUN_END:
                 self._handle_run_end(active, payload, record)
             else:
@@ -574,7 +701,9 @@ class OpenClawRunRecorder:
         Without ``enforce`` the answer is always ``None``: OpenClaw runs every
         tool call. With it, every tool call of a run whose pipeline has stopped
         gets ``{"block": True, "blockReason": ...}``; any other run, an unknown
-        run, a finished run and any other hook get ``None``.
+        run, a finished run and any other hook get ``None``. A run waiting for
+        another attempt after a failed ``agent_end`` is not finished: its next
+        attempt's tool calls stay blocked.
 
         The query reads the run's pipeline state and writes nothing: no raw
         journal line, no decision, no new run, so recordings and their replay
@@ -853,6 +982,17 @@ class OpenClawRunRecorder:
             ),
         )
         self._arm_runtime(active)
+        attempt_ends = _failed_attempt_ends(existing)
+        active.failed_attempts = len(attempt_ends)
+        if status == AWAITING_RETRY_STATUS:
+            # Same paused watchdog as a live failed attempt: only a resuming
+            # hook may re-arm it (see process_payload).
+            active.awaiting_retry = True
+            active.last_attempt_end = attempt_ends[-1] if attempt_ends else None
+            if attempt_ends:
+                active.last_attempt_end_digest = _attempt_end_digest(attempt_ends[-1][0])
+            assert active.runtime_sink is not None
+            active.runtime_sink.end_run()
         self._runs[run_id] = active
         return active
 
@@ -1420,6 +1560,127 @@ class OpenClawRunRecorder:
     ) -> None:
         if active.completed:
             return
+        # A payload without a runId gets a fresh orphan directory every time,
+        # so no later attempt could ever resume it: its end is the run's end.
+        if _is_failed_attempt_end(payload) and extract_openclaw_run_id(payload) is not None:
+            self._end_attempt(active, payload, record)
+            return
+        self._finalize_run(active, payload, record)
+
+    def _end_attempt(
+        self, active: _ActiveRun, payload: dict[str, Any], record: dict[str, Any]
+    ) -> None:
+        """End one failed attempt and keep the run open for the next one.
+
+        Nothing final is written: no ``final.json``, no ``trace.json``, no
+        terminal status. The pipeline, sequence, cost accumulator and any STOP
+        stay as they are, so a later attempt continues the same analysis and an
+        enforced STOP keeps blocking it.
+
+        The duration watchdog is paused, not reset. OpenClaw sends no signal when
+        a failed attempt was the run's last, so a live timer could later fire on
+        a run that has already ended and record a STOP nothing caused. The
+        deadline keeps its original anchor (the durable ``RUN_START``): the next
+        attempt's start re-arms it, and an overdue deadline fires right there, on
+        a run that has just proven to be alive.
+        """
+        assert active.runtime_sink is not None
+        # A deadline already due at this boundary still fires here, as it would
+        # at any other hook.
+        active.runtime_sink.end_run()
+        if active.completed:
+            return
+        active.awaiting_retry = True
+        active.failed_attempts += 1
+        active.last_attempt_end = (payload, record)
+        active.last_attempt_end_digest = _attempt_end_digest(payload)
+        active.directory.update_manifest(
+            status=AWAITING_RETRY_STATUS,
+            event_count=active.sequence,
+            failed_attempts=active.failed_attempts,
+            stopped=active.pipeline.stopped,
+            **self._cost_fields(active),
+        )
+        _write_report(active.directory)
+
+    def _resume_attempt(self, active: _ActiveRun) -> None:
+        """Reopen a run waiting for another attempt; nothing in it restarts.
+
+        The manifest is written first: if that fails, the run is still waiting
+        and the next hook tries again. A fresh watchdog adopts the durable
+        ``RUN_START`` anchor, so the deadline is the run's original one.
+        """
+        active.directory.update_manifest(
+            status="started" if active.started else "orphan",
+            event_count=active.sequence,
+        )
+        active.awaiting_retry = False
+        self._arm_runtime(active)
+
+    def _close_superseded_runs(self, run_id: str, payload: dict[str, Any]) -> None:
+        """End the runs of this session still waiting for another attempt.
+
+        OpenClaw runs one run at a time per session: every run of a session goes
+        through one command lane whose concurrency is 1. A new ``runId``
+        starting in a session therefore proves that a run of that session
+        waiting after a failed attempt will get no further attempt. It ends as
+        ``completed``, its last failed ``agent_end`` being its end. Without this,
+        every run whose last attempt failed (a user abort, an error OpenClaw
+        does not retry) would stay open until the listener restarts.
+        """
+        session_key = extract_openclaw_context(payload).session_key
+        if session_key is None:
+            return
+        with self._lock:
+            waiting = [
+                other
+                for other_id, other in self._runs.items()
+                if other_id != run_id and other.awaiting_retry
+            ]
+        if not waiting:
+            return
+        existing = self._store.resolve_run(run_id)
+        if existing is not None and existing.read_manifest().get("status") in TERMINAL_STATUSES:
+            # A duplicated start of a run that already ended says nothing about
+            # the session's current run.
+            return
+        for other in waiting:
+            with other.lock:
+                if other.completed or not other.awaiting_retry or other.last_attempt_end is None:
+                    continue
+                if other.directory.read_manifest().get("session_key") != session_key:
+                    continue
+                logger.info(
+                    "closing OpenClaw run %r after a failed attempt: run %r started in its session",
+                    other.directory.original_run_id,
+                    run_id,
+                )
+                end_payload, end_record = other.last_attempt_end
+                try:
+                    self._finalize_run(other, end_payload, end_record, superseded_by=run_id)
+                except (OSError, ValueError, KeyError, TypeError):
+                    # Contained: this hook belongs to the new run, which must
+                    # not lose its start to the old run's disk error. The old
+                    # run keeps waiting; a later start or the sweep ends it.
+                    logger.exception(
+                        "could not close OpenClaw run %r after run %r started in its session",
+                        other.directory.original_run_id,
+                        run_id,
+                    )
+
+    def _finalize_run(
+        self,
+        active: _ActiveRun,
+        payload: dict[str, Any],
+        record: dict[str, Any],
+        *,
+        superseded_by: str | None = None,
+    ) -> None:
+        """Write a run's final files from the ``agent_end`` that ended it.
+
+        ``superseded_by`` names the run whose start ended this one, when its last
+        failed attempt is its end (see :meth:`_close_superseded_runs`).
+        """
         assert active.runtime_sink is not None
         active.runtime_sink.end_run()
         hook_event: dict[str, Any] = _hook_part(payload, "event")
@@ -1449,6 +1710,13 @@ class OpenClawRunRecorder:
         }
         if health_reason is not None:
             metadata["health_reason"] = health_reason
+        attempt_fields: dict[str, Any] = {}
+        if active.failed_attempts:
+            attempt_fields["failed_attempts"] = active.failed_attempts
+        if superseded_by is not None:
+            attempt_fields["ended_by"] = ENDED_BY_NEXT_RUN
+            attempt_fields["superseded_by_run_id"] = superseded_by
+        metadata.update(attempt_fields)
         trace = Trace(
             label=health,
             description=f"Recorded OpenClaw run {active.directory.original_run_id}",
@@ -1479,9 +1747,11 @@ class OpenClawRunRecorder:
             health=health,
             health_reason=health_reason,
             stopped=active.pipeline.stopped,
+            **attempt_fields,
             **self._cost_fields(active),
         )
         active.completed = True
+        active.awaiting_retry = False
         # Written last, from the finalized directory, so the report is
         # exactly what a later ``pathlayer-report`` rebuilds from the same files.
         _write_report(active.directory)
@@ -1583,6 +1853,50 @@ def evaluate_health(pipeline: Pipeline, *, success: Any) -> tuple[str, str]:
     if success is not True:
         return UNKNOWN_LABEL, f"agent_end did not report success (success={success!r})"
     return UNKNOWN_LABEL, "live recording requires human curation"
+
+
+def _is_failed_attempt_end(payload: dict[str, Any]) -> bool:
+    """An ``agent_end`` reporting ``success`` exactly ``False``: an attempt, not the run.
+
+    Any other value -- ``True``, absent, ``None``, a string -- keeps the
+    historical meaning: the run ended.
+    """
+    return payload.get("hook") == AGENT_END and _hook_part(payload, "event").get("success") is False
+
+
+def _attempt_end_digest(payload: dict[str, Any]) -> str:
+    """Identity of one attempt's ``agent_end``, to recognize a repeated delivery.
+
+    Content alone cannot tell a repeated delivery from a second attempt that
+    failed the same way, so it is compared only with the end the run is waiting
+    after, before any new attempt has started (see ``process_payload``).
+    """
+    canonical = json.dumps(
+        {"event": payload.get("event"), "ctx": payload.get("ctx")},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _failed_attempt_ends(directory: RunDirectory) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Every failed ``agent_end`` journaled for a run, as (payload, raw record).
+
+    Unreadable lines are skipped: the raw-journal replay that runs alongside
+    this scan reports them.
+    """
+    if not directory.raw_events_path.is_file():
+        return []
+    ends: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for line in directory.raw_events_path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if isinstance(payload, dict) and _is_failed_attempt_end(payload):
+            ends.append((payload, record))
+    return ends
 
 
 def _as_int(value: Any) -> int:

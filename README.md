@@ -202,7 +202,10 @@ detectors:
 starts it on the first root callback and OpenClaw starts it on
 `before_agent_run`; custom adapters should call those lifecycle methods at the
 real run boundaries. If they do not, the first event starts the watchdog with a
-warning, and time before that event cannot be measured. The detector remains
+warning, and time before that event cannot be measured. An OpenClaw run can
+span several attempts; the deadline counts from the first one, and the watchdog
+pauses while the run waits for another attempt after a failed one, then fires
+at the next attempt's first hook if the deadline has passed. The detector remains
 pure: durable `run_start` and `run_timeout` events carry the lifecycle through
 SQLite and exact replay. The configured duration is a hard ceiling, not a
 confidence ramp: the duration signal is `0` before the deadline and `1` at it.
@@ -535,6 +538,9 @@ received after it ended (`post_run_estimated_usd`). A run recorded before
 0.1.1 keeps that spend out of its total, as it was reported then. No finished
 decision or trace is rewritten. Applying this spend to the next run's session budget is
 planned in [#29](https://github.com/PathlayerLabs/pathlayer/issues/29).
+When OpenClaw retries a run after a failed attempt (a compaction, a timeout,
+a provider failover), the failed attempt's usage arrives while the run is
+still open: it counts in-run, and the budget can stop the attempts that follow.
 
 Provider-wrapped model ids (Amazon Bedrock's
 `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`, Vertex AI's
@@ -649,7 +655,7 @@ not forcibly cancel a provider request that is already blocked; the STOP is
 applied as soon as the runtime can observe/cooperate with that request. The
 OpenClaw recorder persists the timeout, STOP decision, trace and report. It
 never terminates the separate OpenClaw process; with `--enforce` it blocks the
-run's later tool calls (see
+run's later tool calls, including those of the run's later attempts (see
 [`examples/openclaw_plugin/README.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/openclaw_plugin/README.md#enforce-stop-opt-in)).
 
 ## Development
