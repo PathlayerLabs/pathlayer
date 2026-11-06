@@ -172,9 +172,12 @@ class _ActiveRun:
     # The last failed agent_end, (payload, raw record): the run's end if no
     # attempt follows and the next run of its session closes it.
     last_attempt_end: tuple[dict[str, Any], dict[str, Any]] | None = None
-    # Digests of every failed agent_end already journaled, so a duplicated one
-    # is dropped before anything is written (like a duplicated final end).
-    attempt_end_digests: set[str] = field(default_factory=set)
+    # Digest of the failed agent_end the run is waiting after. The same end
+    # arriving again before any new attempt is a repeated delivery, dropped
+    # before anything is written (like a duplicated final end). Once a new
+    # attempt has started, an identical end is that attempt's own: two attempts
+    # can fail with the same error, snapshot and duration.
+    last_attempt_end_digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,10 +622,13 @@ class OpenClawRunRecorder:
                 return
             if (
                 hook_kind is OpenClawHookKind.RUN_END
-                and _attempt_end_digest(payload) in active.attempt_end_digests
+                and active.awaiting_retry
+                and _attempt_end_digest(payload) == active.last_attempt_end_digest
             ):
-                # A duplicated failed agent_end: dropped before anything is
-                # written, exactly like a duplicated end of a finished run.
+                # The end the run is already waiting after, delivered again: no
+                # new attempt started in between, so it ends nothing new. It is
+                # dropped before anything is written, exactly like a duplicated
+                # end of a finished run.
                 return
             if active.awaiting_retry and hook_kind in {
                 OpenClawHookKind.RUN_START,
@@ -962,12 +968,13 @@ class OpenClawRunRecorder:
         self._arm_runtime(active)
         attempt_ends = _failed_attempt_ends(existing)
         active.failed_attempts = len(attempt_ends)
-        active.attempt_end_digests = {_attempt_end_digest(end) for end, _ in attempt_ends}
         if status == AWAITING_RETRY_STATUS:
             # Same paused watchdog as a live failed attempt: only a resuming
             # hook may re-arm it (see process_payload).
             active.awaiting_retry = True
             active.last_attempt_end = attempt_ends[-1] if attempt_ends else None
+            if attempt_ends:
+                active.last_attempt_end_digest = _attempt_end_digest(attempt_ends[-1][0])
             assert active.runtime_sink is not None
             active.runtime_sink.end_run()
         self._runs[run_id] = active
@@ -1568,7 +1575,7 @@ class OpenClawRunRecorder:
         active.awaiting_retry = True
         active.failed_attempts += 1
         active.last_attempt_end = (payload, record)
-        active.attempt_end_digests.add(_attempt_end_digest(payload))
+        active.last_attempt_end_digest = _attempt_end_digest(payload)
         active.directory.update_manifest(
             status=AWAITING_RETRY_STATUS,
             event_count=active.sequence,
@@ -1840,10 +1847,11 @@ def _is_failed_attempt_end(payload: dict[str, Any]) -> bool:
 
 
 def _attempt_end_digest(payload: dict[str, Any]) -> str:
-    """Identity of one attempt's ``agent_end``, to recognize a duplicate of it.
+    """Identity of one attempt's ``agent_end``, to recognize a repeated delivery.
 
-    Two genuine attempts never send the same end: each carries its own
-    duration and message snapshot.
+    Content alone cannot tell a repeated delivery from a second attempt that
+    failed the same way, so it is compared only with the end the run is waiting
+    after, before any new attempt has started (see ``process_payload``).
     """
     canonical = json.dumps(
         {"event": payload.get("event"), "ctx": payload.get("ctx")},

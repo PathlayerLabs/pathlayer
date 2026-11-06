@@ -404,14 +404,38 @@ def test_a_duplicated_failed_agent_end_writes_nothing(tmp_path: Path) -> None:
 
     recorder.process_payload(json.loads(json.dumps(failed)))
     assert _files(run) == files
-
-    # Still a duplicate once the next attempt has started.
-    recorder.process_payload(_start("run-a"))
+    # The usage report OpenClaw sends after the end proves no new attempt.
+    recorder.process_payload(_llm("run-a"))
     files = _files(run)
     recorder.process_payload(json.loads(json.dumps(failed)))
     assert _files(run) == files
-    assert run.read_manifest()["status"] == "started"
+    assert run.read_manifest()["status"] == "awaiting_retry"
     assert run.read_manifest()["failed_attempts"] == 1
+
+
+def test_identical_failed_ends_of_two_attempts_are_two_attempts(tmp_path: Path) -> None:
+    # Two attempts can fail with the same error, snapshot and duration: once a
+    # new attempt has started, the identical end is that attempt's own.
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    failed = _end("run-a", success=False)
+    recorder.process_payload(failed)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(json.loads(json.dumps(failed)))
+
+    run = _run(tmp_path, "run-a")
+    manifest = run.read_manifest()
+    assert manifest["status"] == "awaiting_retry"
+    assert manifest["failed_attempts"] == 2
+    ends = [record for record in _jsonl(run.raw_events_path) if record["hook"] == "agent_end"]
+    assert len(ends) == 2
+
+    # The waiting run can therefore still be ended by the next run of its session.
+    recorder.process_payload(_start("run-b"))
+    manifest = run.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["ended_by"] == "next_run_in_session"
+    assert manifest["failed_attempts"] == 2
 
 
 @pytest.mark.parametrize("success", [None, "false", 0, "missing"])
@@ -568,10 +592,10 @@ def test_a_restarted_listener_resumes_a_waiting_run(tmp_path: Path) -> None:
     second = OpenClawRunRecorder(tmp_path)
     second.process_payload(_llm("run-a"))
     assert _run(tmp_path, "run-a").read_manifest()["status"] == "awaiting_retry"
-    second.process_payload(_start("run-a"))
     files = _files(_run(tmp_path, "run-a"))
     second.process_payload(json.loads(json.dumps(failed)))  # duplicate, recognized after restart
     assert _files(_run(tmp_path, "run-a")) == files
+    second.process_payload(_start("run-a"))
     second.process_payload(_tool("run-a", "c2"))
     second.process_payload(_end("run-a", success=True))
 

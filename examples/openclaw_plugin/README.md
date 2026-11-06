@@ -259,7 +259,9 @@ exactly `false` therefore ends an attempt, not the run:
   attempt was its end (`ended_by: next_run_in_session` in the manifest). A run
   still waiting at the next listener startup is marked `interrupted`; its
   `trace.json` is then written with every recorded event.
-- A duplicated failed `agent_end` is dropped, like a duplicated final one.
+- A failed `agent_end` delivered again before any new attempt starts is
+  dropped, like a duplicated final one. After a new attempt's start or tool
+  call, an identical failed end is that attempt's own and counts.
 - The duration watchdog counts from the first attempt. It pauses while the run
   waits: OpenClaw sends no signal when a failed attempt was the run's last, and
   a live timer would otherwise fire on a run that has already ended. If the
