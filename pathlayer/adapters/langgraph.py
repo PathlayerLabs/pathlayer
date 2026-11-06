@@ -232,20 +232,57 @@ class _TokenUsage:
 
 
 def _count(value: Any) -> int:
-    """A token count, ``0`` unless it is a non-negative integer."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    """A token count, ``0`` unless it reads as a non-negative whole number.
+
+    Integers, whole floats (``100.0``) and digit strings (``"100"``) are accepted,
+    as the historical ``int(...)`` read did; anything else counts as nothing.
+    """
+    if isinstance(value, bool):
         return 0
-    return value
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float) and value.is_integer():
+        return max(0, int(value))
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return 0
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _detail(details: Mapping[str, Any], key: str) -> int:
+    """One cache count from ``input_token_details``, whatever key carries it.
+
+    Integrations do not all use the generic key. Current langchain-anthropic
+    (and the Vertex and Bedrock Converse integrations) leave ``cache_creation``
+    at 0 and put the writes under ``ephemeral_5m_input_tokens`` /
+    ``ephemeral_1h_input_tokens``; earlier releases filled both. langchain-openai
+    prefixes the keys of a non-default service tier (``flex_cache_read``). The
+    same tokens can thus appear under several keys: the largest reading is
+    taken, never their sum.
+    """
+    readings = [_count(details.get(key))]
+    readings.append(sum(_count(v) for k, v in details.items() if k.endswith(f"_{key}")))
+    if key == "cache_creation":
+        readings.append(
+            _count(details.get("ephemeral_5m_input_tokens"))
+            + _count(details.get("ephemeral_1h_input_tokens"))
+        )
+    return max(readings)
 
 
 def _split_input(total_input: int, cache_read: int, cache_write: int) -> _TokenUsage:
     """Take the cache tokens out of an input count that includes them.
 
-    Counters that do not add up (cache above the total) never yield negative
-    fresh input; the cache counts are trusted, since they carry the lower rate.
+    Counters that do not add up never price more input-side tokens than the
+    input count: reads are capped at it, writes at what the reads leave.
     """
+    cache_read = min(cache_read, total_input)
+    cache_write = min(cache_write, total_input - cache_read)
     return _TokenUsage(
-        input_tokens=max(0, total_input - cache_read - cache_write),
+        input_tokens=total_input - cache_read - cache_write,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
     )
@@ -256,8 +293,8 @@ def _extract_tokens(response: LLMResult) -> _TokenUsage:
 
     Prefers per-generation ``message.usage_metadata`` (chat models), whose
     ``input_tokens`` is the sum of all input tokens and whose
-    ``input_token_details`` gives ``cache_read`` and ``cache_creation`` (cache
-    writes). Falls back to ``llm_output["token_usage"]`` (``prompt_tokens``,
+    ``input_token_details`` gives the cache reads and writes (see ``_detail``).
+    Falls back to ``llm_output["token_usage"]`` (``prompt_tokens``,
     ``completion_tokens``, and OpenAI's ``prompt_tokens_details.cached_tokens``).
     Returns zeros when neither is present (some providers report nothing).
     """
@@ -272,11 +309,11 @@ def _extract_tokens(response: LLMResult) -> _TokenUsage:
             message = getattr(generation, "message", None)
             usage = getattr(message, "usage_metadata", None) if message is not None else None
             if usage:
-                details = usage.get("input_token_details") or {}
+                details = _mapping(usage.get("input_token_details"))
                 call = _split_input(
                     _count(usage.get("input_tokens")),
-                    _count(details.get("cache_read")),
-                    _count(details.get("cache_creation")),
+                    _detail(details, "cache_read"),
+                    _detail(details, "cache_creation"),
                 )
                 usage_total = usage_total.plus(
                     _TokenUsage(output_tokens=_count(usage.get("output_tokens"))).plus(call)
@@ -285,8 +322,8 @@ def _extract_tokens(response: LLMResult) -> _TokenUsage:
                 break
     if found:
         return usage_total
-    token_usage = (response.llm_output or {}).get("token_usage") or {}
-    prompt_details = token_usage.get("prompt_tokens_details") or {}
+    token_usage = _mapping(_mapping(response.llm_output).get("token_usage"))
+    prompt_details = _mapping(token_usage.get("prompt_tokens_details"))
     return _TokenUsage(output_tokens=_count(token_usage.get("completion_tokens"))).plus(
         _split_input(
             _count(token_usage.get("prompt_tokens")), _count(prompt_details.get("cached_tokens")), 0

@@ -13,6 +13,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -607,6 +608,7 @@ def _cached_result(
     *,
     cache_read: int = 0,
     cache_creation: int = 0,
+    details: dict[str, Any] | None = None,
 ) -> LLMResult:
     """A chat result whose input_tokens include cache tokens, as LangChain counts them."""
     message = AIMessage(
@@ -615,7 +617,9 @@ def _cached_result(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
-            "input_token_details": {"cache_read": cache_read, "cache_creation": cache_creation},
+            "input_token_details": details
+            if details is not None
+            else {"cache_read": cache_read, "cache_creation": cache_creation},
         },
     )
     return LLMResult(
@@ -667,13 +671,90 @@ def test_llm_cache_tokens_of_a_free_model_are_free() -> None:
     assert "unpriced_cache_tokens" not in events[0].metadata
 
 
-def test_llm_cache_counts_above_the_input_never_make_input_negative() -> None:
+def test_llm_cache_counts_above_the_input_are_capped_at_it() -> None:
+    # Counters that break LangChain's contract never price more input-side
+    # tokens than the input count: writes cost more than fresh input.
     events, adapter = _capture()
     _drive_llm(
-        adapter, _cached_result(100, 0, "claude-sonnet-4-5", cache_read=500), serialized=None
+        adapter,
+        _cached_result(100, 0, "claude-sonnet-4-5", cache_read=60, cache_creation=500),
+        serialized=None,
     )
-    assert events[0].metadata["input_tokens"] == 0
-    assert events[0].cost_usd == pytest.approx(500 * 0.30 / 1e6)
+    [event] = events
+    assert event.metadata["input_tokens"] == 0
+    assert (event.metadata["cache_read_tokens"], event.metadata["cache_write_tokens"]) == (60, 40)
+    assert event.cost_usd == pytest.approx((60 * 0.30 + 40 * 3.75) / 1e6)
+
+
+def test_llm_cache_writes_reported_by_ttl_are_priced() -> None:
+    # Current langchain-anthropic (also Vertex, Bedrock Converse): cache_creation
+    # stays 0, the writes are under the ephemeral TTL keys.
+    events, adapter = _capture()
+    details = {
+        "cache_read": 50_000,
+        "cache_creation": 0,
+        "ephemeral_5m_input_tokens": 30_000,
+        "ephemeral_1h_input_tokens": 10_000,
+    }
+    _drive_llm(
+        adapter,
+        _cached_result(92_000, 1_000, "claude-sonnet-4-5", details=details),
+        serialized=None,
+    )
+    [event] = events
+    assert event.metadata["cache_write_tokens"] == 40_000
+    assert event.metadata["input_tokens"] == 2_000
+    assert event.cost_usd == pytest.approx(
+        (2_000 * 3.0 + 50_000 * 0.30 + 40_000 * 3.75 + 1_000 * 15.0) / 1e6
+    )
+
+
+def test_llm_cache_writes_under_both_keys_are_counted_once() -> None:
+    # langchain-anthropic 2025-06 to 2026-03 filled the generic and the TTL keys.
+    events, adapter = _capture()
+    details = {"cache_read": 0, "cache_creation": 8_000, "ephemeral_5m_input_tokens": 8_000}
+    _drive_llm(
+        adapter, _cached_result(10_000, 0, "claude-opus-4-5", details=details), serialized=None
+    )
+    assert events[0].metadata["cache_write_tokens"] == 8_000
+    assert events[0].cost_usd == pytest.approx((2_000 * 5.0 + 8_000 * 6.25) / 1e6)
+
+
+def test_llm_cache_reads_of_a_service_tier_are_counted() -> None:
+    # langchain-openai prefixes the keys of a non-default service tier.
+    events, adapter = _capture()
+    details = {"flex": 2_000, "flex_cache_read": 8_000}
+    _drive_llm(adapter, _cached_result(10_000, 0, "gpt-4o", details=details), serialized=None)
+    assert events[0].metadata["cache_read_tokens"] == 8_000
+    assert events[0].metadata["unpriced_cache_tokens"] == 8_000
+
+
+def test_llm_output_fallback_reads_lenient_counts_and_odd_details() -> None:
+    events, adapter = _capture()
+    response = LLMResult(
+        generations=[[Generation(text="x")]],
+        llm_output={
+            "model_name": "gpt-4o",
+            "token_usage": {
+                "prompt_tokens": "2000",
+                "completion_tokens": 100.0,
+                "prompt_tokens_details": None,
+            },
+        },
+    )
+    _drive_llm(adapter, response, serialized=None)
+    [event] = events
+    assert (event.metadata["input_tokens"], event.metadata["output_tokens"]) == (2000, 100)
+
+    response = LLMResult(
+        generations=[[Generation(text="x")]],
+        llm_output={
+            "model_name": "gpt-4o",
+            "token_usage": {"prompt_tokens": 10, "prompt_tokens_details": ["not", "a", "dict"]},
+        },
+    )
+    _drive_llm(adapter, response, serialized=None)
+    assert events[1].metadata["input_tokens"] == 10
 
 
 def test_llm_without_cache_details_is_priced_as_before() -> None:

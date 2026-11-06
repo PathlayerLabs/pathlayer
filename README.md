@@ -532,11 +532,13 @@ rate errs low. A variant of a listed model (`claude-opus-4-5-thinking`,
 OpenRouter's `:nitro`) stays unpriced rather than borrowing its family's base
 price. A `pricing.models` key equal to the full wrapped id prices that id
 alone. On LangGraph, `usage_metadata.input_tokens` includes prompt-cache
-tokens; the adapter takes `input_token_details.cache_read` and `cache_creation`
-out of it and prices them at the model's cache rates (OpenAI's
-`prompt_tokens_details.cached_tokens` likewise on the `llm_output` fallback). A
-model without a cache rate leaves them unpriced, counted in the event's
-`unpriced_cache_tokens`.
+tokens; the adapter takes the cache reads and writes of `input_token_details`
+out of it (`cache_read`, `cache_creation`, the `ephemeral_5m/1h_input_tokens`
+keys of Anthropic integrations, OpenAI's service-tier keys such as
+`flex_cache_read`) and prices them at the model's cache rates, the 5-minute
+write rate for every write. OpenAI's `prompt_tokens_details.cached_tokens` is
+handled likewise on the `llm_output` fallback. A model without a cache rate
+leaves them unpriced, counted in the event's `unpriced_cache_tokens`.
 State semantics version 2 rejects older durable scopes: estimated token costs
 now belong to the estimated counter, and a known zero estimate no longer
 receives a fallback charge. Start a new state key for runs created with the
