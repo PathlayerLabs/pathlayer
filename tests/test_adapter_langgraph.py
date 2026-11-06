@@ -756,6 +756,14 @@ def test_llm_output_fallback_reads_lenient_counts_and_odd_details() -> None:
     _drive_llm(adapter, response, serialized=None)
     assert events[1].metadata["input_tokens"] == 10
 
+    # A non-ASCII digit passes str.isdigit() but not int(): counted as nothing.
+    response = LLMResult(
+        generations=[[Generation(text="x")]],
+        llm_output={"model_name": "gpt-4o", "token_usage": {"prompt_tokens": "\u00b2"}},
+    )
+    _drive_llm(adapter, response, serialized=None)
+    assert events[2].metadata["input_tokens"] == 0
+
 
 def test_llm_without_cache_details_is_priced_as_before() -> None:
     events, adapter = _capture()

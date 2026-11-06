@@ -243,7 +243,7 @@ def _count(value: Any) -> int:
         return max(0, value)
     if isinstance(value, float) and value.is_integer():
         return max(0, int(value))
-    if isinstance(value, str) and value.strip().isdigit():
+    if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
         return int(value.strip())
     return 0
 
