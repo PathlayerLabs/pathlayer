@@ -31,7 +31,7 @@ import socket
 import sys
 import threading
 import types
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import IO
 
@@ -319,8 +319,14 @@ def lock_runs_root(root: Path) -> Iterator[IO[str]]:
                 _unlock(handle)
 
 
-def _wait_for_stop(stop: threading.Event) -> None:
-    """Block until SIGINT or SIGTERM (or ``stop`` is set), then restore the handlers."""
+def _wait_for_stop(stop: threading.Event, ready: Callable[[], None] | None = None) -> None:
+    """Block until SIGINT or SIGTERM (or ``stop`` is set), then restore the handlers.
+
+    ``ready`` runs once the handlers are installed: whatever it announces, a
+    signal sent in reply (a service manager stopping the listener as soon as it
+    reports ready) is caught, not left to the default action that kills the
+    process with a non-zero status.
+    """
 
     def _handler(_signum: int, _frame: types.FrameType | None) -> None:
         stop.set()
@@ -330,6 +336,8 @@ def _wait_for_stop(stop: threading.Event) -> None:
     for signum in signals:
         signal.signal(signum, _handler)
     try:
+        if ready is not None:
+            ready()
         while not stop.wait(_STOP_POLL_SECONDS):
             pass
     finally:
@@ -351,7 +359,7 @@ def run_record(args: argparse.Namespace, *, stop: threading.Event | None = None)
         except OSError as exc:
             raise _port_in_use(args.port, exc) from exc
 
-        try:
+        def _announce() -> None:
             print("=" * 60)
             print("Pathlayer OpenClaw recorder -- ready.")
             print("=" * 60)
@@ -369,7 +377,9 @@ def run_record(args: argparse.Namespace, *, stop: threading.Event | None = None)
                     "Enforcement: off -- observe only (start with --enforce to block after a STOP)"
                 )
             print("Ctrl+C to stop.\n", flush=True)
-            _wait_for_stop(stop or threading.Event())
+
+        try:
+            _wait_for_stop(stop or threading.Event(), ready=_announce)
         finally:
             adapter.detach()
     print("Stopping recorder.", flush=True)

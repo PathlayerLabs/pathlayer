@@ -362,6 +362,32 @@ def test_record_records_runs_until_stopped(
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == handlers
 
 
+def test_record_announces_ready_only_once_it_catches_a_stop_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A service manager may send SIGTERM as soon as the ready banner appears:
+    # the handlers must already be in place, or the default action kills the
+    # listener with a non-zero status.
+    _clean_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    original = signal.getsignal(signal.SIGTERM)
+    handler_at: dict[str, object] = {}
+
+    def _print(*values: object, **_kwargs: object) -> None:
+        line = " ".join(str(value) for value in values)
+        handler_at.setdefault(line.split(" : ")[0], signal.getsignal(signal.SIGTERM))
+
+    monkeypatch.setattr(openclaw_cli, "print", _print, raising=False)
+    stop = threading.Event()
+    stop.set()
+    args = openclaw_cli.parse_args(["record", "--port", "0", "--runs-root", str(tmp_path / "runs")])
+
+    assert openclaw_cli.run_record(args, stop=stop) == 0
+
+    assert handler_at["Ingest URL"] is not original
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
 @_POSIX_ONLY
 def test_a_stop_signal_ends_the_wait_and_restores_the_handlers(
     monkeypatch: pytest.MonkeyPatch,
