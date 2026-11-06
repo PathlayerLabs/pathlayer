@@ -273,6 +273,12 @@ def test_without_unwrapping_ids_match_as_pathlayer_0_1_0_did() -> None:
     assert cost_of("claude-sonnet-4-5-20250929", 1_000_000, 0, unwrap_ids=False) == (
         pytest.approx(3.0)
     )
+    # 0.1.0's looser snapshot rule, kept so a rebuilt report matches trace.json:
+    # it read this variant as a snapshot of claude-opus-4.
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0) == 0.0
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(15.0)
+    )
 
 
 def test_resolve_price_returns_the_matched_entry() -> None:

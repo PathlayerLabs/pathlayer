@@ -145,8 +145,14 @@ def normalize_model_id(model: str) -> str:
 _SNAPSHOT_SUFFIX = re.compile(r"\d[\d-]*")
 
 
-def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
-    """Exact key, else the longest key ``model`` is a dated snapshot of."""
+def _match(
+    model: str, table: Mapping[str, ModelPrice], *, legacy: bool = False
+) -> ModelPrice | None:
+    """Exact key, else the longest key ``model`` is a dated snapshot of.
+
+    ``legacy`` applies Pathlayer 0.1.0's looser rule: any suffix that starts
+    with a digit, variants of a listed sub-version included.
+    """
     exact = table.get(model)
     if exact is not None:
         return exact
@@ -154,11 +160,8 @@ def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
     for key in table:
         prefix = f"{key}-"
         suffix = model[len(prefix) :]
-        if (
-            model.startswith(prefix)
-            and _SNAPSHOT_SUFFIX.fullmatch(suffix)
-            and len(key) > len(best_key)
-        ):
+        dated = suffix[:1].isdigit() if legacy else _SNAPSHOT_SUFFIX.fullmatch(suffix)
+        if model.startswith(prefix) and dated and len(key) > len(best_key):
             best_key = key
     return table[best_key] if best_key else None
 
@@ -175,8 +178,8 @@ def _lookup(
     must NOT borrow the base price -- mispricing toward over-charge could trip
     ``BudgetDetector`` into a wrongful STOP. That includes a variant of a listed
     sub-version (``claude-opus-4-5-thinking``, OpenRouter's
-    ``claude-opus-4.5:nitro``): read as ``4-5-thinking`` after
-    ``claude-opus-4``, it would borrow Opus 4's price, three times Opus 4.5's.
+    ``claude-opus-4.5:nitro``): read as ``5-thinking`` after
+    ``claude-opus-4-``, it would borrow Opus 4's price, three times Opus 4.5's.
     Unknown ids return ``None`` (the caller bills $0, an under-count we accept
     over a wrong stop). Longest key wins on ties. Returns ``None`` when nothing
     matches.
@@ -196,16 +199,17 @@ def _lookup(
     ``claude-opus-4-5@20251101`` would read as a snapshot of ``claude-opus-4``
     and borrow its higher price.
 
-    ``unwrap_ids=False`` skips the normalization: the raw id goes through the
-    snapshot rule, as Pathlayer 0.1.0 matched it. A report rebuilt for a run
-    recorded then uses it, so it prices no call that recording left unpriced.
+    ``unwrap_ids=False`` matches as Pathlayer 0.1.0 did: no normalization, and
+    its looser snapshot rule on the raw id. A report rebuilt for a run recorded
+    then uses it, so its figures are the ones that recording computed: no call
+    it left unpriced gains a price, none it priced loses one.
     """
     if not model:
         return None
     lowered = model.lower()
     table = {key.lower(): value for key, value in prices.items()}
     if not unwrap_ids:
-        return _match(lowered, table)
+        return _match(lowered, table, legacy=True)
     exact = table.get(lowered)
     if exact is not None:
         return exact
