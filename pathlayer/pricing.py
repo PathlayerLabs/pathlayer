@@ -71,8 +71,9 @@ class ModelPrice:
 # the ``prices`` argument of ``cost_of``. Anthropic rates checked against
 # https://platform.claude.com/docs/en/about-claude/pricing on 2026-11-04,
 # including its cache rates: a cache read costs 0.1x the input rate (0.05x on
-# Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1) and the cache write is the
-# 5-minute one, 1.25x (the 1-hour write costs 2x, so an unknown TTL errs low).
+# Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1) and the cache
+# write is the 5-minute one, 1.25x (the 1-hour write costs 2x, so an unknown TTL
+# errs low).
 # OpenAI entries carry no cache rate yet. Claude Haiku 5.5 is left out: its rate
 # depends on the prompt length, which a flat per-token entry cannot express.
 DEFAULT_PRICES: dict[str, ModelPrice] = {
@@ -105,6 +106,9 @@ DEFAULT_PRICES: dict[str, ModelPrice] = {
     "claude-haiku-4-5": ModelPrice(1.0, 5.0, 0.10, 1.25),
     "claude-fable-5": ModelPrice(10.0, 50.0, 1.0, 12.50),
     "claude-fable-5-1": ModelPrice(10.0, 50.0, 0.25, 12.50),
+    # Limited availability: verified organizations only.
+    "claude-mythos-5": ModelPrice(10.0, 50.0, 1.0, 12.50),
+    "claude-mythos-5-1": ModelPrice(10.0, 50.0, 0.25, 12.50),
 }
 
 _PER_MTOK = 1_000_000.0

@@ -440,6 +440,63 @@ def test_a_reported_split_is_priced_at_the_pinned_cache_rates(tmp_path: Path) ->
     assert attribution.late.total_usd == pytest.approx(_SPLIT_USD)
 
 
+def _gpt_4o_run(root: Path, usage: dict[str, int]) -> RunDirectory:
+    # gpt-4o is in the default table without a cache rate.
+    recorder = OpenClawRunRecorder(root, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage=usage))
+    recorder.process_payload(_end("r1"))
+    return _run(root, "r1")
+
+
+def test_a_partially_priced_call_says_which_cache_tokens_it_left_out(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"input": 1_000, "cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    # 1,000 input tokens at $2.50 per million; the million cache reads have no rate.
+    assert attribution.attributed == CostShare(
+        estimated_usd=pytest.approx(0.0025),
+        costed_events=1,
+        partially_priced_events=1,
+        unpriced_cache_tokens=1_000_000,
+    )
+    assert "1 partially priced; 1,000,000 cache token(s) without a known rate" in (
+        attribution.attributed.describe()
+    )
+    assert report.cost.source.count("estimated from") == 1
+    assert "estimated from the reported input, output and cache token counters" in (
+        report.cost.source
+    )
+    assert "input/output ratio" not in report.cost.source
+    assert (
+        "1,000,000 cache token(s) over 1 model call(s) are not priced: no cache rate is "
+        "known for gpt-4o" in report.cost.source
+    )
+
+
+def test_a_call_with_only_unpriced_cache_tokens_is_unmeasured(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    assert attribution.attributed == CostShare(unmeasured_events=1, unpriced_cache_tokens=1_000_000)
+    assert attribution.attributed.total_usd is None
+    assert report.cost.estimated_usd is None
+    assert "1,000,000 cache token(s) over 1 model call(s) are not priced" in report.cost.source
+
+
+def test_a_total_only_call_names_the_input_ratio_method(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"total": 1_000})
+
+    report = build_run_report(run)
+
+    assert "estimated from total tokens and an input/output ratio" in report.cost.source
+    assert "cache token" not in report.cost.source
+
+
 def test_a_run_recorded_before_split_pricing_keeps_its_total_split(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path, config=_CACHED)
     recorder.process_payload(_before("r1"))
@@ -550,6 +607,8 @@ def test_cli_cost_attribution_separates_captured_attributed_unattributed(
             "estimated_usd": pytest.approx(_CALL_USD),
             "costed_events": 1,
             "unmeasured_events": 0,
+            "partially_priced_events": 0,
+            "unpriced_cache_tokens": 0,
         }
     ]
 

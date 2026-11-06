@@ -390,9 +390,9 @@ def _build_cost(
             "applied to the recorded calls"
         )
     if adapter_estimate is not None:
-        reasons.append(
-            f"${adapter_estimate:.6f} estimated from reported token counters at pinned local rates"
-        )
+        reasons.extend(_estimate_methods(events))
+    if trace_available:
+        reasons.extend(_unpriced_cache_reasons(events))
     return CostBreakdown(
         captured_usd=captured,
         priced_events=priced,
@@ -401,6 +401,49 @@ def _build_cost(
         carried_over_usd=None,
         source="; ".join(reasons),
     )
+
+
+# How each ``token_split`` turned token counters into an estimate. A run
+# recorded before split pricing carries no ``token_split``: it divided the total.
+_ESTIMATE_METHODS = {
+    "reported": "the reported input, output and cache token counters at local rates",
+    "input_ratio": "total tokens and an input/output ratio",
+}
+
+
+def _estimate_methods(events: Sequence[ToolEvent]) -> list[str]:
+    """One line per pricing method the adapter estimates used, with its amount."""
+    amounts: dict[str, float] = {}
+    for event in events:
+        if event.metadata.get("cost_measurement") != "estimated_total_tokens":
+            continue
+        split = event.metadata.get("token_split")
+        method = split if split in _ESTIMATE_METHODS else "input_ratio"
+        amounts[method] = amounts.get(method, 0.0) + budget_delta(event).estimated_usd
+    return [
+        f"${amounts[method]:.6f} estimated from {description}"
+        for method, description in _ESTIMATE_METHODS.items()
+        if method in amounts
+    ]
+
+
+def _unpriced_cache_reasons(events: Sequence[ToolEvent]) -> list[str]:
+    """Name the cache tokens no rate priced, and the models that lack one."""
+    tokens = 0
+    calls = 0
+    models: set[str] = set()
+    for event in events:
+        unpriced = _unpriced_cache_tokens(event)
+        if unpriced:
+            tokens += unpriced
+            calls += 1
+            models.add(event.tool)
+    if not tokens:
+        return []
+    return [
+        f"{tokens:,} cache token(s) over {calls} model call(s) are not priced: no cache "
+        f"rate is known for {', '.join(sorted(models))}, so the estimate leaves them out"
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +537,7 @@ def _share_of(events: Sequence[ToolEvent]) -> CostShare:
     share = CostShare()
     for event in events:
         delta = budget_delta(event)
+        unpriced = _unpriced_cache_tokens(event)
         if delta.priced_events or event.metadata.get("cost_measurement") == (
             "estimated_total_tokens"
         ):
@@ -502,11 +546,21 @@ def _share_of(events: Sequence[ToolEvent]) -> CostShare:
                     measured_usd=delta.captured_usd,
                     estimated_usd=delta.estimated_usd,
                     costed_events=1,
+                    partially_priced_events=int(unpriced > 0),
+                    unpriced_cache_tokens=unpriced,
                 )
             )
         else:
-            share = share.plus(CostShare(unmeasured_events=1))
+            share = share.plus(CostShare(unmeasured_events=1, unpriced_cache_tokens=unpriced))
     return share
+
+
+def _unpriced_cache_tokens(event: ToolEvent) -> int:
+    """The cache tokens an event's estimate left out for want of a cache rate."""
+    value = event.metadata.get("unpriced_cache_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def _source_trigger(payload: dict[str, Any]) -> str:

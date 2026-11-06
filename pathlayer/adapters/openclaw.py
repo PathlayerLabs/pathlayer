@@ -124,6 +124,9 @@ def translate_openclaw_llm_event(
     caching most tokens are cache reads, billed at a fraction of the input rate.
     A model whose cache rates are unknown leaves its cache tokens unpriced and
     counts them in ``unpriced_cache_tokens``, an under-count rather than a guess.
+    A call whose only tokens are such cache tokens priced nothing at all: it is
+    marked ``unmeasured_unknown_cache_rate``, like an unknown model, rather than
+    presented as an estimated $0.
     Without a split, the reported ``total`` is divided with ``input_ratio``
     (``token_split: "input_ratio"``). A split with a malformed counter falls back
     to the total, so a bad field never makes the estimate look precise.
@@ -186,9 +189,14 @@ def translate_openclaw_llm_event(
         return []
     if total is not None:
         metadata["reported_total_tokens"] = total
-    metadata["cost_measurement"] = (
-        "estimated_total_tokens" if price is not None else "unmeasured_unknown_model"
-    )
+    unpriced_cache = metadata.get("unpriced_cache_tokens", 0)
+    all_tokens = input_tokens + output_tokens + cache_read + cache_write
+    if price is None:
+        metadata["cost_measurement"] = "unmeasured_unknown_model"
+    elif unpriced_cache and unpriced_cache == all_tokens:
+        metadata["cost_measurement"] = "unmeasured_unknown_cache_rate"
+    else:
+        metadata["cost_measurement"] = "estimated_total_tokens"
     context = extract_openclaw_context(payload)
     if context.agent_id is not None:
         metadata["agent_id"] = context.agent_id

@@ -510,11 +510,12 @@ finally:
 An OpenClaw `llm_output` reports its input, output, cache-read and cache-write
 tokens; each is priced at its own rate, so a cached run is not billed as if
 every token were fresh input. Built-in Claude entries carry the published cache
-rates; a `pricing.models` entry may add `cache_read_usd_per_mtok` and
-`cache_write_usd_per_mtok`, and without them its cache tokens stay unpriced
-(counted in the event's `unpriced_cache_tokens`). When only a total is
-reported, Pathlayer estimates the input/output split with
-`pricing.openclaw_input_ratio` (default `0.8`).
+rates; built-in OpenAI entries have none yet. A `pricing.models` entry may add
+`cache_read_usd_per_mtok` and `cache_write_usd_per_mtok`. Without a cache rate,
+those tokens stay unpriced: the event counts them in `unpriced_cache_tokens`,
+the report names them, and the call is partially priced, or unmeasured when it
+has no other token. When only a total is reported, Pathlayer estimates the
+input/output split with `pricing.openclaw_input_ratio` (default `0.8`).
 Budget signals and reports identify that cost as estimated; it is not a
 provider invoice. Estimates count toward the configured budget brake, like
 per-tool budget estimates, and can select STOP. On OpenClaw, that STOP blocks
