@@ -638,6 +638,25 @@ def test_a_run_recorded_before_0_1_1_keeps_post_run_usage_out_of_its_total(
     assert "received after the run" not in report.cost.source
 
 
+def test_post_run_usage_without_a_usable_snapshot_is_not_blamed_on_0_1_0(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1"))
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    snapshot["models"]["model"]["input_usd_per_mtok"] = -1  # unusable as a whole
+    run.update_manifest(llm_pricing_snapshot=snapshot)
+
+    report = build_run_report(run)
+
+    assert report.cost.post_run_estimated_usd is None
+    assert not any("before Pathlayer 0.1.1" in note for note in report.notes)
+    assert any("Unpriced usage stays unmeasured" in note for note in report.notes)
+
+
 def test_a_corrupt_hook_journal_costs_the_attribution_not_the_report(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
     recorder.process_payload(_before("r1"))

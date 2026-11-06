@@ -815,7 +815,9 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     pricing = _pinned_pricing(manifest)
     # A run recorded before 0.1.1 reported its post-run usage as attributed,
     # never in its total: adding it now would print a headline nobody computed.
-    post_run_in_total = pricing is not None and pricing.split_usage
+    # Without a usable snapshot nothing post-run is priced, whatever the version.
+    recorded_before_0_1_1 = pricing is not None and not pricing.split_usage
+    post_run_in_total = not recorded_before_0_1_1
     post_run_reasons = _unpriced_cache_reasons(post_run_events, after_run=True)
     if late.costed_events and post_run_in_total:
         # Only the annex is added: in-run estimates already come from the trace
@@ -824,7 +826,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         post_run_reasons = [*_estimate_methods(post_run_events, after_run=True), *post_run_reasons]
     if post_run_reasons:
         cost = replace(cost, source="; ".join(filter(None, (cost.source, *post_run_reasons))))
-    if (late.costed_events or late.unmeasured_events) and post_run_in_total:
+    if (late.costed_events or late.unmeasured_events) and not recorded_before_0_1_1:
         notes.append(
             f"{late.costed_events + late.unmeasured_events} model usage report(s) "
             "reached Pathlayer "
