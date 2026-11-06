@@ -1,0 +1,56 @@
+[
+  {
+    "hook": "before_agent_run",
+    "event": {},
+    "ctx": {
+      "runId": "fixture-run",
+      "sessionKey": "fixture-session",
+      "agentId": "fixture-agent",
+      "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "modelProviderId": "bedrock"
+    }
+  },
+  {
+    "hook": "after_tool_call",
+    "event": {
+      "toolName": "read",
+      "toolCallId": "call-1",
+      "params": {},
+      "result": "ok"
+    },
+    "ctx": {
+      "runId": "fixture-run",
+      "sessionKey": "fixture-session",
+      "agentId": "fixture-agent"
+    }
+  },
+  {
+    "hook": "llm_output",
+    "event": {
+      "model": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "usage": {
+        "input": 1000,
+        "output": 500,
+        "cacheRead": 10000,
+        "cacheWrite": 2000,
+        "total": 13500
+      }
+    },
+    "ctx": {
+      "runId": "fixture-run",
+      "sessionKey": "fixture-session",
+      "agentId": "fixture-agent"
+    }
+  },
+  {
+    "hook": "agent_end",
+    "event": {
+      "success": true
+    },
+    "ctx": {
+      "runId": "fixture-run",
+      "sessionKey": "fixture-session",
+      "agentId": "fixture-agent"
+    }
+  }
+]

@@ -37,7 +37,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -411,8 +411,12 @@ _ESTIMATE_METHODS = {
 }
 
 
-def _estimate_methods(events: Sequence[ToolEvent]) -> list[str]:
-    """One line per pricing method the adapter estimates used, with its amount."""
+def _estimate_methods(events: Sequence[ToolEvent], *, after_run: bool = False) -> list[str]:
+    """One line per pricing method the adapter estimates used, with its amount.
+
+    ``after_run`` marks the usage OpenClaw reported after the run had ended.
+    """
+    received = ", received after the run" if after_run else ""
     amounts: dict[str, float] = {}
     for event in events:
         if event.metadata.get("cost_measurement") != "estimated_total_tokens":
@@ -421,14 +425,17 @@ def _estimate_methods(events: Sequence[ToolEvent]) -> list[str]:
         method = split if split in _ESTIMATE_METHODS else "input_ratio"
         amounts[method] = amounts.get(method, 0.0) + budget_delta(event).estimated_usd
     return [
-        f"${amounts[method]:.6f} estimated from {description}"
+        f"${amounts[method]:.6f} estimated from {description}{received}"
         for method, description in _ESTIMATE_METHODS.items()
         if method in amounts
     ]
 
 
-def _unpriced_cache_reasons(events: Sequence[ToolEvent]) -> list[str]:
+def _unpriced_cache_reasons(events: Sequence[ToolEvent], *, after_run: bool = False) -> list[str]:
     """Name the cache tokens no rate priced, and the models that lack one."""
+    # After the run, OpenClaw's payloads are usage reports, each summing an
+    # attempt's model calls.
+    unit = "usage report(s) received after the run" if after_run else "model call(s)"
     tokens = 0
     calls = 0
     models: set[str] = set()
@@ -441,7 +448,7 @@ def _unpriced_cache_reasons(events: Sequence[ToolEvent]) -> list[str]:
     if not tokens:
         return []
     return [
-        f"{tokens:,} cache token(s) over {calls} model call(s) are not priced: no cache "
+        f"{tokens:,} cache token(s) over {calls} {unit} are not priced: no cache "
         f"rate is known for {', '.join(sorted(models))}, so the estimate leaves them out"
     ]
 
@@ -647,6 +654,19 @@ def _journal_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[Too
     ]
 
 
+def _post_run_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[ToolEvent]:
+    """The LLM cost events of the usage received after the run ended, as attributed."""
+    pricing = _pinned_pricing(manifest)
+    records, _ = _read_journal(run.late_events_path)
+    return [
+        event
+        for record in records
+        if _record_payload(record).get("hook") == LLM_OUTPUT
+        and extract_openclaw_run_id(_record_payload(record)) is not None
+        for event in _llm_events(_record_payload(record), pricing)
+    ]
+
+
 def build_run_report(run: RunDirectory) -> SessionReport:
     """Rebuild the session report of one recorded run from its directory alone."""
     manifest = run.read_manifest()
@@ -681,15 +701,18 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     # OBS-5 reads the hook journals as well. They only add to the report, so a
     # corrupt one costs the attribution, never the rest of the report.
     attribution: CostAttribution | None
+    post_run_events: list[ToolEvent] = []
     try:
         cost_events = events if trace_available else _journal_llm_events(run, manifest)
         attribution = build_cost_attribution(run)
+        post_run_events = _post_run_llm_events(run, manifest)
     except ValueError:
         cost_events = events
         attribution = None
         notes.append(
             "a hook journal (events.raw.jsonl or late.jsonl) is corrupt: the cost "
-            "attribution is unavailable for this run"
+            "attribution is unavailable for this run, and the total leaves out any "
+            "usage received after the run ended"
         )
     from_journal = not trace_available and bool(cost_events)
     cost = _build_cost(
@@ -701,11 +724,34 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         events_from_journal=from_journal,
     )
     late = attribution.late if attribution is not None else CostShare()
-    if late.costed_events or late.unmeasured_events:
+    pricing = _pinned_pricing(manifest)
+    # A run recorded before 0.1.1 reported its post-run usage as attributed,
+    # never in its total: adding it now would print a headline nobody computed.
+    # Without a usable snapshot nothing post-run is priced, whatever the version.
+    recorded_before_0_1_1 = pricing is not None and not pricing.split_usage
+    post_run_in_total = not recorded_before_0_1_1
+    post_run_reasons = _unpriced_cache_reasons(post_run_events, after_run=True)
+    if late.costed_events and post_run_in_total:
+        # Only the annex is added: in-run estimates already come from the trace
+        # or raw journal and, when enabled, the budget accumulator.
+        cost = replace(cost, post_run_estimated_usd=late.estimated_usd)
+        post_run_reasons = [*_estimate_methods(post_run_events, after_run=True), *post_run_reasons]
+    if post_run_reasons:
+        cost = replace(cost, source="; ".join(filter(None, (cost.source, *post_run_reasons))))
+    if (late.costed_events or late.unmeasured_events) and not recorded_before_0_1_1:
         notes.append(
-            f"{late.costed_events + late.unmeasured_events} model call(s) reached Pathlayer after "
-            "this run had ended: they are attributed to it below, but were never analyzed and "
-            "are not part of the cost figure above"
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer "
+            "after this run had ended. OpenClaw can report aggregated model usage after "
+            "agent_end; priced usage is included in the total as received after run, "
+            "but was not available to the in-run budget detector. Unpriced usage stays unmeasured"
+        )
+    elif late.costed_events or late.unmeasured_events:
+        notes.append(
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer after this run had ended. The run was recorded before "
+            "Pathlayer 0.1.1, which kept such usage out of the total: it is attributed "
+            "to the run below, not added to the cost figure above"
         )
     if legacy:
         notes.append(
