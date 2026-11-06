@@ -33,6 +33,11 @@ _FORBIDDEN_PARTS = {
     "tests",
     "traces",
 }
+# The OpenClaw plugin ships as package data: `pathlayer-openclaw` installs it.
+_OPENCLAW_PLUGIN = {
+    PurePosixPath("pathlayer/adapters/openclaw_plugin") / name
+    for name in ("index.js", "openclaw.plugin.json", "package.json")
+}
 _FORBIDDEN_SUFFIXES = {".docx", ".html", ".pyc", ".pyo", ".sqlite", ".xlsx"}
 _SENSITIVE_PATTERNS = {
     "private key": re.compile(rb"-----BEGIN (?:[A-Z0-9][A-Z0-9-]* )*PRIVATE KEY-----"),
@@ -186,6 +191,7 @@ def _check_sdist(archive: Path, *, version: str) -> None:
         PurePosixPath("pathlayer/__init__.py"),
         PurePosixPath("pathlayer/py.typed"),
         PurePosixPath("pyproject.toml"),
+        *_OPENCLAW_PLUGIN,
     }
     missing = required.difference(relative)
     if missing:
@@ -221,6 +227,7 @@ def _check_wheel(archive: Path, *, version: str) -> None:
             PurePosixPath("pathlayer/py.typed"),
             PurePosixPath(f"{dist_info}/METADATA"),
             PurePosixPath(f"{dist_info}/licenses/LICENSE"),
+            *_OPENCLAW_PLUGIN,
         }
         missing = required.difference(paths)
         if missing:

@@ -444,6 +444,10 @@ class TickRecord:
 
 # Manifest execution status of a run that reached its documented end.
 COMPLETED_STATUS = "completed"
+# Manifest execution status of a run between two attempts: its last attempt
+# ended without success, and the runtime may start another one under the same
+# run id. Not terminal; the recorder that sets it writes a provisional report.
+AWAITING_RETRY_STATUS = "awaiting_retry"
 
 
 class SessionOutcome(str, Enum):
@@ -452,13 +456,15 @@ class SessionOutcome(str, Enum):
     ``interrupted`` is not in the OBS-2 issue text but cannot be dropped:
     without it, a run whose listener died mid-flight would have to be filed as
     ``completed``, which is exactly the kind of claim this report refuses to
-    make.
+    make. ``in_progress`` is the one non-final outcome: a provisional report of
+    a run waiting for another attempt, rewritten when the run ends.
     """
 
     COMPLETED = "completed"
     STOPPED = "stopped"
     ESCALATED = "escalated"
     INTERRUPTED = "interrupted"
+    IN_PROGRESS = "in_progress"
 
 
 _OUTCOME_MEANING: dict[SessionOutcome, str] = {
@@ -469,6 +475,10 @@ _OUTCOME_MEANING: dict[SessionOutcome, str] = {
     ),
     SessionOutcome.ESCALATED: "arbitration reached the ESCALATE tier; no actuator applies it in V1",
     SessionOutcome.INTERRUPTED: "the run never reached its end, so its record is partial",
+    SessionOutcome.IN_PROGRESS: (
+        "the run's last attempt ended without success and the run may continue; this "
+        "report is provisional and is rewritten when the run ends"
+    ),
 }
 
 
@@ -490,6 +500,10 @@ class CostBreakdown:
       times the number of eligible calls. ``None`` when no estimate was ever
       computed; ``0.0`` when the budget detector ran and no configured price
       applied to the recorded calls, which is a result rather than a gap.
+    - ``post_run_estimated_usd``: model spend reported after the run ended,
+      estimated at the recording's pinned prices. Added to the total, but never
+      to the in-run estimate or the budget detector. ``None`` if no post-run
+      cost could be computed.
     - ``baseline_usd``: the configured cross-run seed
       (``detectors.budget.baseline_usd``) that this run's detection actually
       started from, ``0.0`` being the ordinary single-run value.
@@ -511,6 +525,7 @@ class CostBreakdown:
     baseline_usd: float | None = None
     carried_over_usd: float | None = None
     source: str = ""
+    post_run_estimated_usd: float | None = None
 
     @property
     def measured(self) -> bool:
@@ -530,6 +545,7 @@ class CostBreakdown:
         return (
             (self.priced_events is not None and self.priced_events > 0)
             or self.estimated_usd is not None
+            or self.post_run_estimated_usd is not None
             or self.baseline_usd is not None
         )
 
@@ -544,7 +560,12 @@ class CostBreakdown:
         """
         if not self.measured:
             return None
-        components = (self.captured_usd, self.estimated_usd, self.baseline_usd)
+        components = (
+            self.captured_usd,
+            self.estimated_usd,
+            self.baseline_usd,
+            self.post_run_estimated_usd,
+        )
         return sum((value for value in components if value is not None), 0.0)
 
     def to_dict(self) -> dict[str, Any]:
@@ -554,6 +575,7 @@ class CostBreakdown:
             "captured_usd": self.captured_usd,
             "priced_events": self.priced_events,
             "estimated_usd": self.estimated_usd,
+            "post_run_estimated_usd": self.post_run_estimated_usd,
             "baseline_usd": self.baseline_usd,
             "carried_over_usd": self.carried_over_usd,
             "source": self.source,
@@ -573,7 +595,9 @@ class CostBreakdown:
             over = f" over {self.priced_events} priced event(s)" if self.priced_events else ""
             parts.append(f"${self.captured_usd:.4f} captured{over}")
         if self.estimated_usd is not None:
-            parts.append(f"${self.estimated_usd:.4f} estimated")
+            parts.append(f"${self.estimated_usd:.4f} estimated during run")
+        if self.post_run_estimated_usd is not None:
+            parts.append(f"${self.post_run_estimated_usd:.4f} estimated received after run")
         if self.baseline_usd is not None:
             parts.append(f"${self.baseline_usd:.4f} configured baseline")
         total = self.total_usd
@@ -682,9 +706,9 @@ class CostAttribution:
     A cost is *attributed* when the source named its run (``runId``). Two
     subsets of it are reported as evidence, never as a reason to move the cost:
 
-    - ``late``: it reached Pathlayer after the run had already ended. The hooks
-      are fire-and-forget on both sides, so the last model call can lose the
-      race with ``agent_end``; it still belongs to the run the source named.
+    - ``late``: it reached Pathlayer after the run had already ended, which is
+      where OpenClaw 2026.7 and later report a run's model usage; it still
+      belongs to the run the source named.
     - ``without_turn_start``: the source named the run, but no
       ``before_agent_run`` was ever recorded for it.
 
@@ -1269,20 +1293,24 @@ class SessionReport:
 def _resolve_outcome(
     *, status: str, stopped: bool, severest_emitted: Action | None
 ) -> SessionOutcome:
-    """Pick the single most informative of the four outcomes.
+    """Pick the single most informative of the five outcomes.
 
-    Priority ``stopped > escalated > interrupted > completed``. A run can be
-    both stopped and interrupted; ``stopped`` is the stronger statement about
-    what Pathlayer did, and ``status`` is reported alongside so the partial
-    record is never hidden. Any status other than ``completed`` -- including a
-    run still in flight -- maps to ``interrupted`` rather than to ``completed``:
-    claiming a run finished cleanly because we never saw it finish is exactly
-    the lie this report exists to avoid.
+    Priority ``stopped > escalated > in_progress > interrupted > completed``. A
+    run can be both stopped and interrupted; ``stopped`` is the stronger
+    statement about what Pathlayer did, and ``status`` is reported alongside so
+    the partial record is never hidden. Only :data:`AWAITING_RETRY_STATUS` maps
+    to ``in_progress``. Any other status than ``completed`` -- including a run
+    still in flight, which a report cannot tell from one whose listener died --
+    maps to ``interrupted`` rather than to ``completed``: claiming a run
+    finished cleanly because we never saw it finish is exactly the lie this
+    report exists to avoid.
     """
     if stopped:
         return SessionOutcome.STOPPED
     if severest_emitted is not None and severest_emitted >= Action.ESCALATE:
         return SessionOutcome.ESCALATED
+    if status == AWAITING_RETRY_STATUS:
+        return SessionOutcome.IN_PROGRESS
     if status != COMPLETED_STATUS:
         return SessionOutcome.INTERRUPTED
     return SessionOutcome.COMPLETED

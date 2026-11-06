@@ -29,6 +29,7 @@ Issues = "https://github.com/PathlayerLabs/pathlayer/issues"
 
 [project.scripts]
 pathlayer-export-run = "pathlayer.adapters.openclaw_export:main"
+pathlayer-openclaw = "pathlayer.adapters.openclaw_cli:main"
 pathlayer-report = "pathlayer.adapters.openclaw_report:main"
 pathlayer-scaffold-proof = "pathlayer.proof_scaffold:main"
 pathlayer-compile-contract = "pathlayer.coding_contracts:main"

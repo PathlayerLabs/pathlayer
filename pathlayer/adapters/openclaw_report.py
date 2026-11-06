@@ -37,18 +37,21 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pathlayer.adapters.openclaw import translate_openclaw_llm_event
 from pathlayer.adapters.openclaw_lifecycle import (
+    AGENT_END,
     BEFORE_AGENT_RUN,
     LLM_OUTPUT,
     extract_openclaw_run_id,
 )
 from pathlayer.adapters.openclaw_run_store import (
+    ENDED_BY_NEXT_RUN,
+    INTERRUPTED_WHILE_AWAITING_RETRY,
     RunDirectory,
     RunStore,
     atomic_write_json,
@@ -59,6 +62,7 @@ from pathlayer.events import ToolEvent
 from pathlayer.policies import Action
 from pathlayer.policies.actions import action_from_export, action_name
 from pathlayer.postmortem import (
+    AWAITING_RETRY_STATUS,
     COMPLETED_STATUS,
     TRIGGER_ABSENT,
     UNATTRIBUTED_MISSING_RUN_ID,
@@ -267,6 +271,46 @@ def _duration_seconds(
     return (end - start).total_seconds()
 
 
+def _attempt_ends(run: RunDirectory) -> list[dict[str, Any]]:
+    """The ``event`` of every ``agent_end`` the run journaled, in order.
+
+    One per attempt that ended. A failed end delivered again before a new
+    attempt started is not journaled; one delivered after a new start cannot be
+    told from that attempt's own end and is counted as it.
+    A corrupt journal yields none, and the run is reported as a single attempt;
+    the cost attribution already names that corruption.
+    """
+    try:
+        records, _ = _read_journal(run.raw_events_path)
+    except ValueError:
+        return []
+    ends: list[dict[str, Any]] = []
+    for record in records:
+        payload = _record_payload(record)
+        if payload.get("hook") == AGENT_END:
+            event = payload.get("event")
+            ends.append(event if isinstance(event, dict) else {})
+    return ends
+
+
+def _attempts_duration_seconds(ends: Sequence[dict[str, Any]]) -> float | None:
+    """Sum of the attempts' own durations, or ``None`` if one is unknown.
+
+    OpenClaw measures each attempt from its prompt to its ``agent_end``; the
+    time between two attempts (a compaction, a backoff) is in no measurement,
+    and no listener timestamp stands in for it.
+    """
+    total = 0.0
+    for end in ends:
+        value = end.get("durationMs")
+        if value is None:
+            value = end.get("duration_ms")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        total += float(value)
+    return total / 1000.0
+
+
 def _parse_iso(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -411,8 +455,12 @@ _ESTIMATE_METHODS = {
 }
 
 
-def _estimate_methods(events: Sequence[ToolEvent]) -> list[str]:
-    """One line per pricing method the adapter estimates used, with its amount."""
+def _estimate_methods(events: Sequence[ToolEvent], *, after_run: bool = False) -> list[str]:
+    """One line per pricing method the adapter estimates used, with its amount.
+
+    ``after_run`` marks the usage OpenClaw reported after the run had ended.
+    """
+    received = ", received after the run" if after_run else ""
     amounts: dict[str, float] = {}
     for event in events:
         if event.metadata.get("cost_measurement") != "estimated_total_tokens":
@@ -421,14 +469,17 @@ def _estimate_methods(events: Sequence[ToolEvent]) -> list[str]:
         method = split if split in _ESTIMATE_METHODS else "input_ratio"
         amounts[method] = amounts.get(method, 0.0) + budget_delta(event).estimated_usd
     return [
-        f"${amounts[method]:.6f} estimated from {description}"
+        f"${amounts[method]:.6f} estimated from {description}{received}"
         for method, description in _ESTIMATE_METHODS.items()
         if method in amounts
     ]
 
 
-def _unpriced_cache_reasons(events: Sequence[ToolEvent]) -> list[str]:
+def _unpriced_cache_reasons(events: Sequence[ToolEvent], *, after_run: bool = False) -> list[str]:
     """Name the cache tokens no rate priced, and the models that lack one."""
+    # After the run, OpenClaw's payloads are usage reports, each summing an
+    # attempt's model calls.
+    unit = "usage report(s) received after the run" if after_run else "model call(s)"
     tokens = 0
     calls = 0
     models: set[str] = set()
@@ -441,7 +492,7 @@ def _unpriced_cache_reasons(events: Sequence[ToolEvent]) -> list[str]:
     if not tokens:
         return []
     return [
-        f"{tokens:,} cache token(s) over {calls} model call(s) are not priced: no cache "
+        f"{tokens:,} cache token(s) over {calls} {unit} are not priced: no cache "
         f"rate is known for {', '.join(sorted(models))}, so the estimate leaves them out"
     ]
 
@@ -647,6 +698,19 @@ def _journal_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[Too
     ]
 
 
+def _post_run_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[ToolEvent]:
+    """The LLM cost events of the usage received after the run ended, as attributed."""
+    pricing = _pinned_pricing(manifest)
+    records, _ = _read_journal(run.late_events_path)
+    return [
+        event
+        for record in records
+        if _record_payload(record).get("hook") == LLM_OUTPUT
+        and extract_openclaw_run_id(_record_payload(record)) is not None
+        for event in _llm_events(_record_payload(record), pricing)
+    ]
+
+
 def build_run_report(run: RunDirectory) -> SessionReport:
     """Rebuild the session report of one recorded run from its directory alone."""
     manifest = run.read_manifest()
@@ -654,21 +718,65 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     ticks = [tick for tick in (_tick_from_decision(record) for record in decisions) if tick]
     final = _read_json_object(run.final_path)
 
-    trace_available = run.trace_path.is_file()
+    status = str(manifest.get("status") or "")
+    completed = status == COMPLETED_STATUS
+    # A run between two attempts has no final trace yet. A trace.json it holds
+    # is a runtime-timeout snapshot, older than its journals: the provisional
+    # report reads the journals instead of passing that snapshot off as the
+    # whole history.
+    provisional = status == AWAITING_RETRY_STATUS
+    trace_available = run.trace_path.is_file() and not provisional
     events: list[ToolEvent] = list(load_trace(run.trace_path).events) if trace_available else []
     events_recorded = len(events) if trace_available else len(decisions)
 
-    status = str(manifest.get("status") or "")
-    completed = status == COMPLETED_STATUS
     ended_at = manifest.get("ended_at")
-    duration = _duration_seconds(final, manifest.get("started_at"), ended_at, completed=completed)
+    attempt_ends = _attempt_ends(run)
+    failed_attempts = sum(1 for end in attempt_ends if end.get("success") is False)
+    if provisional:
+        duration = None
+    elif completed and len(attempt_ends) > 1:
+        duration = _attempts_duration_seconds(attempt_ends)
+    else:
+        duration = _duration_seconds(
+            final, manifest.get("started_at"), ended_at, completed=completed
+        )
     notes: list[str] = []
     if truncated_journal:
         notes.append(
             "the last journal line was truncated and was dropped: this run's record "
             "stops one event short"
         )
-    if duration is None and not completed:
+    if provisional:
+        notes.append(
+            f"provisional report: attempt {len(attempt_ends)} of this run ended with "
+            "success=false. OpenClaw may start another attempt of the same run (after a "
+            "compaction, a timeout or a provider failover); this report is rewritten when "
+            "the run ends, and until then its figures come from the hook journals"
+        )
+    if completed and manifest.get("ended_by") == ENDED_BY_NEXT_RUN:
+        notes.append(
+            "this run ended when the next run of its session started: OpenClaw runs one run "
+            "at a time per session, so its last attempt, which reported success=false, "
+            "was its end"
+        )
+    if completed and len(attempt_ends) > 1:
+        measured = (
+            "its duration is the sum of the attempts' durations as measured by OpenClaw, "
+            "without the time between attempts (compaction, backoff)"
+            if duration is not None
+            else "its duration is unknown: at least one attempt reported none"
+        )
+        notes.append(
+            f"OpenClaw ran this run in {len(attempt_ends)} attempts, {failed_attempts} of "
+            f"which ended with success=false; {measured}"
+        )
+    if manifest.get(INTERRUPTED_WHILE_AWAITING_RETRY) is True:
+        notes.append(
+            f"the listener restarted while this run waited for another attempt after "
+            f"{failed_attempts} failed one(s): the run may have ended with its failed "
+            "attempt, or a later attempt went unobserved"
+        )
+    if duration is None and not completed and not provisional:
         # The recorded end is only named when there is one: a run still in flight
         # has none, and claiming otherwise would invent the very stamp this note
         # exists to distrust.
@@ -681,15 +789,18 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     # OBS-5 reads the hook journals as well. They only add to the report, so a
     # corrupt one costs the attribution, never the rest of the report.
     attribution: CostAttribution | None
+    post_run_events: list[ToolEvent] = []
     try:
         cost_events = events if trace_available else _journal_llm_events(run, manifest)
         attribution = build_cost_attribution(run)
+        post_run_events = _post_run_llm_events(run, manifest)
     except ValueError:
         cost_events = events
         attribution = None
         notes.append(
             "a hook journal (events.raw.jsonl or late.jsonl) is corrupt: the cost "
-            "attribution is unavailable for this run"
+            "attribution is unavailable for this run, and the total leaves out any "
+            "usage received after the run ended"
         )
     from_journal = not trace_available and bool(cost_events)
     cost = _build_cost(
@@ -701,11 +812,34 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         events_from_journal=from_journal,
     )
     late = attribution.late if attribution is not None else CostShare()
-    if late.costed_events or late.unmeasured_events:
+    pricing = _pinned_pricing(manifest)
+    # A run recorded before 0.1.1 reported its post-run usage as attributed,
+    # never in its total: adding it now would print a headline nobody computed.
+    # Without a usable snapshot nothing post-run is priced, whatever the version.
+    recorded_before_0_1_1 = pricing is not None and not pricing.split_usage
+    post_run_in_total = not recorded_before_0_1_1
+    post_run_reasons = _unpriced_cache_reasons(post_run_events, after_run=True)
+    if late.costed_events and post_run_in_total:
+        # Only the annex is added: in-run estimates already come from the trace
+        # or raw journal and, when enabled, the budget accumulator.
+        cost = replace(cost, post_run_estimated_usd=late.estimated_usd)
+        post_run_reasons = [*_estimate_methods(post_run_events, after_run=True), *post_run_reasons]
+    if post_run_reasons:
+        cost = replace(cost, source="; ".join(filter(None, (cost.source, *post_run_reasons))))
+    if (late.costed_events or late.unmeasured_events) and not recorded_before_0_1_1:
         notes.append(
-            f"{late.costed_events + late.unmeasured_events} model call(s) reached Pathlayer after "
-            "this run had ended: they are attributed to it below, but were never analyzed and "
-            "are not part of the cost figure above"
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer "
+            "after this run had ended. OpenClaw can report aggregated model usage after "
+            "agent_end; priced usage is included in the total as received after run, "
+            "but was not available to the in-run budget detector. Unpriced usage stays unmeasured"
+        )
+    elif late.costed_events or late.unmeasured_events:
+        notes.append(
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer after this run had ended. The run was recorded before "
+            "Pathlayer 0.1.1, which kept such usage out of the total: it is attributed "
+            "to the run below, not added to the cost figure above"
         )
     if legacy:
         notes.append(
@@ -720,8 +854,12 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             f"detectors only analyzed {len(ticks)}: a passive STOP ends analysis, not the "
             "run, so the per-tick budget signal stops short of the run's own total"
         )
-    if not trace_available:
-        notes.append("trace.json is absent: this run never reached agent_end")
+    if not trace_available and not provisional:
+        notes.append(
+            "trace.json is absent: this run never reached agent_end"
+            if not attempt_ends
+            else "trace.json is absent: this run was cut before its final agent_end"
+        )
 
     return build_session_report(
         run_id=str(manifest.get("run_id") or run.original_run_id),

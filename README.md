@@ -76,6 +76,12 @@ python -m pip install pathlayer
 python -m pip install "pathlayer[langgraph,yaml]"  # LangGraph integration, YAML config
 ```
 
+On an OpenClaw host, the package (0.1.1 or later) also brings the OpenClaw
+plugin and the `pathlayer-openclaw` command: `pathlayer-openclaw install-plugin` copies the
+plugin into OpenClaw's extensions directory, and `pathlayer-openclaw record`
+starts the recording listener. See
+[`examples/openclaw_plugin/README.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/openclaw_plugin/README.md#installation).
+
 The demos live in the repository, not in the package. To try them, use a
 source checkout in a virtual environment; the development extra includes the
 dependencies they need:
@@ -202,7 +208,10 @@ detectors:
 starts it on the first root callback and OpenClaw starts it on
 `before_agent_run`; custom adapters should call those lifecycle methods at the
 real run boundaries. If they do not, the first event starts the watchdog with a
-warning, and time before that event cannot be measured. The detector remains
+warning, and time before that event cannot be measured. An OpenClaw run can
+span several attempts; the deadline counts from the first one, and the watchdog
+pauses while the run waits for another attempt after a failed one, then fires
+at the next attempt's first hook if the deadline has passed. The detector remains
 pure: durable `run_start` and `run_timeout` events carry the lifecycle through
 SQLite and exact replay. The configured duration is a hard ceiling, not a
 confidence ramp: the duration signal is `0` before the deadline and `1` at it.
@@ -520,9 +529,25 @@ Budget signals and reports identify that cost as estimated; it is not a
 provider invoice. Estimates count toward the configured budget brake, like
 per-tool budget estimates, and can select STOP. On OpenClaw, that STOP blocks
 the run's later tool calls only when the listener enforces STOP (`--enforce`);
-it never terminates the external agent. Missing token
+it never terminates the external agent, and model spend reaches it only while
+the run is active (see below). Missing token
 counters or unknown prices remain unmeasured; an explicitly configured
 per-call budget estimate may still apply where an event exists.
+On OpenClaw 2026.7.1 and 2026.10.10 (read from their source), model usage is
+reported after `agent_end`, aggregated per attempt, so model spend alone never
+triggers that run's budget STOP. The per-run budget only sees events received
+while the run is active; it cannot stop that run based on model spend received
+afterward.
+The report's headline total includes this spend at the pinned local rates,
+separating estimates recorded during the run (`estimated_usd`) from estimates
+received after it ended (`post_run_estimated_usd`). A run recorded before
+0.1.1 keeps that spend out of its total, as it was reported then. No finished
+decision or trace is rewritten. Applying this spend to the next run's session budget is
+planned in [#29](https://github.com/PathlayerLabs/pathlayer/issues/29).
+When OpenClaw retries a run after a failed attempt (a compaction, a timeout,
+a provider failover), the failed attempt's usage arrives while the run is
+still open: it counts in-run, and the budget can stop the attempts that follow.
+
 Provider-wrapped model ids (Amazon Bedrock's
 `eu.anthropic.claude-sonnet-4-5-20250929-v1:0`, Vertex AI's
 `claude-opus-4-5@20251101`, routing prefixes such as `bedrock/`) are priced as
@@ -641,7 +666,7 @@ not forcibly cancel a provider request that is already blocked; the STOP is
 applied as soon as the runtime can observe/cooperate with that request. The
 OpenClaw recorder persists the timeout, STOP decision, trace and report. It
 never terminates the separate OpenClaw process; with `--enforce` it blocks the
-run's later tool calls (see
+run's later tool calls, including those of the run's later attempts (see
 [`examples/openclaw_plugin/README.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/openclaw_plugin/README.md#enforce-stop-opt-in)).
 
 ## Development

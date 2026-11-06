@@ -73,6 +73,22 @@ def test_duplicate_wheel_entries_are_rejected(tmp_path: Path) -> None:
         _check_wheel(wheel, version="0.1.0")
 
 
+def test_a_wheel_without_the_openclaw_plugin_is_rejected(tmp_path: Path) -> None:
+    wheel = tmp_path / "pathlayer-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("pathlayer/__init__.py", b"")
+        archive.writestr("pathlayer/py.typed", b"")
+        archive.writestr("pathlayer/adapters/openclaw_plugin/index.js", b"")
+        archive.writestr("pathlayer-0.1.0.dist-info/METADATA", b"Name: pathlayer\n")
+        archive.writestr("pathlayer-0.1.0.dist-info/licenses/LICENSE", b"")
+
+    with pytest.raises(SystemExit, match="wheel missing required files") as info:
+        _check_wheel(wheel, version="0.1.0")
+    assert "openclaw_plugin/openclaw.plugin.json" in str(info.value)
+    assert "openclaw_plugin/package.json" in str(info.value)
+    assert "openclaw_plugin/index.js" not in str(info.value)
+
+
 def test_index_hash_check_retries_partial_propagation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

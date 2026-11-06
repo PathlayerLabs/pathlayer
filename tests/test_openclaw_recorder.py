@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import sqlite3
 import stat
-import sys
 import tarfile
 import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import pytest
 
 import pathlayer.adapters.openclaw_recorder as recorder_module
+from pathlayer.adapters import openclaw_cli
 from pathlayer.adapters.openclaw import translate_openclaw_event
 from pathlayer.adapters.openclaw_export import export_run
 from pathlayer.adapters.openclaw_lifecycle import (
@@ -54,10 +52,6 @@ from pathlayer.validation.traces import (
     Trace,
     load_trace,
     trace_to_dict,
-)
-
-_RECORD_LISTENER = (
-    Path(__file__).resolve().parents[1] / "examples" / "openclaw_plugin" / "record.py"
 )
 
 # A run of >= 5 identical tool calls reaches loop confidence
@@ -346,16 +340,6 @@ def test_recorder_http_ingest_end_to_end(tmp_path: Path) -> None:
     assert RunStore(tmp_path).resolve_run("run-http") is not None
 
 
-def _load_listener() -> ModuleType:
-    """Load the recording listener example by path (it lives outside the package)."""
-    spec = importlib.util.spec_from_file_location("openclaw_record_listener", _RECORD_LISTENER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def _snapshot(run: Any) -> dict[str, str]:
     """Byte-for-byte content of every file of a run directory, keyed by name."""
     return {
@@ -520,6 +504,10 @@ def test_unsuccessful_run_is_not_healthy(tmp_path: Path) -> None:
 
     run = RunStore(tmp_path).resolve_run("run-failed")
     assert run is not None
+    # A failed agent_end ends an attempt; the next run of the session proves no
+    # other attempt follows, and the run ends with that failed attempt.
+    assert run.read_manifest()["status"] == "awaiting_retry"
+    recorder.process_payload(_before("run-next"))
     manifest = run.read_manifest()
     assert manifest["status"] == "completed"
     assert manifest["health"] == UNKNOWN_LABEL
@@ -1915,12 +1903,13 @@ def test_config_and_pipeline_factory_are_mutually_exclusive(tmp_path: Path) -> N
 def test_listener_without_config_keeps_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    listener = _load_listener()
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PATHLAYER_CONFIG", raising=False)
     runs_root = tmp_path / "runs"
 
-    recorder = listener.build_recorder(listener.parse_args(["--runs-root", str(runs_root)]))
+    recorder = openclaw_cli.build_recorder(
+        openclaw_cli.parse_args(["record", "--runs-root", str(runs_root)])
+    )
     recorder.process_payload(_before("run-listener"))
     recorder.process_payload(_tool("read", run_id="run-listener"))
     recorder.process_payload(_end("run-listener"))
@@ -1933,7 +1922,6 @@ def test_listener_without_config_keeps_defaults(
 def test_listener_discovers_and_applies_a_custom_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    listener = _load_listener()
     config_dir = tmp_path / ".pathlayer"
     config_dir.mkdir()
     (config_dir / "config.json").write_text(
@@ -1943,7 +1931,9 @@ def test_listener_discovers_and_applies_a_custom_config(
     monkeypatch.delenv("PATHLAYER_CONFIG", raising=False)
     runs_root = tmp_path / "runs"
 
-    recorder = listener.build_recorder(listener.parse_args(["--runs-root", str(runs_root)]))
+    recorder = openclaw_cli.build_recorder(
+        openclaw_cli.parse_args(["record", "--runs-root", str(runs_root)])
+    )
     recorder.process_payload(_before("run-discovered"))
     recorder.process_payload(_tool("read", run_id="run-discovered"))
     recorder.process_payload(_end("run-discovered"))
@@ -1956,35 +1946,32 @@ def test_listener_discovers_and_applies_a_custom_config(
 def test_listener_reads_config_path_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    listener = _load_listener()
     config = tmp_path / "custom.json"
     config.write_text(json.dumps({"policy": {"stop_threshold": 0.0}}), encoding="utf-8")
     monkeypatch.setenv("PATHLAYER_CONFIG", str(config))
 
-    args = listener.parse_args(["--runs-root", str(tmp_path / "runs")])
+    args = openclaw_cli.parse_args(["record", "--runs-root", str(tmp_path / "runs")])
     assert args.config == str(config)
-    assert listener.load_listener_config(args.config).policy.stop_threshold == 0.0
+    assert openclaw_cli.load_listener_config(args.config).policy.stop_threshold == 0.0
 
 
 def test_listener_rejects_an_invalid_config_at_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    listener = _load_listener()
     config = tmp_path / "broken.json"
     config.write_text(json.dumps({"policy": {"nope": 1}}), encoding="utf-8")
     monkeypatch.delenv("PATHLAYER_CONFIG", raising=False)
 
-    args = listener.parse_args(
-        ["--runs-root", str(tmp_path / "runs"), "--config", str(config)],
+    args = openclaw_cli.parse_args(
+        ["record", "--runs-root", str(tmp_path / "runs"), "--config", str(config)],
     )
     with pytest.raises(SystemExit, match="invalid Pathlayer config"):
-        listener.build_recorder(args)
+        openclaw_cli.build_recorder(args)
 
 
 def test_listener_rejects_a_missing_config_file(tmp_path: Path) -> None:
-    listener = _load_listener()
     with pytest.raises(SystemExit, match="invalid Pathlayer config"):
-        listener.load_listener_config(str(tmp_path / "absent.yaml"))
+        openclaw_cli.load_listener_config(str(tmp_path / "absent.yaml"))
 
 
 def test_decisions_recorded_on_pipeline_action(tmp_path: Path) -> None:

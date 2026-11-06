@@ -33,7 +33,7 @@ await fetch(process.env.PATHLAYER_URL, {
   body: JSON.stringify({ payload: { hook: "warm-up" } }),
 });
 const { default: plugin, _internals } = await import(
-  "../../examples/openclaw_plugin/pathlayer-plugin/index.js"
+  "../../pathlayer/adapters/openclaw_plugin/index.js"
 );
 
 const hooks = new Map();

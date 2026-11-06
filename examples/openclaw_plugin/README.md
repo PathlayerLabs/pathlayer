@@ -3,8 +3,10 @@
 Pathlayer observes OpenClaw through a **loopback HTTP bridge** (not a sidecar
 daemon, not in-process Python inside the Node gateway). A small JavaScript
 plugin forwards hook payloads; Python translates them and runs detectors. With
-`record.py --enforce`, a STOP also blocks the stopped run's later tool calls
-(see [Enforce STOP](#enforce-stop-opt-in)).
+`pathlayer-openclaw record --enforce`, a STOP also blocks the stopped run's
+later tool calls (see [Enforce STOP](#enforce-stop-opt-in)).
+`pip install pathlayer` (0.1.1 or later) installs both the plugin and the
+`pathlayer-openclaw` command.
 
 ## Architecture
 
@@ -15,12 +17,19 @@ OpenClaw Gateway (Node)
         │     └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
         └── before_tool_call
               └── POST .../ingest, awaited (fails open)  ->  allow, or block after a STOP
-                    └── record.py  OR  listen.py (demo)
+                    └── pathlayer-openclaw record  OR  listen.py (demo)
                           └── OpenClawRunRecorder  OR  print ToolEvents
 ```
 
-- **`listen.py`** — print-only demo listener (unchanged behaviour).
-- **`record.py`** — production per-run recorder (durable directories).
+- **`pathlayer-openclaw`** — command installed with the package: `record`
+  (production per-run recorder, durable directories), `install-plugin` and
+  `plugin-path`.
+- **`pathlayer/adapters/openclaw_plugin/`** — the OpenClaw plugin, shipped in
+  the package.
+- **`listen.py`** — print-only demo listener, in this directory (source
+  checkout only).
+- **`record.py`** — same as `pathlayer-openclaw record`, kept for setups started
+  from a checkout.
 - **`pathlayer/adapters/openclaw.py`** — translates `after_tool_call` → `ToolEvent`,
   and `llm_output` → a separate `LLM_CALL` event carrying an estimated cost.
 - **`pathlayer/adapters/openclaw_recorder.py`** — one pipeline per `ctx.runId`.
@@ -52,39 +61,67 @@ Install Pathlayer on the same host as the OpenClaw gateway: the plugin posts to
 a loopback address.
 
 ```bash
-git clone https://github.com/PathlayerLabs/pathlayer.git
-cd pathlayer
-python3 -m venv .venv
-.venv/bin/pip install -e ".[yaml]"
+python3 -m venv ~/.venvs/pathlayer
+~/.venvs/pathlayer/bin/pip install "pathlayer[yaml]>=0.1.1"  # 0.1.0 lacks this command
+export PATH="$HOME/.venvs/pathlayer/bin:$PATH"
 
-# Recording storage, outside the git checkout (the default location is shown;
-# any directory you own works)
+# Recording storage (the default location is shown; any directory you own works)
 export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
 sudo mkdir -p "$PATHLAYER_RUNS_DIR"
 sudo chown "$USER" "$PATHLAYER_RUNS_DIR"
 ```
 
-Install the OpenClaw plugin from the checkout:
+Install the OpenClaw plugin shipped in the package, then restart the gateway:
 
 ```bash
-cp -r examples/openclaw_plugin/pathlayer-plugin ~/.openclaw/extensions/pathlayer-plugin
+pathlayer-openclaw install-plugin
 openclaw gateway restart
 ```
 
-## Start the recording listener
+`install-plugin` copies the plugin's three files into
+`~/.openclaw/extensions/pathlayer-plugin` (`--dest` picks another directory).
+It never overwrites a file without `--force` and never deletes one. After
+upgrading Pathlayer, rerun it with `--force`, so the plugin and the listener
+come from the same release. OpenClaw can also link the plugin instead of
+copying it, with `openclaw plugins install -l "$(pathlayer-openclaw plugin-path)"`;
+only the copy into `~/.openclaw/extensions/` has been tried on a live gateway.
 
-From the checkout:
+### From a source checkout
 
 ```bash
-source .venv/bin/activate
-export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
-python examples/openclaw_plugin/record.py
+git clone https://github.com/PathlayerLabs/pathlayer.git
+cd pathlayer
+python3 -m venv .venv
+.venv/bin/pip install -e ".[yaml]"
+.venv/bin/pathlayer-openclaw install-plugin
+openclaw gateway restart
 ```
 
-Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. To keep the
-listener running after you log out, run it under your service manager, or in
-the background with
-`nohup python examples/openclaw_plugin/record.py > record.log 2>&1 &`.
+The commands below then run from `.venv/bin/`. The older
+`python examples/openclaw_plugin/record.py` still works: it takes the same
+options as `pathlayer-openclaw record`.
+
+## Start the recording listener
+
+```bash
+export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
+pathlayer-openclaw record
+```
+
+Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. Ctrl+C or SIGTERM
+stops it. To keep the listener running after you log out, run it under your
+service manager, or in the background with
+`nohup pathlayer-openclaw record > record.log 2>&1 &`.
+
+The listener refuses to start, with a message saying what to change, when it
+cannot create or use the runs directory (`--runs-root` or
+`$PATHLAYER_RUNS_DIR`), when another listener is already recording into that
+directory (its startup would mark the other one's live runs interrupted), or
+when its port is already taken, most likely by another listener (`--port` or
+`$PATHLAYER_PORT`). One listener per runs directory: it holds the lock file
+`.listener.lock` there while it runs, released when it stops or dies. A
+listener on another port needs the gateway to post there too: set
+`PATHLAYER_URL` in the gateway's environment.
 
 ### Detector configuration
 
@@ -94,7 +131,7 @@ discovery of `.pathlayer/config.{yaml,yml,json}` in the working directory. With
 no config file the built-in defaults apply.
 
 ```bash
-python examples/openclaw_plugin/record.py --config path/to/config.yaml
+pathlayer-openclaw record --config path/to/config.yaml
 ```
 
 An unreadable, malformed or out-of-range config **fails at startup** with a
@@ -108,7 +145,7 @@ but OpenClaw keeps running the agent's tool calls. Start the listener with
 `--enforce` to act on it:
 
 ```bash
-python examples/openclaw_plugin/record.py --enforce
+pathlayer-openclaw record --enforce
 ```
 
 Before each tool call, the plugin's `before_tool_call` hook asks the listener
@@ -141,6 +178,11 @@ What this does and does not do:
   run to be answered before asking, so the tool call that follows the event
   that triggered the STOP is the first one blocked. If that forward times out,
   one more call can run.
+- **Several attempts.** OpenClaw can run one `runId` in several attempts
+  (after a compaction, a timeout or a provider failover), each ending with its
+  own `agent_end`. A run stopped in one attempt stays blocked in the next ones,
+  as long as no other run of its session starts in between (see *Runs with
+  several attempts* below).
 - **Restarts.** A listener restart marks the runs in progress as interrupted:
   they are no longer analyzed, so a run stopped before the restart is no
   longer blocked after it.
@@ -221,12 +263,13 @@ release.
 
 | field               | meaning                                                       |
 | ------------------- | ------------------------------------------------------------- |
-| `status`            | `started` / `orphan` / `completed` / `interrupted`             |
+| `status`            | `started` / `orphan` / `awaiting_retry` / `completed` / `interrupted` |
 | `stopped`           | whether Pathlayer emitted a STOP during the run               |
 | `state_durable`     | whether SQLite contains every analyzed tick recorded so far   |
 | `persistence_error` | storage error category after fail-open, otherwise `null`      |
 | `health`            | curated verdict; live recordings remain `unknown`             |
 | `health_reason`     | observed OpenClaw/Pathlayer outcome awaiting human curation   |
+| `failed_attempts`   | attempts that ended with `success: false` (absent when none)  |
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
 was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
@@ -234,6 +277,52 @@ decision in `health_reason`, but always keeps `health` and the trace label
 at `unknown` until an explicit human curation step assigns ground truth. An
 absence of intervention is not evidence that the run was healthy, and a STOP
 is a detector outcome rather than a curated failure class.
+
+**Runs with several attempts.** An OpenClaw run is a loop of attempts sharing
+one `runId`: after a context-overflow compaction, a timeout compaction or a
+provider failover, OpenClaw starts another attempt, and every attempt sends its
+own `agent_end` and then its own `llm_output`. An `agent_end` whose `success` is
+exactly `false` therefore ends an attempt, not the run:
+
+- The run becomes `awaiting_retry`. This status is not terminal: no `final.json`,
+  no `trace.json`. A provisional `report.json` (outcome `in_progress`) is written
+  from the journals, and rebuilt when the failed attempt's `llm_output` arrives.
+- The next attempt's `before_agent_run` resumes the run (back to `started`):
+  same pipeline, same sequence, same cost, same STOP. A usage report does not
+  resume it, since OpenClaw sends one after every attempt, and neither does a
+  tool call: the plugin posts hooks without ordering them, so the failed
+  attempt's last tool call can arrive after its end. Such a call is recorded
+  and analyzed like any other. Usage received between two attempts counts
+  in-run and reaches the budget.
+- The run ends for good at an `agent_end` with any other `success` value (an
+  absent value included, as before), or when the next run of its session starts:
+  OpenClaw runs one run at a time per session, so the waiting run's failed
+  attempt was its end (`ended_by: next_run_in_session` in the manifest). A run
+  still waiting, or cut during a later attempt, at the next listener startup is
+  marked `interrupted`; its `trace.json` is then written with every recorded
+  event.
+- A failed `agent_end` delivered again before any new attempt starts is
+  dropped, like a duplicated final one. After a new attempt's start, an
+  identical failed end is that attempt's own and counts.
+- The duration watchdog counts from the first attempt. It pauses while the run
+  waits: OpenClaw sends no signal when a failed attempt was the run's last, and
+  a live timer would otherwise fire on a run that has already ended. If the
+  deadline has passed, it fires at the next attempt's start.
+- The report's duration of a multi-attempt run is the sum of the attempts'
+  durations as OpenClaw measured them; the time between attempts (compaction,
+  backoff) is in no measurement. A run left waiting has no duration until it
+  ends.
+
+This behavior is derived from OpenClaw's source (2026.7.1 and 2026.10.10) and
+tested with synthetic payloads; a real compaction or provider failover has not
+been recorded yet. Not covered: OpenClaw's model fallback runs each model's
+attempt as its own task on the session lane, so another run of the session
+could start between two attempts of one run. That start ends the waiting run,
+and the next model's attempt is then neither recorded (only its usage report
+reaches the ended run's `late.jsonl`) nor blocked (whether a run can actually
+be queued in that gap is unconfirmed). And if an attempt's `before_agent_run`
+is lost, that attempt runs with the duration watchdog paused, and a failed end
+identical to the previous one is taken for a repeated delivery.
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being
@@ -267,12 +356,19 @@ than as `0.00`. The report names how many lines are in that older format.
 Terminal runs (`completed`, `interrupted`) are immutable: a duplicated
 `agent_end` or a late tool call for such a run is logged and dropped, never
 replayed onto the run directory. The one exception is a late `llm_output`.
-OpenClaw dispatches `llm_output` and `agent_end` fire-and-forget, the
-plugin forwards each without waiting, and the ingest server handles requests
-concurrently, so the last model call of a run can arrive after its `agent_end`.
-That payload is appended to the run's `late.jsonl` annex and `report.json` is
-rebuilt; it never reaches a detector, and every other file of the run stays
-byte-for-byte as it was.
+OpenClaw 2026.7.1 reports model usage aggregated per attempt after `agent_end`;
+post-run usage is therefore expected, not just a delivery race. That payload
+is appended to the run's `late.jsonl` annex and `report.json` is rebuilt; it
+never reaches a detector, and every other file stays byte-for-byte unchanged.
+The headline cost includes the priced usage, separating estimates recorded
+during the run (`estimated_usd`) from estimates received after the end
+(`post_run_estimated_usd`). Unknown usage stays unmeasured; a priced zero is
+shown as zero. A usage report can cover several model calls.
+
+The **per-run budget** only sees events received while the run is active.
+Model usage received after the end cannot trigger a budget STOP for that run.
+Applying this spend to subsequent runs is planned in the
+[session budget (#29)](https://github.com/PathlayerLabs/pathlayer/issues/29).
 
 ```bash
 RUN=run-abc123   # original ctx.runId from manifest.json
@@ -285,7 +381,8 @@ cat "/var/lib/pathlayer/runs/$RUN/report.json"
 
 A finalized run normally carries a `report.json`: what it cost, which detectors
 reacted and how strongly, what Pathlayer did, and how the run ended. It is
-written at `agent_end`, and for a run that was cut short during the next
+written at `agent_end` (provisionally at the end of a failed attempt, then
+rewritten when the run ends), and for a run that was cut short during the next
 listener startup — nothing else will ever speak for it. That startup sweep only
 reads the directory; it invents no cost figure, because the process that knew the
 run's budget configuration is the one that disappeared. A run whose journal was
@@ -390,10 +487,12 @@ actions: 1 arbitrated
 stop reason: loop: 5x repeat of 1-action block
 ```
 
-The four outcomes are `completed` (reached its end without being halted — the
+The five outcomes are `completed` (reached its end without being halted — the
 actions section says what was emitted), `stopped`, `escalated` (reached the
-ESCALATE tier without stopping) and `interrupted` (never reached its end). A run
-nobody saw finish is never filed as `completed`.
+ESCALATE tier without stopping), `interrupted` (never reached its end) and
+`in_progress` (a provisional report of a run waiting for another attempt; it is
+rewritten when the run ends). A run nobody saw finish is never filed as
+`completed`.
 
 **What the report will not claim.** A figure nothing computed is reported as
 absent rather than as zero — and, symmetrically, a figure that *was* computed is
@@ -480,5 +579,5 @@ commit run directories into git.
 
 ```bash
 rm -rf ~/.openclaw/extensions/pathlayer-plugin && openclaw gateway restart
-pkill -f "examples/openclaw_plugin/record.py" || true
+pkill -f "pathlayer-openclaw record|openclaw_plugin/record.py" || true
 ```

@@ -8,9 +8,10 @@ does. Capture instead goes over a loopback HTTP connection
 JavaScript plugin registered on OpenClaw's own plugin hook API
 (https://docs.openclaw.ai/plugins/hooks) forwards each hook firing here
 verbatim, and all translation logic lives in this module where it is typed,
-reviewed and unit-tested without needing a live OpenClaw instance. See
-``examples/openclaw_plugin/`` for the reference plugin and the runbook used to
-validate it against a real OpenClaw instance.
+reviewed and unit-tested without needing a live OpenClaw instance. The
+reference plugin ships in ``pathlayer/adapters/openclaw_plugin/``; see
+``examples/openclaw_plugin/README.md`` for the runbook used to validate it
+against a real OpenClaw instance.
 
 Scope: ``after_tool_call`` is translated into a tool event. This adapter only
 observes: it never blocks or rewrites a tool call. Blocking the tool calls of
@@ -44,13 +45,13 @@ from pathlayer.pricing import ModelPrice, cost_of, resolve_price
 if TYPE_CHECKING:
     from pathlayer.config import PathlayerConfig
 
-# The source key the reference plugin (examples/openclaw_plugin/) sends.
+# The source key the reference plugin (pathlayer/adapters/openclaw_plugin/) sends.
 SOURCE = "openclaw"
 
 # Documented default so the plugin has a fixed target with no extra
 # coordination needed. Overridable (e.g. if the port is already taken). Kept
 # in sync by hand with the same literal in
-# examples/openclaw_plugin/pathlayer-plugin/index.js -- see the comment there.
+# pathlayer/adapters/openclaw_plugin/index.js -- see the comment there.
 DEFAULT_PORT = 8787
 
 
