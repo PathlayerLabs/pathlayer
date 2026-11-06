@@ -5,8 +5,8 @@ daemon, not in-process Python inside the Node gateway). A small JavaScript
 plugin forwards hook payloads; Python translates them and runs detectors. With
 `pathlayer-openclaw record --enforce`, a STOP also blocks the stopped run's
 later tool calls (see [Enforce STOP](#enforce-stop-opt-in)).
-`pip install pathlayer` installs both the plugin and the `pathlayer-openclaw`
-command.
+`pip install pathlayer` (0.1.1 or later) installs both the plugin and the
+`pathlayer-openclaw` command.
 
 ## Architecture
 
@@ -62,7 +62,7 @@ a loopback address.
 
 ```bash
 python3 -m venv ~/.venvs/pathlayer
-~/.venvs/pathlayer/bin/pip install "pathlayer[yaml]"
+~/.venvs/pathlayer/bin/pip install "pathlayer[yaml]>=0.1.1"  # 0.1.0 lacks this command
 export PATH="$HOME/.venvs/pathlayer/bin:$PATH"
 
 # Recording storage (the default location is shown; any directory you own works)

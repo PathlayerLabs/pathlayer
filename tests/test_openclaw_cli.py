@@ -269,6 +269,23 @@ def test_install_plugin_never_deletes_a_file(tmp_path: Path) -> None:
     assert (dest / "notes.txt").read_text(encoding="utf-8") == "mine"
 
 
+@_POSIX_ONLY
+def test_install_plugin_never_writes_through_a_symbolic_link(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outside = tmp_path / "outside.js"
+    outside.write_text("someone else's file", encoding="utf-8")
+    dest = tmp_path / "pathlayer-plugin"
+    dest.mkdir()
+    (dest / "index.js").symlink_to(outside)
+
+    assert openclaw_cli.main(["install-plugin", "--dest", str(dest), "--force"]) == 1
+
+    assert "symbolic links (index.js)" in capsys.readouterr().err
+    assert outside.read_text(encoding="utf-8") == "someone else's file"
+    assert not (dest / "package.json").exists()
+
+
 def test_install_plugin_refuses_a_destination_that_is_a_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -459,7 +476,8 @@ def test_a_second_listener_on_the_same_runs_root_never_sweeps_it(
     assert f"another Pathlayer listener (process {os.getpid()}) is already recording" in refusal
     assert "--runs-root or $PATHLAYER_RUNS_DIR" in refusal
     # Once the first listener has stopped, the root is free again.
-    openclaw_cli.lock_runs_root(runs_root).close()
+    with openclaw_cli.lock_runs_root(runs_root):
+        pass
 
 
 def test_a_lock_file_left_by_a_dead_listener_never_blocks_a_restart(tmp_path: Path) -> None:
@@ -467,12 +485,54 @@ def test_a_lock_file_left_by_a_dead_listener_never_blocks_a_restart(tmp_path: Pa
 
     with openclaw_cli.lock_runs_root(tmp_path) as lock:
         assert not lock.closed
-        with pytest.raises(SystemExit, match="already recording into"):
-            openclaw_cli.lock_runs_root(tmp_path)
+        with (
+            pytest.raises(SystemExit, match="already recording into"),
+            openclaw_cli.lock_runs_root(tmp_path),
+        ):
+            pass
+    assert lock.closed
     assert (tmp_path / openclaw_cli.RUNS_ROOT_LOCK).read_text(encoding="utf-8") == (
         f"{os.getpid()}\n"
     )
-    openclaw_cli.lock_runs_root(tmp_path).close()
+    with openclaw_cli.lock_runs_root(tmp_path):
+        pass
+
+
+def test_a_lock_error_that_is_not_a_held_lock_is_reported_as_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A filesystem without lock support must not read as "another listener".
+    def _no_locks(_handle: object) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(openclaw_cli, "_lock", _no_locks)
+
+    with (
+        pytest.raises(SystemExit, match=r"cannot lock .*No locks available") as info,
+        openclaw_cli.lock_runs_root(tmp_path),
+    ):
+        pass
+
+    assert "already recording" not in str(info.value)
+    assert "--runs-root or $PATHLAYER_RUNS_DIR" in str(info.value)
+
+
+@_POSIX_ONLY
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads any file")
+def test_a_lock_file_the_listener_cannot_open_is_a_readable_error(tmp_path: Path) -> None:
+    lock_file = tmp_path / openclaw_cli.RUNS_ROOT_LOCK
+    lock_file.write_text("", encoding="utf-8")
+    lock_file.chmod(0)  # left by a one-off start as another user, say
+    try:
+        with (
+            pytest.raises(SystemExit, match="cannot open the listener lock") as info,
+            openclaw_cli.lock_runs_root(tmp_path),
+        ):
+            pass
+    finally:
+        lock_file.chmod(0o600)
+
+    assert "which must be a directory you own" in str(info.value)
 
 
 def test_a_port_taken_after_the_check_is_still_a_readable_error(

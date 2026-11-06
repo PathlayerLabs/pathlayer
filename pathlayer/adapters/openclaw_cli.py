@@ -22,6 +22,8 @@ configuration and the files a run leaves behind.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import os
 import shutil
 import signal
@@ -29,7 +31,7 @@ import socket
 import sys
 import threading
 import types
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import IO
 
@@ -200,13 +202,16 @@ def build_recorder(args: argparse.Namespace) -> OpenClawRunRecorder:
     except OSError as exc:
         message = f"cannot start the OpenClaw recorder: {exc}"
         if _concerns(exc, args.runs_root):
-            root = args.runs_root
-            message += (
-                f"\nRuns are recorded under {root}, which must be a directory you own. "
-                f'Create it (sudo mkdir -p "{root}" && sudo chown "$USER" "{root}") '
-                "or choose another one with --runs-root or $PATHLAYER_RUNS_DIR."
-            )
+            message += _runs_root_hint(args.runs_root)
         raise SystemExit(message) from exc
+
+
+def _runs_root_hint(root: Path) -> str:
+    return (
+        f"\nRuns are recorded under {root}, which must be a directory you own. "
+        f'Create it (sudo mkdir -p "{root}" && sudo chown "$USER" "{root}") '
+        "or choose another one with --runs-root or $PATHLAYER_RUNS_DIR."
+    )
 
 
 def _port_in_use(port: int, error: OSError) -> SystemExit:
@@ -240,8 +245,15 @@ def _check_port_free(port: int) -> None:
         probe.close()
 
 
-def _try_lock(handle: IO[str]) -> None:
-    """Take an exclusive lock on ``handle`` without waiting; ``OSError`` if held."""
+# The errors that mean "another process holds the lock". Any other one (a
+# filesystem without lock support, say) is reported as itself.
+_LOCK_HELD = frozenset(
+    {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
+)
+
+
+def _lock(handle: IO[str]) -> None:
+    """Take an exclusive lock on ``handle`` without waiting; ``OSError`` if not."""
     handle.seek(0)
     if sys.platform == "win32":
         import msvcrt
@@ -253,37 +265,58 @@ def _try_lock(handle: IO[str]) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-def lock_runs_root(root: Path) -> IO[str]:
+def _unlock(handle: IO[str]) -> None:
+    """Release the lock before closing: Windows frees a closed file's lock late."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextlib.contextmanager
+def lock_runs_root(root: Path) -> Iterator[IO[str]]:
     """Hold ``root`` for this listener, or exit if another listener holds it.
 
     The startup sweep marks every unfinished run under the root as interrupted,
     so a second listener on the same root would close the first one's live
-    runs, whatever its port. The lock is the open file returned: closing it, or
-    the process ending in any way, crash included, releases it, so a lock file
-    left behind never blocks a restart.
+    runs, whatever its port. The lock is released on leaving the block, and by
+    the OS when the process ends in any way, crash included, so a lock file left
+    behind never blocks a restart.
     """
     path = root / RUNS_ROOT_LOCK
-    handle = path.open("a+", encoding="utf-8")
     try:
-        _try_lock(handle)
+        handle = path.open("a+", encoding="utf-8")
     except OSError as exc:
+        raise SystemExit(
+            f"cannot open the listener lock {path}: {exc}" + _runs_root_hint(root)
+        ) from exc
+    with handle:
+        try:
+            _lock(handle)
+        except OSError as exc:
+            if exc.errno not in _LOCK_HELD:
+                raise SystemExit(f"cannot lock {path}: {exc}" + _runs_root_hint(root)) from exc
+            try:
+                handle.seek(0)
+                holder = handle.read().strip()
+            except OSError:  # Windows: the holder's locked byte cannot be read
+                holder = ""
+            process = f" (process {holder})" if holder.isdigit() else ""
+            raise SystemExit(
+                f"another Pathlayer listener{process} is already recording into {root}.\n"
+                "A second one would mark its live runs interrupted. Stop it, or give this "
+                "listener its own runs root with --runs-root or $PATHLAYER_RUNS_DIR."
+            ) from exc
         try:
             handle.seek(0)
-            holder = handle.read().strip()
-        except OSError:  # Windows: the holder's locked byte cannot be read
-            holder = ""
-        handle.close()
-        process = f" (process {holder})" if holder.isdigit() else ""
-        raise SystemExit(
-            f"another Pathlayer listener{process} is already recording into {root}.\n"
-            "A second one would mark its live runs interrupted. Stop it, or give this "
-            "listener its own runs root with --runs-root or $PATHLAYER_RUNS_DIR."
-        ) from exc
-    handle.seek(0)
-    handle.truncate()
-    handle.write(f"{os.getpid()}\n")
-    handle.flush()
-    return handle
+            handle.truncate()
+            handle.write(f"{os.getpid()}\n")
+            handle.flush()
+            yield handle
+        finally:
+            with contextlib.suppress(OSError):
+                _unlock(handle)
 
 
 def _wait_for_stop(stop: threading.Event) -> None:
@@ -359,7 +392,8 @@ def install_plugin(dest: Path, *, force: bool = False) -> list[Path]:
 
     Without ``force``, refuses when any of the plugin's files is already in
     ``dest``, before writing anything. With it, overwrites those files only:
-    nothing in ``dest`` is ever deleted.
+    nothing in ``dest`` is ever deleted. A plugin file that is a symbolic link
+    is always refused, since copying onto it would write outside ``dest``.
     """
     missing = _missing_plugin_files()
     if missing:
@@ -368,6 +402,13 @@ def install_plugin(dest: Path, *, force: bool = False) -> list[Path]:
     if os.path.lexists(dest) and not dest.is_dir():
         raise PluginInstallError(f"{dest} exists and is not a directory")
     present = [name for name in PLUGIN_FILES if os.path.lexists(dest / name)]
+    linked = [name for name in present if (dest / name).is_symlink()]
+    if linked:
+        # Copying onto a link would overwrite the file it points to, outside dest.
+        raise PluginInstallError(
+            f"{dest} holds plugin files that are symbolic links ({', '.join(linked)}); "
+            "remove them first"
+        )
     if present and not force:
         raise PluginInstallError(
             f"{dest} already holds plugin files ({', '.join(present)}); "
