@@ -520,16 +520,20 @@ Budget signals and reports identify that cost as estimated; it is not a
 provider invoice. Estimates count toward the configured budget brake, like
 per-tool budget estimates, and can select STOP. On OpenClaw, that STOP blocks
 the run's later tool calls only when the listener enforces STOP (`--enforce`);
-it never terminates the external agent. Missing token
+it never terminates the external agent, and model spend reaches it only while
+the run is active (see below). Missing token
 counters or unknown prices remain unmeasured; an explicitly configured
 per-call budget estimate may still apply where an event exists.
-On OpenClaw 2026.7.1, model usage is reported after `agent_end`, aggregated
-per attempt. The per-run budget only sees events received while the run is
-active; it cannot stop that run based on model spend received afterward.
+On OpenClaw 2026.7.1 and 2026.10.10 (read from their source), model usage is
+reported after `agent_end`, aggregated per attempt, so model spend alone never
+triggers that run's budget STOP. The per-run budget only sees events received
+while the run is active; it cannot stop that run based on model spend received
+afterward.
 The report's headline total includes this spend at the pinned local rates,
 separating estimates recorded during the run (`estimated_usd`) from estimates
-received after it ended (`post_run_estimated_usd`). No finished decision or
-trace is rewritten. Applying this spend to the next run's session budget is
+received after it ended (`post_run_estimated_usd`). A run recorded before
+0.1.1 keeps that spend out of its total, as it was reported then. No finished
+decision or trace is rewritten. Applying this spend to the next run's session budget is
 planned in [#29](https://github.com/PathlayerLabs/pathlayer/issues/29).
 
 Provider-wrapped model ids (Amazon Bedrock's

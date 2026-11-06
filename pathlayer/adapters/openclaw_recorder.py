@@ -7,9 +7,9 @@ Three properties this module owes its callers, all of them load-bearing:
   hook for that ``runId`` -- a duplicated ``agent_end``, a late tool call -- is
   ignored instead of reopening it. Reopening would restart the sequence counter
   and rewrite ``trace.json`` / ``final.json`` from an empty in-memory run. One
-  thing is kept rather than ignored: an ``llm_output`` that lost the
-  race with ``agent_end`` -- both hooks are fire-and-forget, so their arrival
-  order is not guaranteed. It is appended to the run's ``late.jsonl`` annex and
+  thing is kept rather than ignored: an ``llm_output`` received after the
+  run's ``agent_end``, which is how OpenClaw 2026.7 and later report a run's
+  model usage. It is appended to the run's ``late.jsonl`` annex and
   the derived ``report.json`` rebuilt; it never reaches a detector, and every
   other file of the run stays byte-for-byte as it was.
 - **A STOP ends analysis, not observation.** By default Pathlayer is a passive
