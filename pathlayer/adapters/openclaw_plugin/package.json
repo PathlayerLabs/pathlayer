@@ -1,6 +1,6 @@
 {
   "name": "pathlayer-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Reference OpenClaw plugin: forwards before_agent_run, llm_output, after_tool_call and agent_end events to a local Pathlayer instance.",
   "type": "module",
