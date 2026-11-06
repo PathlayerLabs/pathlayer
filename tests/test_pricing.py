@@ -118,6 +118,8 @@ def test_extra_prices_pins_a_sub_version_the_table_does_not_list() -> None:
         ("claude-sonnet-5-5", 2.0, 10.0),
         ("claude-haiku-4-5-20251001", 1.0, 5.0),
         ("claude-fable-5-1", 10.0, 50.0),
+        ("claude-mythos-5", 10.0, 50.0),
+        ("claude-mythos-5-1", 10.0, 50.0),
     ],
 )
 def test_claude_sub_versions_have_their_own_price(
@@ -158,6 +160,11 @@ def test_normalize_model_id(model: str, expected: str) -> None:
         ("bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.0),
         ("us.anthropic.claude-3-5-haiku-20241022-v1:0", 0.8),
         ("global.anthropic.claude-opus-4-5-20251101-v1:0", 5.0),
+        # Claude Mythos 5 and 5.1, raw and as Bedrock names them.
+        ("anthropic.claude-mythos-5", 10.0),
+        ("anthropic.claude-mythos-5-1", 10.0),
+        ("us.anthropic.claude-mythos-5-1-v1:0", 10.0),
+        ("bedrock/anthropic.claude-mythos-5", 10.0),
         ("anthropic/claude-sonnet-4", 3.0),
         ("anthropic/claude-sonnet-4.5", 3.0),
         # A raw snapshot match would read this as claude-opus-4 ($15).

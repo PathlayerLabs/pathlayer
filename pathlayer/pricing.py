@@ -93,6 +93,9 @@ DEFAULT_PRICES: dict[str, ModelPrice] = {
     "claude-haiku-4-5": ModelPrice(1.0, 5.0),
     "claude-fable-5": ModelPrice(10.0, 50.0),
     "claude-fable-5-1": ModelPrice(10.0, 50.0),
+    # Limited availability: verified organizations only.
+    "claude-mythos-5": ModelPrice(10.0, 50.0),
+    "claude-mythos-5-1": ModelPrice(10.0, 50.0),
 }
 
 _PER_MTOK = 1_000_000.0
