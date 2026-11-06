@@ -1,6 +1,6 @@
 [project]
 name = "pathlayer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Runtime guardrail layer for AI agents: detect loops, retries, cost explosions and lack of progress, and intervene during execution."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,5 +1,6 @@
 """Tests for release artifact validation helpers."""
 
+import tomllib
 import warnings
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,12 @@ from scripts.check_dist import (
     _assert_safe_paths,
     _check_wheel,
 )
+
+# check_dist compares the requested version with pyproject, so the tests use
+# the project's own version instead of a literal that a release bump breaks.
+_VERSION = tomllib.loads(
+    (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+)["project"]["version"]
 
 
 def test_public_contact_and_documentation_placeholder_are_allowed() -> None:
@@ -55,14 +62,14 @@ def test_unsafe_artifact_paths_are_rejected(path: PurePosixPath) -> None:
 def test_wrong_distribution_name_is_rejected() -> None:
     with pytest.raises(SystemExit, match="metadata Name differs"):
         _assert_metadata(
-            b"Name: unrelated-project\nVersion: 0.1.0\n",
-            version="0.1.0",
+            f"Name: unrelated-project\nVersion: {_VERSION}\n".encode(),
+            version=_VERSION,
             artifact="wheel",
         )
 
 
 def test_duplicate_wheel_entries_are_rejected(tmp_path: Path) -> None:
-    wheel = tmp_path / "pathlayer-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / f"pathlayer-{_VERSION}-py3-none-any.whl"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         with zipfile.ZipFile(wheel, "w") as archive:
@@ -70,20 +77,20 @@ def test_duplicate_wheel_entries_are_rejected(tmp_path: Path) -> None:
             archive.writestr("pathlayer/py.typed", b"second")
 
     with pytest.raises(SystemExit, match="duplicate entries"):
-        _check_wheel(wheel, version="0.1.0")
+        _check_wheel(wheel, version=_VERSION)
 
 
 def test_a_wheel_without_the_openclaw_plugin_is_rejected(tmp_path: Path) -> None:
-    wheel = tmp_path / "pathlayer-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / f"pathlayer-{_VERSION}-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("pathlayer/__init__.py", b"")
         archive.writestr("pathlayer/py.typed", b"")
         archive.writestr("pathlayer/adapters/openclaw_plugin/index.js", b"")
-        archive.writestr("pathlayer-0.1.0.dist-info/METADATA", b"Name: pathlayer\n")
-        archive.writestr("pathlayer-0.1.0.dist-info/licenses/LICENSE", b"")
+        archive.writestr(f"pathlayer-{_VERSION}.dist-info/METADATA", b"Name: pathlayer\n")
+        archive.writestr(f"pathlayer-{_VERSION}.dist-info/licenses/LICENSE", b"")
 
     with pytest.raises(SystemExit, match="wheel missing required files") as info:
-        _check_wheel(wheel, version="0.1.0")
+        _check_wheel(wheel, version=_VERSION)
     assert "openclaw_plugin/openclaw.plugin.json" in str(info.value)
     assert "openclaw_plugin/package.json" in str(info.value)
     assert "openclaw_plugin/index.js" not in str(info.value)
