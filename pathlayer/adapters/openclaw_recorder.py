@@ -1324,13 +1324,15 @@ class OpenClawRunRecorder:
     def _pricing_snapshot(self) -> dict[str, Any] | None:
         """Pin the effective rates, including built-ins, for safe raw-journal replay.
 
-        ``split_usage`` pins the pricing rule as well: a report rebuilt later
-        prices a reported input/output/cache split only for a run recorded with it.
+        ``split_usage`` and ``unwrap_model_ids`` pin the pricing rules as well: a
+        report rebuilt later prices a reported input/output/cache split, and
+        unwraps a provider-wrapped model id, only for a run recorded with them.
         """
         if self._config is None:
             return None
         return {
             "split_usage": True,
+            "unwrap_model_ids": True,
             "input_ratio": self._config.pricing.openclaw_input_ratio,
             "models": {
                 name: asdict(price)
@@ -1343,8 +1345,8 @@ class OpenClawRunRecorder:
     ) -> None:
         """Record a separately captured OpenClaw LLM counter estimate.
 
-        The adapter accepts only ``llm_output`` with a reported total counter;
-        no tool hook is used to infer model activity. The event is deliberately
+        The adapter accepts only ``llm_output`` with usable token counters; no
+        tool hook is used to infer model activity. The event is deliberately
         separate from a tool call so BudgetDetector sees the model spend.
         """
         if self._config is None:

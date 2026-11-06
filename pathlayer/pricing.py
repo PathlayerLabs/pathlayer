@@ -163,7 +163,9 @@ def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
     return table[best_key] if best_key else None
 
 
-def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice | None:
+def _lookup(
+    model: str | None, prices: Mapping[str, ModelPrice], *, unwrap_ids: bool = True
+) -> ModelPrice | None:
     """Resolve ``model`` to a price, case-insensitively.
 
     Exact match first. Otherwise treat the id as a *dated snapshot* of a table
@@ -173,10 +175,11 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     must NOT borrow the base price -- mispricing toward over-charge could trip
     ``BudgetDetector`` into a wrongful STOP. That includes a variant of a listed
     sub-version (``claude-opus-4-5-thinking``, OpenRouter's
-    ``claude-opus-4.5:nitro``): read as ``4-5-thinking`` after ``claude-opus-4``,
-    it would borrow Opus 4's price, three times Opus 4.5's. Unknown ids return ``None`` (the
-    caller bills $0, an under-count we accept over a wrong stop). Longest key
-    wins on ties. Returns ``None`` when nothing matches.
+    ``claude-opus-4.5:nitro``): read as ``4-5-thinking`` after
+    ``claude-opus-4``, it would borrow Opus 4's price, three times Opus 4.5's.
+    Unknown ids return ``None`` (the caller bills $0, an under-count we accept
+    over a wrong stop). Longest key wins on ties. Returns ``None`` when nothing
+    matches.
 
     Both the ``model`` id and the table keys are lowered before comparison, so a
     custom ``prices`` override with upper-case keys (``{"GPT-4O": ...}``) is
@@ -192,11 +195,17 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     first-party calls. The raw id never goes through the snapshot rule either:
     ``claude-opus-4-5@20251101`` would read as a snapshot of ``claude-opus-4``
     and borrow its higher price.
+
+    ``unwrap_ids=False`` skips the normalization: the raw id goes through the
+    snapshot rule, as Pathlayer 0.1.0 matched it. A report rebuilt for a run
+    recorded then uses it, so it prices no call that recording left unpriced.
     """
     if not model:
         return None
     lowered = model.lower()
     table = {key.lower(): value for key, value in prices.items()}
+    if not unwrap_ids:
+        return _match(lowered, table)
     exact = table.get(lowered)
     if exact is not None:
         return exact
@@ -204,14 +213,17 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
 
 
 def resolve_price(
-    model: str | None, prices: Mapping[str, ModelPrice] | None = None
+    model: str | None,
+    prices: Mapping[str, ModelPrice] | None = None,
+    *,
+    unwrap_ids: bool = True,
 ) -> ModelPrice | None:
     """The price ``model`` resolves to, or ``None`` when it has none.
 
     ``prices`` replaces ``DEFAULT_PRICES``, as in :func:`cost_of`. Adapters read
     the cache rates here to say which tokens a cost leaves unpriced.
     """
-    return _lookup(model, prices if prices is not None else DEFAULT_PRICES)
+    return _lookup(model, prices if prices is not None else DEFAULT_PRICES, unwrap_ids=unwrap_ids)
 
 
 def has_price(model: str | None, prices: Mapping[str, ModelPrice] | None = None) -> bool:
@@ -232,6 +244,7 @@ def cost_of(
     *,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    unwrap_ids: bool = True,
 ) -> float:
     """USD cost of a single LLM call, or ``0.0`` if it cannot be priced.
 
@@ -239,6 +252,7 @@ def cost_of(
     rather than raising: a missing price must never crash the capture path.
     Prompt-cache tokens are priced at the model's cache rates; a model whose
     cache rate is unknown (``None``) leaves those tokens out of the cost.
+    ``unwrap_ids`` is passed to the lookup (see ``_lookup``).
 
     Price resolution:
 
@@ -250,7 +264,7 @@ def cost_of(
     """
     base = prices if prices is not None else DEFAULT_PRICES
     table = {**base, **extra_prices} if extra_prices else base
-    price = _lookup(model, table)
+    price = _lookup(model, table, unwrap_ids=unwrap_ids)
     if price is None:
         return 0.0
     usd_per_mtok = max(0, input_tokens) * price.input_usd_per_mtok

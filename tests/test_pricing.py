@@ -264,6 +264,17 @@ def test_negative_cache_tokens_are_free() -> None:
     assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=-5, cache_write_tokens=-5) == 0.0
 
 
+def test_without_unwrapping_ids_match_as_pathlayer_0_1_0_did() -> None:
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert cost_of(bedrock, 1_000_000, 0) == pytest.approx(3.0)
+    assert cost_of(bedrock, 1_000_000, 0, unwrap_ids=False) == 0.0
+    assert resolve_price(bedrock, unwrap_ids=False) is None
+    # A first-party dated id needs no unwrapping either way.
+    assert cost_of("claude-sonnet-4-5-20250929", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(3.0)
+    )
+
+
 def test_resolve_price_returns_the_matched_entry() -> None:
     assert resolve_price("eu.anthropic.claude-opus-5-5-v1:0") == DEFAULT_PRICES["claude-opus-5-5"]
     assert resolve_price("house") is None
