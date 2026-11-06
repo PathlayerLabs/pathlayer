@@ -115,10 +115,13 @@ service manager, or in the background with
 
 The listener refuses to start, with a message saying what to change, when it
 cannot create or use the runs directory (`--runs-root` or
-`$PATHLAYER_RUNS_DIR`) or when its port is already taken, most likely by
-another listener (`--port` or `$PATHLAYER_PORT`). A listener on another port
-needs the gateway to post there too: set `PATHLAYER_URL` in the gateway's
-environment.
+`$PATHLAYER_RUNS_DIR`), when another listener is already recording into that
+directory (its startup would mark the other one's live runs interrupted), or
+when its port is already taken, most likely by another listener (`--port` or
+`$PATHLAYER_PORT`). One listener per runs directory: it holds the lock file
+`.listener.lock` there while it runs, released when it stops or dies. A
+listener on another port needs the gateway to post there too: set
+`PATHLAYER_URL` in the gateway's environment.
 
 ### Detector configuration
 

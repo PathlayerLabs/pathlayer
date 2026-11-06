@@ -31,6 +31,7 @@ import threading
 import types
 from collections.abc import Sequence
 from pathlib import Path
+from typing import IO
 
 from pathlayer.adapters.openclaw import DEFAULT_PORT
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
@@ -59,6 +60,8 @@ DEFAULT_PLUGIN_DEST = Path("~/.openclaw/extensions/pathlayer-plugin")
 
 CONFIG_ENV = "PATHLAYER_CONFIG"
 PORT_ENV = "PATHLAYER_PORT"
+#: Held by the listener recording into a runs root, for as long as it runs.
+RUNS_ROOT_LOCK = ".listener.lock"
 _HOST = "127.0.0.1"
 # A timed wait, so a Ctrl+C reaches its handler on Windows as well, where an
 # untimed Event.wait() cannot be interrupted.
@@ -237,6 +240,52 @@ def _check_port_free(port: int) -> None:
         probe.close()
 
 
+def _try_lock(handle: IO[str]) -> None:
+    """Take an exclusive lock on ``handle`` without waiting; ``OSError`` if held."""
+    handle.seek(0)
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def lock_runs_root(root: Path) -> IO[str]:
+    """Hold ``root`` for this listener, or exit if another listener holds it.
+
+    The startup sweep marks every unfinished run under the root as interrupted,
+    so a second listener on the same root would close the first one's live
+    runs, whatever its port. The lock is the open file returned: closing it, or
+    the process ending in any way, crash included, releases it, so a lock file
+    left behind never blocks a restart.
+    """
+    path = root / RUNS_ROOT_LOCK
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        _try_lock(handle)
+    except OSError as exc:
+        try:
+            handle.seek(0)
+            holder = handle.read().strip()
+        except OSError:  # Windows: the holder's locked byte cannot be read
+            holder = ""
+        handle.close()
+        process = f" (process {holder})" if holder.isdigit() else ""
+        raise SystemExit(
+            f"another Pathlayer listener{process} is already recording into {root}.\n"
+            "A second one would mark its live runs interrupted. Stop it, or give this "
+            "listener its own runs root with --runs-root or $PATHLAYER_RUNS_DIR."
+        ) from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle
+
+
 def _wait_for_stop(stop: threading.Event) -> None:
     """Block until SIGINT or SIGTERM (or ``stop`` is set), then restore the handlers."""
 
@@ -261,31 +310,35 @@ def run_record(args: argparse.Namespace, *, stop: threading.Event | None = None)
     """Run the recording listener until SIGINT or SIGTERM (or ``stop`` is set)."""
     _check_port_free(args.port)
     recorder = build_recorder(args)
-    recorder.startup()
-    try:
-        adapter = recorder.attach_http(port=args.port)
-    except OSError as exc:
-        raise _port_in_use(args.port, exc) from exc
+    # Held before the startup sweep and until the listener stops: see lock_runs_root.
+    with lock_runs_root(recorder.runs_root):
+        recorder.startup()
+        try:
+            adapter = recorder.attach_http(port=args.port)
+        except OSError as exc:
+            raise _port_in_use(args.port, exc) from exc
 
-    try:
-        print("=" * 60)
-        print("Pathlayer OpenClaw recorder -- ready.")
-        print("=" * 60)
-        print(f"Ingest URL : http://{_HOST}:{adapter.port}/ingest")
-        print(f"Runs root  : {recorder.runs_root}")
-        print(f"Config     : {args.config or 'discovery (.pathlayer/config.*) or defaults'}")
-        print(
-            "Hooks      : before_agent_run, llm_output, after_tool_call, agent_end, "
-            "before_tool_call"
-        )
-        if args.enforce:
-            print("Enforcement: on -- a STOP blocks the run's later tool calls")
-        else:
-            print("Enforcement: off -- observe only (start with --enforce to block after a STOP)")
-        print("Ctrl+C to stop.\n", flush=True)
-        _wait_for_stop(stop or threading.Event())
-    finally:
-        adapter.detach()
+        try:
+            print("=" * 60)
+            print("Pathlayer OpenClaw recorder -- ready.")
+            print("=" * 60)
+            print(f"Ingest URL : http://{_HOST}:{adapter.port}/ingest")
+            print(f"Runs root  : {recorder.runs_root}")
+            print(f"Config     : {args.config or 'discovery (.pathlayer/config.*) or defaults'}")
+            print(
+                "Hooks      : before_agent_run, llm_output, after_tool_call, agent_end, "
+                "before_tool_call"
+            )
+            if args.enforce:
+                print("Enforcement: on -- a STOP blocks the run's later tool calls")
+            else:
+                print(
+                    "Enforcement: off -- observe only (start with --enforce to block after a STOP)"
+                )
+            print("Ctrl+C to stop.\n", flush=True)
+            _wait_for_stop(stop or threading.Event())
+        finally:
+            adapter.detach()
     print("Stopping recorder.", flush=True)
     return 0
 

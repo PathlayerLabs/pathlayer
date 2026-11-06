@@ -413,6 +413,68 @@ def test_record_refuses_a_taken_port_before_sweeping_the_runs(
     openclaw_cli._check_port_free(0)  # port 0 is always free
 
 
+def test_a_second_listener_on_the_same_runs_root_never_sweeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two listeners, two ports, one runs root: the second one's startup sweep
+    # would mark the first one's live run interrupted.
+    _clean_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    runs_root = tmp_path / "runs"
+    first_port, second_port = _free_port(), _free_port()
+    first = openclaw_cli.parse_args(
+        ["record", "--port", str(first_port), "--runs-root", str(runs_root)]
+    )
+    second = openclaw_cli.parse_args(
+        ["record", "--port", str(second_port), "--runs-root", str(runs_root)]
+    )
+    stop = threading.Event()
+    refusals: list[str] = []
+    statuses: list[str] = []
+    errors: list[BaseException] = []
+
+    def _start_a_second_listener() -> None:
+        try:
+            _post_when_listening(first_port, _payloads("run-live")[:1])
+            statuses.append(_status(runs_root, "run-live"))
+            try:
+                openclaw_cli.run_record(second)
+            except SystemExit as exc:
+                refusals.append(str(exc))
+            statuses.append(_status(runs_root, "run-live"))
+            openclaw_cli._check_port_free(second_port)  # the second one never listened
+        except BaseException as exc:  # reported by the main thread
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    driver = threading.Thread(target=_start_a_second_listener)
+    driver.start()
+    assert openclaw_cli.run_record(first, stop=stop) == 0
+    driver.join(timeout=10)
+
+    assert errors == []
+    assert statuses == ["started", "started"]
+    [refusal] = refusals
+    assert f"another Pathlayer listener (process {os.getpid()}) is already recording" in refusal
+    assert "--runs-root or $PATHLAYER_RUNS_DIR" in refusal
+    # Once the first listener has stopped, the root is free again.
+    openclaw_cli.lock_runs_root(runs_root).close()
+
+
+def test_a_lock_file_left_by_a_dead_listener_never_blocks_a_restart(tmp_path: Path) -> None:
+    (tmp_path / openclaw_cli.RUNS_ROOT_LOCK).write_text("12345\n", encoding="utf-8")
+
+    with openclaw_cli.lock_runs_root(tmp_path) as lock:
+        assert not lock.closed
+        with pytest.raises(SystemExit, match="already recording into"):
+            openclaw_cli.lock_runs_root(tmp_path)
+    assert (tmp_path / openclaw_cli.RUNS_ROOT_LOCK).read_text(encoding="utf-8") == (
+        f"{os.getpid()}\n"
+    )
+    openclaw_cli.lock_runs_root(tmp_path).close()
+
+
 def test_a_port_taken_after_the_check_is_still_a_readable_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
