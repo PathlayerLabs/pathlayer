@@ -678,6 +678,12 @@ class OpenClawRunRecorder:
                 self._handle_run_start(active, payload, record)
             elif hook_kind is OpenClawHookKind.TOOL:
                 self._handle_tool(active, payload, record)
+                if active.awaiting_retry and not active.completed:
+                    # A late tool call of the failed attempt can still select a
+                    # STOP: the provisional manifest and report say so now, not
+                    # only once the run is closed.
+                    active.directory.update_manifest(stopped=active.pipeline.stopped)
+                    _write_report(active.directory)
             elif hook_kind is OpenClawHookKind.LLM:
                 self._handle_llm(active, payload, record)
                 if active.awaiting_retry and not active.completed:

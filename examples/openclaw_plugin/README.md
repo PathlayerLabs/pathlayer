@@ -281,8 +281,11 @@ tested with synthetic payloads; a real compaction or provider failover has not
 been recorded yet. Not covered: OpenClaw's model fallback runs each model's
 attempt as its own task on the session lane, so another run of the session
 could start between two attempts of one run. That start ends the waiting run,
-and the next model's attempt is then recorded apart and no longer blocked
-(whether a run can actually be queued in that gap is unconfirmed).
+and the next model's attempt is then neither recorded (only its usage report
+reaches the ended run's `late.jsonl`) nor blocked (whether a run can actually
+be queued in that gap is unconfirmed). And if an attempt's `before_agent_run`
+is lost, that attempt runs with the duration watchdog paused, and a failed end
+identical to the previous one is taken for a repeated delivery.
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being

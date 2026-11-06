@@ -740,6 +740,24 @@ def test_a_failed_attempt_pauses_the_duration_watchdog(tmp_path: Path) -> None:
     assert run.read_manifest()["stopped"] is False
 
 
+def test_a_stop_selected_while_the_run_waits_is_written_at_once(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    for index in range(3):
+        recorder.process_payload(_tool("run-a", f"a{index}"))
+    recorder.process_payload(_end("run-a", success=False))
+    run = _run(tmp_path, "run-a")
+    assert run.read_manifest()["stopped"] is False
+    # The attempt's last calls, delivered after its end, complete the loop.
+    for index in range(3, 8):
+        recorder.process_payload(_tool("run-a", f"a{index}"))
+
+    manifest = run.read_manifest()
+    assert manifest["status"] == "awaiting_retry"
+    assert manifest["stopped"] is True
+    assert _report(run)["outcome"] == "stopped"
+
+
 def test_a_tool_call_arriving_after_the_failed_end_does_not_resume_the_run(
     tmp_path: Path,
 ) -> None:
