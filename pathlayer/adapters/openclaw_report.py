@@ -274,7 +274,9 @@ def _duration_seconds(
 def _attempt_ends(run: RunDirectory) -> list[dict[str, Any]]:
     """The ``event`` of every ``agent_end`` the run journaled, in order.
 
-    One per attempt that ended: a duplicated ``agent_end`` is never journaled.
+    One per attempt that ended. A failed end delivered again before a new
+    attempt started is not journaled; one delivered after a new start cannot be
+    told from that attempt's own end and is counted as it.
     A corrupt journal yields none, and the run is reported as a single attempt;
     the cost attribution already names that corruption.
     """
@@ -851,7 +853,11 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             "run, so the per-tick budget signal stops short of the run's own total"
         )
     if not trace_available and not provisional:
-        notes.append("trace.json is absent: this run never reached agent_end")
+        notes.append(
+            "trace.json is absent: this run never reached agent_end"
+            if not attempt_ends
+            else "trace.json is absent: this run was cut before its final agent_end"
+        )
 
     return build_session_report(
         run_id=str(manifest.get("run_id") or run.original_run_id),

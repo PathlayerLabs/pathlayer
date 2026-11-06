@@ -554,6 +554,53 @@ def test_the_startup_sweep_interrupts_a_waiting_run_with_its_full_trace(
     assert not any("trace.json is absent" in note for note in report["notes"])
 
 
+def test_the_startup_sweep_seals_a_run_cut_during_a_later_attempt(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "a1"))
+    recorder.process_payload(_end("run-a", success=False))
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "a2"))
+    assert _run(tmp_path, "run-a").read_manifest()["status"] == "started"
+
+    OpenClawRunRecorder(tmp_path, config=_PRICED).startup()
+
+    run = _run(tmp_path, "run-a")
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert "interrupted_while_awaiting_retry" not in manifest
+    trace = load_trace(run.trace_path)
+    assert [event.kind for event in trace.events].count(EventKind.TOOL_CALL) == 2
+    assert trace.metadata["failed_attempts"] == 1
+    assert "interrupted_while_awaiting_retry" not in trace.metadata
+    report = _report(run)
+    assert report["status"] == "interrupted"
+    assert not any("waited for another attempt" in note for note in report["notes"])
+    assert not any("trace.json is absent" in note for note in report["notes"])
+
+
+def test_a_run_cut_during_a_later_attempt_without_a_trace_reached_an_agent_end(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_end("run-a", success=False))
+    recorder.process_payload(_start("run-a"))
+    run = _run(tmp_path, "run-a")
+    run.update_manifest(status="interrupted")  # cut, and never sealed
+
+    notes = _report_notes(run)
+
+    assert "trace.json is absent: this run was cut before its final agent_end" in notes
+    assert "trace.json is absent: this run never reached agent_end" not in notes
+
+
+def _report_notes(run: RunDirectory) -> list[str]:
+    from pathlayer.adapters.openclaw_report import build_run_report
+
+    return list(build_run_report(run).notes)
+
+
 def test_a_sweep_that_cannot_write_the_trace_still_interrupts_and_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -691,6 +738,34 @@ def test_a_failed_attempt_pauses_the_duration_watchdog(tmp_path: Path) -> None:
     run = _run(tmp_path, "run-a")
     assert _lifecycle_kinds(run) == [EventKind.RUN_START]
     assert run.read_manifest()["stopped"] is False
+
+
+def test_a_tool_call_arriving_after_the_failed_end_does_not_resume_the_run(
+    tmp_path: Path,
+) -> None:
+    # The plugin posts hooks without ordering them: an aborted attempt's last
+    # tool call can reach Pathlayer after its failed agent_end.
+    recorder, clock = _timed_recorder(tmp_path)
+    scheduler = clock.scheduler
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    recorder.process_payload(_end("run-a", success=False))
+    recorder.process_payload(_tool("run-a", "c2"))
+
+    run = _run(tmp_path, "run-a")
+    assert run.read_manifest()["status"] == "awaiting_retry"
+    assert [record["hook"] for record in _jsonl(run.raw_events_path)][-1] == "after_tool_call"
+    assert scheduler.live() == []
+    # No deadline can fire on a run that has ended, and the next run of the
+    # session still closes it.
+    clock.advance(60)
+    recorder.process_payload(_start("run-b"))
+    manifest = run.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["ended_by"] == "next_run_in_session"
+    assert manifest["stopped"] is False
+    tools = [e for e in load_trace(run.trace_path).events if e.kind is EventKind.TOOL_CALL]
+    assert len(tools) == 2
 
 
 def _lifecycle_kinds(run: RunDirectory) -> list[EventKind]:

@@ -36,11 +36,12 @@ or a provider failover it starts another attempt, and every attempt sends its
 own ``agent_end``. An ``agent_end`` whose ``success`` is exactly ``False`` is
 therefore the end of an attempt: the run becomes ``awaiting_retry`` (not
 terminal), gets a provisional report, and keeps its pipeline, sequence, cost
-and STOP. A later ``before_agent_run`` or tool call of the same ``runId``
-resumes it; a model usage report alone does not, since OpenClaw sends one after
-every attempt. The run ends for good at an ``agent_end`` with any other
-``success`` value, when the next run of its session starts (OpenClaw runs one
-run at a time per session), or at the startup sweep.
+and STOP. A later ``before_agent_run`` of the same ``runId`` resumes it; a
+model usage report does not, since OpenClaw sends one after every attempt, nor
+does a tool call, which can arrive after the failed end it preceded. The run
+ends for good at an ``agent_end`` with any other ``success`` value, when the
+next run of its session starts (OpenClaw runs one run at a time per session),
+or at the startup sweep.
 """
 
 from __future__ import annotations
@@ -445,7 +446,11 @@ class OpenClawRunRecorder:
                 _write_report(run)
 
     def _seal_awaiting_runs(self, restored: dict[str, tuple[Pipeline, list[ToolEvent]]]) -> None:
-        """Write the final trace of every run the sweep finds waiting for an attempt.
+        """Write the final trace of every run the sweep finds after a failed attempt.
+
+        That is a run waiting for another attempt, or one cut during a later
+        attempt: either already journaled an ``agent_end``, and would have had a
+        trace had its first attempt been its end.
 
         The trace holds every recorded event, rebuilt from the raw journal --
         the same events a live run would have written. ``restored`` reuses a
@@ -461,7 +466,10 @@ class OpenClawRunRecorder:
         for run in runs:
             try:
                 manifest = run.read_manifest()
-                if manifest.get("status") != AWAITING_RETRY_STATUS:
+                waiting = manifest.get("status") == AWAITING_RETRY_STATUS
+                if not waiting and (
+                    manifest.get("status") in TERMINAL_STATUSES or not _failed_attempt_ends(run)
+                ):
                     continue
                 entry = restored.get(run.dir_name)
                 if entry is None:
@@ -477,8 +485,9 @@ class OpenClawRunRecorder:
                     "recorded_at": utc_now_iso(),
                     "health_reason": health_reason,
                     "failed_attempts": len(_failed_attempt_ends(run)),
-                    INTERRUPTED_WHILE_AWAITING_RETRY: True,
                 }
+                if waiting:
+                    metadata[INTERRUPTED_WHILE_AWAITING_RETRY] = True
                 trace = Trace(
                     label=health,
                     description=f"Recorded OpenClaw run {run.original_run_id}",
@@ -486,7 +495,8 @@ class OpenClawRunRecorder:
                     metadata=metadata,
                 )
                 atomic_write_json(run.trace_path, trace_to_dict(trace))
-                run.update_manifest(**{INTERRUPTED_WHILE_AWAITING_RETRY: True})
+                if waiting:
+                    run.update_manifest(**{INTERRUPTED_WHILE_AWAITING_RETRY: True})
             except (OSError, ValueError, KeyError, TypeError, StateStoreError):
                 logger.exception(
                     "could not write the trace of OpenClaw run %r, left waiting for an attempt",
@@ -630,13 +640,13 @@ class OpenClawRunRecorder:
                 # dropped before anything is written, exactly like a duplicated
                 # end of a finished run.
                 return
-            if active.awaiting_retry and hook_kind in {
-                OpenClawHookKind.RUN_START,
-                OpenClawHookKind.TOOL,
-            }:
-                # Only a new attempt's start or a tool call proves the run is
-                # alive again. A usage report does not: OpenClaw sends one
-                # after every attempt, failed or not.
+            if active.awaiting_retry and hook_kind is OpenClawHookKind.RUN_START:
+                # Only a new attempt's start proves the run is alive again. A
+                # usage report does not: OpenClaw sends one after every attempt,
+                # failed or not. Nor does a tool call: the plugin posts hooks
+                # without ordering them, so the failed attempt's last tool call
+                # can arrive after its end. It is recorded and analyzed like any
+                # other, but leaves the run waiting and the watchdog paused.
                 self._resume_attempt(active)
             assert active.runtime_sink is not None
             if any(event.kind is EventKind.RUN_START for event in active.pipeline.history):
@@ -1565,8 +1575,8 @@ class OpenClawRunRecorder:
         a failed attempt was the run's last, so a live timer could later fire on
         a run that has already ended and record a STOP nothing caused. The
         deadline keeps its original anchor (the durable ``RUN_START``): the next
-        attempt's first start or tool call re-arms it, and an overdue deadline
-        fires right there, on a run that has just proven to be alive.
+        attempt's start re-arms it, and an overdue deadline fires right there, on
+        a run that has just proven to be alive.
         """
         assert active.runtime_sink is not None
         # A deadline already due at this boundary still fires here, as it would

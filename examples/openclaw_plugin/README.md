@@ -143,8 +143,9 @@ What this does and does not do:
   one more call can run.
 - **Several attempts.** OpenClaw can run one `runId` in several attempts
   (after a compaction, a timeout or a provider failover), each ending with its
-  own `agent_end`. A run stopped in one attempt stays blocked in the next ones
-  (see *Runs with several attempts* below).
+  own `agent_end`. A run stopped in one attempt stays blocked in the next ones,
+  as long as no other run of its session starts in between (see *Runs with
+  several attempts* below).
 - **Restarts.** A listener restart marks the runs in progress as interrupted:
   they are no longer analyzed, so a run stopped before the restart is no
   longer blocked after it.
@@ -249,23 +250,27 @@ exactly `false` therefore ends an attempt, not the run:
 - The run becomes `awaiting_retry`. This status is not terminal: no `final.json`,
   no `trace.json`. A provisional `report.json` (outcome `in_progress`) is written
   from the journals, and rebuilt when the failed attempt's `llm_output` arrives.
-- The next attempt's `before_agent_run` or first tool call resumes the run (back
-  to `started`): same pipeline, same sequence, same cost, same STOP. A usage
-  report alone does not resume it, since OpenClaw sends one after every attempt.
-  Usage received between two attempts counts in-run and reaches the budget.
+- The next attempt's `before_agent_run` resumes the run (back to `started`):
+  same pipeline, same sequence, same cost, same STOP. A usage report does not
+  resume it, since OpenClaw sends one after every attempt, and neither does a
+  tool call: the plugin posts hooks without ordering them, so the failed
+  attempt's last tool call can arrive after its end. Such a call is recorded
+  and analyzed like any other. Usage received between two attempts counts
+  in-run and reaches the budget.
 - The run ends for good at an `agent_end` with any other `success` value (an
   absent value included, as before), or when the next run of its session starts:
   OpenClaw runs one run at a time per session, so the waiting run's failed
   attempt was its end (`ended_by: next_run_in_session` in the manifest). A run
-  still waiting at the next listener startup is marked `interrupted`; its
-  `trace.json` is then written with every recorded event.
+  still waiting, or cut during a later attempt, at the next listener startup is
+  marked `interrupted`; its `trace.json` is then written with every recorded
+  event.
 - A failed `agent_end` delivered again before any new attempt starts is
-  dropped, like a duplicated final one. After a new attempt's start or tool
-  call, an identical failed end is that attempt's own and counts.
+  dropped, like a duplicated final one. After a new attempt's start, an
+  identical failed end is that attempt's own and counts.
 - The duration watchdog counts from the first attempt. It pauses while the run
   waits: OpenClaw sends no signal when a failed attempt was the run's last, and
   a live timer would otherwise fire on a run that has already ended. If the
-  deadline has passed, it fires at the next attempt's first hook.
+  deadline has passed, it fires at the next attempt's start.
 - The report's duration of a multi-attempt run is the sum of the attempts'
   durations as OpenClaw measured them; the time between attempts (compaction,
   backoff) is in no measurement. A run left waiting has no duration until it
@@ -273,7 +278,11 @@ exactly `false` therefore ends an attempt, not the run:
 
 This behavior is derived from OpenClaw's source (2026.7.1 and 2026.10.10) and
 tested with synthetic payloads; a real compaction or provider failover has not
-been recorded yet.
+been recorded yet. Not covered: OpenClaw's model fallback runs each model's
+attempt as its own task on the session lane, so another run of the session
+could start between two attempts of one run. That start ends the waiting run,
+and the next model's attempt is then recorded apart and no longer blocked
+(whether a run can actually be queued in that gap is unconfirmed).
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being
