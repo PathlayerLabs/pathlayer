@@ -615,7 +615,7 @@ class CostShare:
     """One slice of captured cost, keeping provenance and what nothing measured.
 
     ``measured_usd`` is a positive cost the source priced itself;
-    ``estimated_usd`` an adapter estimate (OpenClaw's total-token estimate,
+    ``estimated_usd`` an adapter estimate (OpenClaw's token-counter estimate,
     a computed zero for a configured free model included). ``costed_events``
     counts the events behind those figures and ``unmeasured_events`` the
     cost-bearing events nothing could price -- unknown model, no usable token

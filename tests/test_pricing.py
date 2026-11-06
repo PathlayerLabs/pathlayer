@@ -192,6 +192,15 @@ def test_provider_wrapped_ids_resolve_to_the_vendor_price(model: str, input_rate
         # The non-digit suffix rule survives unwrapping: o3-pro is not o3.
         "openai/o3-pro",
         "anthropic/claude-opus-4-mini",
+        # A variant of a listed sub-version never falls back to its base:
+        # Opus 4.5 to 4.8 would cost Opus 4's $15, Opus 5.5 Opus 5's $5.
+        "claude-opus-4-5-thinking",
+        "claude-opus-4.7-thinking",
+        "openrouter/anthropic/claude-opus-4.5:nitro",
+        "anthropic/claude-opus-4-6:floor",
+        "claude-opus-5-5-thinking",
+        "anthropic/claude-opus-5-5:floor",
+        "claude-sonnet-4-5-20250929-thinking",
     ],
 )
 def test_unknown_wrapped_ids_stay_unpriced(model: str) -> None:
@@ -253,6 +262,17 @@ def test_cache_tokens_without_a_cache_rate_are_left_out() -> None:
 
 def test_negative_cache_tokens_are_free() -> None:
     assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=-5, cache_write_tokens=-5) == 0.0
+
+
+def test_without_unwrapping_ids_match_as_pathlayer_0_1_0_did() -> None:
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert cost_of(bedrock, 1_000_000, 0) == pytest.approx(3.0)
+    assert cost_of(bedrock, 1_000_000, 0, unwrap_ids=False) == 0.0
+    assert resolve_price(bedrock, unwrap_ids=False) is None
+    # A first-party dated id needs no unwrapping either way.
+    assert cost_of("claude-sonnet-4-5-20250929", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(3.0)
+    )
 
 
 def test_resolve_price_returns_the_matched_entry() -> None:

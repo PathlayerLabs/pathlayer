@@ -18,8 +18,8 @@ Two properties shape the design:
   enter the effective total anyway.
 - **A report never fills a gap with a zero, and never hides a computed zero.**
   A journal line written before OBS-2 has no fused score. An OpenClaw LLM event
-  can carry a total-token estimate but no provider input/output split; its
-  estimated status remains explicit. Missing token/model evidence is reported as
+  carries a cost estimated from token counters at local rates; its estimated
+  status remains explicit. Missing token/model evidence is reported as
   *unmeasured*, never as "nothing happened" or "$0.00". Conversely a computed
   free-model value is reported even when it is zero. The report is aggregation
   only -- no detector, no threshold, no inference beyond what the files say.
@@ -355,7 +355,7 @@ def _build_cost(
     elif not priced:
         reasons.append(
             "no recorded event carried a positive measured price; LLM spend can be "
-            "estimated when total-token usage and model pricing are available"
+            "estimated when token usage and model pricing are available"
         )
     if manifest_estimated is None and budget_status == COST_BUDGET_DISABLED:
         reasons.append(
@@ -471,11 +471,12 @@ def _pinned_rate(value: Any) -> float | None:
 
 @dataclass(frozen=True, slots=True)
 class _PinnedPricing:
-    """The pricing a run was recorded with: rates, total split ratio and rule."""
+    """The pricing a run was recorded with: rates, total split ratio and rules."""
 
     prices: dict[str, ModelPrice]
     input_ratio: float
     split_usage: bool
+    unwrap_model_ids: bool
 
 
 def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
@@ -486,9 +487,11 @@ def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
     with any rate that is not a finite number ``>= 0`` (negative, ``NaN``,
     infinite, a string) is unusable as a whole: pricing with it would print a
     negative or ``NaN`` cost, so its calls stay counted but unmeasured. The
-    cache rates may be absent or ``null`` (unknown), and a snapshot without
+    cache rates may be absent or ``null`` (unknown). A snapshot without
     ``split_usage: true`` predates split pricing, so its runs keep the total
-    split they were priced with.
+    split they were priced with; one without ``unwrap_model_ids: true``
+    predates provider-wrapped ids (Bedrock, Vertex, routing prefixes), so a
+    call its recording left unpriced stays unmeasured.
     """
     snapshot = manifest.get("llm_pricing_snapshot")
     if not isinstance(snapshot, dict):
@@ -513,7 +516,12 @@ def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
                 return None
             cache_rates.append(cache_rate)
         prices[str(name)] = ModelPrice(input_rate, output_rate, *cache_rates)
-    return _PinnedPricing(prices, ratio, snapshot.get("split_usage") is True)
+    return _PinnedPricing(
+        prices,
+        ratio,
+        split_usage=snapshot.get("split_usage") is True,
+        unwrap_model_ids=snapshot.get("unwrap_model_ids") is True,
+    )
 
 
 def _llm_events(payload: dict[str, Any], pricing: _PinnedPricing | None) -> list[ToolEvent]:
@@ -530,6 +538,7 @@ def _llm_events(payload: dict[str, Any], pricing: _PinnedPricing | None) -> list
             prices=pricing.prices,
             input_ratio=pricing.input_ratio,
             split_usage=pricing.split_usage,
+            unwrap_model_ids=pricing.unwrap_model_ids,
         )
     except ValueError:
         return []

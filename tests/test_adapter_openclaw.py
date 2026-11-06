@@ -270,6 +270,28 @@ def test_llm_call_with_only_unpriced_cache_tokens_is_unmeasured() -> None:
     assert event.metadata["unpriced_cache_tokens"] == 200
 
 
+def test_llm_cache_tokens_of_a_free_model_are_free() -> None:
+    free = {"local": ModelPrice(0.0, 0.0)}
+    [event] = translate_openclaw_llm_event(_llm_payload({"cacheRead": 5000}, "local"), prices=free)
+    assert event.cost_usd == 0.0
+    assert event.metadata["cost_measurement"] == "estimated_total_tokens"
+    assert "unpriced_cache_tokens" not in event.metadata
+
+
+def test_llm_split_of_zeros_with_a_positive_total_divides_the_total() -> None:
+    [event] = translate_openclaw_llm_event(_llm_payload({"total": 1000, "cacheRead": 0}))
+    assert event.metadata["token_split"] == "input_ratio"
+    assert event.cost_usd == pytest.approx((800 * 3.0 + 200 * 15.0) / 1_000_000)
+
+
+def test_llm_ids_can_be_matched_as_pathlayer_0_1_0_did() -> None:
+    [event] = translate_openclaw_llm_event(
+        _llm_payload(_LIVE_USAGE), split_usage=False, unwrap_model_ids=False
+    )
+    assert event.cost_usd == 0.0
+    assert event.metadata["cost_measurement"] == "unmeasured_unknown_model"
+
+
 def test_llm_reasoning_tokens_are_evidence_not_billed_twice() -> None:
     usage = {"input": 10, "output": 100, "reasoningTokens": 40}
     [event] = translate_openclaw_llm_event(_llm_payload(usage))
