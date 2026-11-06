@@ -16,10 +16,10 @@ Scope: ``after_tool_call`` is translated into a tool event. This adapter only
 observes: it never blocks or rewrites a tool call. Blocking the tool calls of
 a stopped run is an opt-in decision of the run recorder (see
 ``OpenClawRunRecorder.tool_call_decision``). ``llm_output`` is translated
-separately only when it contains a model and a non-negative total-token counter.
-When the provider does not expose the input/output split, the configured input
-ratio yields a clearly labelled first cost approximation; it is not an
-invoice-grade measurement. Lifecycle hooks
+separately when it carries usable token counters: its input, output and cache
+counters are priced at local rates, and a total alone is split with the
+configured input ratio. Either way the cost is a clearly labelled first
+approximation, not an invoice-grade measurement. Lifecycle hooks
 (``before_agent_run``, ``agent_end``) are handled by
 :mod:`pathlayer.adapters.openclaw_recorder`. Other hook names are ignored rather
 than raising.
@@ -113,6 +113,7 @@ def translate_openclaw_llm_event(
     prices: Mapping[str, ModelPrice] | None = None,
     input_ratio: float = 0.8,
     split_usage: bool = True,
+    unwrap_model_ids: bool = True,
 ) -> list[ToolEvent]:
     """Estimate an LLM cost from the token counters OpenClaw reports.
 
@@ -134,8 +135,11 @@ def translate_openclaw_llm_event(
     Either way the result is marked ``estimated_total_tokens``, the label for a
     cost estimated from token counters at local rates: a first approximation,
     not an invoice-grade or provider-measured cost. ``split_usage=False`` always
-    divides the total, the rule a run recorded before split pricing used, so its
-    report keeps the figure computed at the time.
+    divides the total, and ``unwrap_model_ids=False`` matches the raw model id
+    without unwrapping a provider prefix: the rules of a run recorded by
+    Pathlayer 0.1.0, so its report keeps the figure computed at the time. A
+    split whose counters are all zero while the total is positive is not a
+    split: the total is divided instead.
 
     Missing/malformed counters produce no LLM event. Unknown models still
     produce an event marked ``unmeasured_unknown_model`` with zero cost, so a
@@ -151,9 +155,13 @@ def translate_openclaw_llm_event(
     usage = _as_mapping(event.get("usage")) or _as_mapping(ctx.get("usage"))
     total = _token_count(usage.get("total", usage.get("totalTokens")))
     split = _reported_split(usage) if split_usage else None
+    if split is not None and not any(split) and total:
+        split = None
     model_raw = event.get("model") or ctx.get("model") or ctx.get("resolvedModel")
     model = str(model_raw) if model_raw else None
-    price = resolve_price(model, prices)
+    price = resolve_price(model, prices, unwrap_ids=unwrap_model_ids)
+    # A model configured as free costs nothing, its cache tokens included.
+    free = price is not None and not (price.input_usd_per_mtok or price.output_usd_per_mtok)
     metadata: dict[str, Any] = {}
     if split is not None:
         input_tokens, output_tokens, cache_read, cache_write = split
@@ -165,9 +173,9 @@ def translate_openclaw_llm_event(
             token_split="reported",
         )
         unpriced = 0
-        if price is not None and price.cache_read_usd_per_mtok is None:
+        if price is not None and not free and price.cache_read_usd_per_mtok is None:
             unpriced += cache_read
-        if price is not None and price.cache_write_usd_per_mtok is None:
+        if price is not None and not free and price.cache_write_usd_per_mtok is None:
             unpriced += cache_write
         if unpriced:
             metadata["unpriced_cache_tokens"] = unpriced
@@ -213,6 +221,7 @@ def translate_openclaw_llm_event(
                 prices,
                 cache_read_tokens=cache_read,
                 cache_write_tokens=cache_write,
+                unwrap_ids=unwrap_model_ids,
             ),
             run_id=context.run_id,
             metadata=metadata,

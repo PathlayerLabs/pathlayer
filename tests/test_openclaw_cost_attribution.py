@@ -515,7 +515,7 @@ def test_post_run_usage_names_its_method_and_unpriced_cache_tokens(tmp_path: Pat
         "local rates, received after the run" in report.cost.source
     )
     assert (
-        "1,000,500 cache token(s) over 2 model call(s) received after the run are not "
+        "1,000,500 cache token(s) over 2 usage report(s) received after the run are not "
         "priced: no cache rate is known for gpt-4o" in report.cost.source
     )
 
@@ -530,7 +530,7 @@ def test_post_run_usage_with_only_unpriced_cache_tokens_is_still_named(tmp_path:
 
     assert report.cost.post_run_estimated_usd is None
     assert "estimated from" not in report.cost.source
-    assert "500 cache token(s) over 1 model call(s) received after the run" in report.cost.source
+    assert "500 cache token(s) over 1 usage report(s) received after the run" in report.cost.source
 
 
 def test_a_total_only_call_names_the_input_ratio_method(tmp_path: Path) -> None:
@@ -556,6 +556,31 @@ def test_a_run_recorded_before_split_pricing_keeps_its_total_split(tmp_path: Pat
     attribution = build_cost_attribution(run)
 
     assert attribution.attributed.total_usd == pytest.approx(_CALL_USD)
+
+
+def test_a_run_recorded_before_wrapped_ids_keeps_them_unmeasured(tmp_path: Path) -> None:
+    # Pathlayer 0.1.0 did not unwrap Bedrock ids: its runs priced nothing for
+    # them, and a report rebuilt today must not invent that figure.
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", model=bedrock))
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    assert snapshot["unwrap_model_ids"] is True
+    assert build_cost_attribution(run).late.costed_events == 1
+
+    # The snapshot a 0.1.0 recorder pinned: no split, no unwrapping.
+    run.update_manifest(
+        llm_pricing_snapshot={
+            "input_ratio": 0.8,
+            "models": {"claude-sonnet-4": {"input_usd_per_mtok": 3.0, "output_usd_per_mtok": 15.0}},
+        }
+    )
+
+    late = build_cost_attribution(run).late
+    assert late == CostShare(unmeasured_events=1)
 
 
 def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
@@ -590,6 +615,29 @@ def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
         assert attribution.attributed.unmeasured_events == 1
 
 
+def test_a_run_recorded_before_0_1_1_keeps_post_run_usage_out_of_its_total(
+    tmp_path: Path,
+) -> None:
+    # 0.1.0 attributed usage received after agent_end to the run but left it out
+    # of the total: a report rebuilt today keeps that total.
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1"))
+    run = _run(tmp_path, "r1")
+    assert build_run_report(run).cost.post_run_estimated_usd == pytest.approx(_CALL_USD)
+    run.update_manifest(llm_pricing_snapshot={"input_ratio": 0.8, "models": {"model": _RATES}})
+
+    report = build_run_report(run)
+
+    assert report.cost.post_run_estimated_usd is None
+    assert report.cost.total_usd is None
+    assert report.cost_attribution is not None
+    assert report.cost_attribution.late.total_usd == pytest.approx(_CALL_USD)
+    assert any("recorded before Pathlayer 0.1.1" in note for note in report.notes)
+    assert "received after the run" not in report.cost.source
+
+
 def test_a_corrupt_hook_journal_costs_the_attribution_not_the_report(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
     recorder.process_payload(_before("r1"))
@@ -604,6 +652,7 @@ def test_a_corrupt_hook_journal_costs_the_attribution_not_the_report(tmp_path: P
     assert report.cost_attribution is None
     assert report.cost.estimated_usd == pytest.approx(_CALL_USD)  # from trace.json
     assert any("cost attribution is unavailable" in note for note in report.notes)
+    assert any("leaves out any usage received after the run" in note for note in report.notes)
     assert report.to_dict()["cost_attribution"] is None
     with pytest.raises(ValueError):
         build_cost_attribution(run)

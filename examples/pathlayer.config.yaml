@@ -200,20 +200,24 @@ pipeline:
   dry_run: false          # true = detect/log only; never apply or halt
 
 # Token prices, in USD per 1M tokens, feeding pathlayer.pricing.cost_of(). Empty
-# by default: the built-in table (pathlayer/pricing.py, common 2025 OpenAI and
-# Anthropic models) applies unchanged.
+# by default: the built-in table (pathlayer/pricing.py: common OpenAI models and
+# every current Claude model except Haiku 5.5) applies unchanged.
 #
 # WHAT THIS DOES AND DOES NOT DO. The official adapter factories
 # `LangGraphAdapter.from_config(...)` and `OpenClawAdapter.from_config(...)`
 # make a configured price reach `cost_usd`, the budget detector and the report.
-# `after_tool_call` carries only tool data. OpenClaw's `llm_output` hook can
-# report one total-token counter without an
-# input/output split. Pathlayer applies the ratio below to estimate that split.
-# This is an initial approximation, not a provider invoice: unknown models or
-# missing counters remain unmeasured and are never presented as a zero-cost run.
+# `after_tool_call` carries only tool data. OpenClaw's `llm_output` hook reports
+# input, output, cache-read and cache-write tokens, each priced at its own rate;
+# when it reports only a total, Pathlayer applies the ratio below to estimate
+# the input/output split. This is an initial approximation, not a provider
+# invoice: unknown models or missing counters remain unmeasured and are never
+# presented as a zero-cost run.
 #
 # Both rates are required per model: silently defaulting the output rate to 0
-# would under-charge every completion and quietly weaken the budget brake.
+# would under-charge every completion and quietly weaken the budget brake. The
+# two cache rates are optional: without them, cache tokens stay unpriced
+# (counted and named in the report). An entry overriding a built-in model
+# replaces its cache rates too, so repeat them if you only change the base rates.
 # Matching is case-insensitive and resolves a dated snapshot to its base key
 # (`gpt-4o-2024-08-06` -> `gpt-4o`), so pin a cheaper sub-version explicitly
 # rather than letting it inherit its base rate.
@@ -224,9 +228,11 @@ pricing:
   #   house-model:
   #     input_usd_per_mtok: 1.0
   #     output_usd_per_mtok: 2.0
-  #   claude-opus-4-5:
-  #     input_usd_per_mtok: 5.0
-  #     output_usd_per_mtok: 25.0
+  #   claude-opus-5-6:            # a sub-version the table does not list yet
+  #     input_usd_per_mtok: 3.0
+  #     output_usd_per_mtok: 15.0
+  #     cache_read_usd_per_mtok: 0.3      # optional
+  #     cache_write_usd_per_mtok: 3.75    # optional, the 5-minute write
   #
   # true = `models` REPLACES the built-in table instead of extending it, so any
   # model not listed above has unmeasured token cost. An explicitly configured

@@ -625,7 +625,7 @@ class CostShare:
     """One slice of captured cost, keeping provenance and what nothing measured.
 
     ``measured_usd`` is a positive cost the source priced itself;
-    ``estimated_usd`` an adapter estimate (OpenClaw's total-token estimate,
+    ``estimated_usd`` an adapter estimate (OpenClaw's token-counter estimate,
     a computed zero for a configured free model included). ``costed_events``
     counts the events behind those figures and ``unmeasured_events`` the
     cost-bearing events nothing could price -- unknown model, no usable token
@@ -706,9 +706,9 @@ class CostAttribution:
     A cost is *attributed* when the source named its run (``runId``). Two
     subsets of it are reported as evidence, never as a reason to move the cost:
 
-    - ``late``: it reached Pathlayer after the run had already ended. The hooks
-      are fire-and-forget on both sides, so the last model call can lose the
-      race with ``agent_end``; it still belongs to the run the source named.
+    - ``late``: it reached Pathlayer after the run had already ended, which is
+      where OpenClaw 2026.7 and later report a run's model usage; it still
+      belongs to the run the source named.
     - ``without_turn_start``: the source named the run, but no
       ``before_agent_run`` was ever recorded for it.
 

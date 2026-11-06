@@ -18,8 +18,8 @@ Two properties shape the design:
   enter the effective total anyway.
 - **A report never fills a gap with a zero, and never hides a computed zero.**
   A journal line written before OBS-2 has no fused score. An OpenClaw LLM event
-  can carry a total-token estimate but no provider input/output split; its
-  estimated status remains explicit. Missing token/model evidence is reported as
+  carries a cost estimated from token counters at local rates; its estimated
+  status remains explicit. Missing token/model evidence is reported as
   *unmeasured*, never as "nothing happened" or "$0.00". Conversely a computed
   free-model value is reported even when it is zero. The report is aggregation
   only -- no detector, no threshold, no inference beyond what the files say.
@@ -397,7 +397,7 @@ def _build_cost(
     elif not priced:
         reasons.append(
             "no recorded event carried a positive measured price; LLM spend can be "
-            "estimated when total-token usage and model pricing are available"
+            "estimated when token usage and model pricing are available"
         )
     if manifest_estimated is None and budget_status == COST_BUDGET_DISABLED:
         reasons.append(
@@ -475,7 +475,9 @@ def _estimate_methods(events: Sequence[ToolEvent], *, after_run: bool = False) -
 
 def _unpriced_cache_reasons(events: Sequence[ToolEvent], *, after_run: bool = False) -> list[str]:
     """Name the cache tokens no rate priced, and the models that lack one."""
-    received = " received after the run" if after_run else ""
+    # After the run, OpenClaw's payloads are usage reports, each summing an
+    # attempt's model calls.
+    unit = "usage report(s) received after the run" if after_run else "model call(s)"
     tokens = 0
     calls = 0
     models: set[str] = set()
@@ -488,7 +490,7 @@ def _unpriced_cache_reasons(events: Sequence[ToolEvent], *, after_run: bool = Fa
     if not tokens:
         return []
     return [
-        f"{tokens:,} cache token(s) over {calls} model call(s){received} are not priced: no cache "
+        f"{tokens:,} cache token(s) over {calls} {unit} are not priced: no cache "
         f"rate is known for {', '.join(sorted(models))}, so the estimate leaves them out"
     ]
 
@@ -513,11 +515,12 @@ def _pinned_rate(value: Any) -> float | None:
 
 @dataclass(frozen=True, slots=True)
 class _PinnedPricing:
-    """The pricing a run was recorded with: rates, total split ratio and rule."""
+    """The pricing a run was recorded with: rates, total split ratio and rules."""
 
     prices: dict[str, ModelPrice]
     input_ratio: float
     split_usage: bool
+    unwrap_model_ids: bool
 
 
 def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
@@ -528,9 +531,11 @@ def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
     with any rate that is not a finite number ``>= 0`` (negative, ``NaN``,
     infinite, a string) is unusable as a whole: pricing with it would print a
     negative or ``NaN`` cost, so its calls stay counted but unmeasured. The
-    cache rates may be absent or ``null`` (unknown), and a snapshot without
+    cache rates may be absent or ``null`` (unknown). A snapshot without
     ``split_usage: true`` predates split pricing, so its runs keep the total
-    split they were priced with.
+    split they were priced with; one without ``unwrap_model_ids: true``
+    predates provider-wrapped ids (Bedrock, Vertex, routing prefixes), so a
+    call its recording left unpriced stays unmeasured.
     """
     snapshot = manifest.get("llm_pricing_snapshot")
     if not isinstance(snapshot, dict):
@@ -555,7 +560,12 @@ def _pinned_pricing(manifest: dict[str, Any]) -> _PinnedPricing | None:
                 return None
             cache_rates.append(cache_rate)
         prices[str(name)] = ModelPrice(input_rate, output_rate, *cache_rates)
-    return _PinnedPricing(prices, ratio, snapshot.get("split_usage") is True)
+    return _PinnedPricing(
+        prices,
+        ratio,
+        split_usage=snapshot.get("split_usage") is True,
+        unwrap_model_ids=snapshot.get("unwrap_model_ids") is True,
+    )
 
 
 def _llm_events(payload: dict[str, Any], pricing: _PinnedPricing | None) -> list[ToolEvent]:
@@ -572,6 +582,7 @@ def _llm_events(payload: dict[str, Any], pricing: _PinnedPricing | None) -> list
             prices=pricing.prices,
             input_ratio=pricing.input_ratio,
             split_usage=pricing.split_usage,
+            unwrap_model_ids=pricing.unwrap_model_ids,
         )
     except ValueError:
         return []
@@ -786,7 +797,8 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         attribution = None
         notes.append(
             "a hook journal (events.raw.jsonl or late.jsonl) is corrupt: the cost "
-            "attribution is unavailable for this run"
+            "attribution is unavailable for this run, and the total leaves out any "
+            "usage received after the run ended"
         )
     from_journal = not trace_available and bool(cost_events)
     cost = _build_cost(
@@ -798,21 +810,32 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         events_from_journal=from_journal,
     )
     late = attribution.late if attribution is not None else CostShare()
+    pricing = _pinned_pricing(manifest)
+    # A run recorded before 0.1.1 reported its post-run usage as attributed,
+    # never in its total: adding it now would print a headline nobody computed.
+    post_run_in_total = pricing is not None and pricing.split_usage
     post_run_reasons = _unpriced_cache_reasons(post_run_events, after_run=True)
-    if late.costed_events:
+    if late.costed_events and post_run_in_total:
         # Only the annex is added: in-run estimates already come from the trace
         # or raw journal and, when enabled, the budget accumulator.
         cost = replace(cost, post_run_estimated_usd=late.estimated_usd)
         post_run_reasons = [*_estimate_methods(post_run_events, after_run=True), *post_run_reasons]
     if post_run_reasons:
         cost = replace(cost, source="; ".join(filter(None, (cost.source, *post_run_reasons))))
-    if late.costed_events or late.unmeasured_events:
+    if (late.costed_events or late.unmeasured_events) and post_run_in_total:
         notes.append(
             f"{late.costed_events + late.unmeasured_events} model usage report(s) "
             "reached Pathlayer "
             "after this run had ended. OpenClaw can report aggregated model usage after "
             "agent_end; priced usage is included in the total as received after run, "
             "but was not available to the in-run budget detector. Unpriced usage stays unmeasured"
+        )
+    elif late.costed_events or late.unmeasured_events:
+        notes.append(
+            f"{late.costed_events + late.unmeasured_events} model usage report(s) "
+            "reached Pathlayer after this run had ended. The run was recorded before "
+            "Pathlayer 0.1.1, which kept such usage out of the total: it is attributed "
+            "to the run below, not added to the cost figure above"
         )
     if legacy:
         notes.append(

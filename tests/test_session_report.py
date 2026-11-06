@@ -1056,7 +1056,7 @@ def test_a_run_with_no_cost_source_says_so_instead_of_zero(tmp_path: Path) -> No
     assert report.cost.captured_usd is None
     assert report.cost.priced_events == 0
     assert "$0.00" not in report.format()
-    assert "total-token usage" in report.cost.source
+    assert "estimated when token usage and model pricing are available" in report.cost.source
     assert "budget detector was not enabled" in report.cost.source
     assert "cost: not measured" in report.format()
 
