@@ -17,10 +17,10 @@ Scope: ``after_tool_call`` is translated into a tool event. This adapter only
 observes: it never blocks or rewrites a tool call. Blocking the tool calls of
 a stopped run is an opt-in decision of the run recorder (see
 ``OpenClawRunRecorder.tool_call_decision``). ``llm_output`` is translated
-separately only when it contains a model and a non-negative total-token counter.
-When the provider does not expose the input/output split, the configured input
-ratio yields a clearly labelled first cost approximation; it is not an
-invoice-grade measurement. Lifecycle hooks
+separately when it carries usable token counters: its input, output and cache
+counters are priced at local rates, and a total alone is split with the
+configured input ratio. Either way the cost is a clearly labelled first
+approximation, not an invoice-grade measurement. Lifecycle hooks
 (``before_agent_run``, ``agent_end``) are handled by
 :mod:`pathlayer.adapters.openclaw_recorder`. Other hook names are ignored rather
 than raising.
@@ -40,7 +40,7 @@ from pathlayer.adapters.openclaw_lifecycle import (
     extract_openclaw_run_id,
 )
 from pathlayer.events import EventKind, ToolEvent
-from pathlayer.pricing import ModelPrice, cost_of, has_price
+from pathlayer.pricing import ModelPrice, cost_of, resolve_price
 
 if TYPE_CHECKING:
     from pathlayer.config import PathlayerConfig
@@ -113,15 +113,34 @@ def translate_openclaw_llm_event(
     *,
     prices: Mapping[str, ModelPrice] | None = None,
     input_ratio: float = 0.8,
+    split_usage: bool = True,
+    unwrap_model_ids: bool = True,
 ) -> list[ToolEvent]:
-    """Estimate an LLM cost from OpenClaw's reported total token counter.
+    """Estimate an LLM cost from the token counters OpenClaw reports.
 
-    ``llm_output`` carries one model invocation and its ``usage.total``. Some
-    OpenClaw/provider combinations do not expose the input/output split. In
-    that case Pathlayer assigns ``total * input_ratio`` to input and the
-    remainder to output before applying the local configured rates. The result
-    is explicitly ``estimated_total_tokens``; it is a first approximation, not
-    an invoice-grade or provider-measured cost.
+    OpenClaw 2026.7 sends one ``llm_output`` per run attempt, after its
+    ``agent_end``, with ``usage`` summed over the attempt's model calls:
+    ``{input, output, cacheRead, cacheWrite, total}``, a counter at zero being
+    left out. When any of the four split counters is present, each one is
+    priced at its own local rate (``token_split: "reported"``): with prompt
+    caching most tokens are cache reads, billed at a fraction of the input rate.
+    A model whose cache rates are unknown leaves its cache tokens unpriced and
+    counts them in ``unpriced_cache_tokens``, an under-count rather than a guess.
+    A call whose only tokens are such cache tokens priced nothing at all: it is
+    marked ``unmeasured_unknown_cache_rate``, like an unknown model, rather than
+    presented as an estimated $0.
+    Without a split, the reported ``total`` is divided with ``input_ratio``
+    (``token_split: "input_ratio"``). A split with a malformed counter falls back
+    to the total, so a bad field never makes the estimate look precise.
+
+    Either way the result is marked ``estimated_total_tokens``, the label for a
+    cost estimated from token counters at local rates: a first approximation,
+    not an invoice-grade or provider-measured cost. ``split_usage=False`` always
+    divides the total, and ``unwrap_model_ids=False`` matches the raw model id
+    without unwrapping a provider prefix: the rules of a run recorded by
+    Pathlayer 0.1.0, so its report keeps the figure computed at the time. A
+    split whose counters are all zero while the total is positive is not a
+    split: the total is divided instead.
 
     Missing/malformed counters produce no LLM event. Unknown models still
     produce an event marked ``unmeasured_unknown_model`` with zero cost, so a
@@ -135,21 +154,58 @@ def translate_openclaw_llm_event(
     event = _as_mapping(payload.get("event"))
     ctx = _as_mapping(payload.get("ctx"))
     usage = _as_mapping(event.get("usage")) or _as_mapping(ctx.get("usage"))
-    total = usage.get("total", usage.get("totalTokens"))
-    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
-        return []
+    total = _token_count(usage.get("total", usage.get("totalTokens")))
+    split = _reported_split(usage) if split_usage else None
+    if split is not None and not any(split) and total:
+        split = None
     model_raw = event.get("model") or ctx.get("model") or ctx.get("resolvedModel")
     model = str(model_raw) if model_raw else None
-    input_tokens = round(total * input_ratio)
-    output_tokens = total - input_tokens
-    priced = has_price(model, prices)
-    metadata: dict[str, Any] = {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "reported_total_tokens": total,
-        "input_ratio": input_ratio,
-        "cost_measurement": "estimated_total_tokens" if priced else "unmeasured_unknown_model",
-    }
+    price = resolve_price(model, prices, unwrap_ids=unwrap_model_ids)
+    # A model configured as free costs nothing, its cache tokens included.
+    free = price is not None and not (price.input_usd_per_mtok or price.output_usd_per_mtok)
+    metadata: dict[str, Any] = {}
+    if split is not None:
+        input_tokens, output_tokens, cache_read, cache_write = split
+        metadata.update(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            token_split="reported",
+        )
+        unpriced = 0
+        if price is not None and not free and price.cache_read_usd_per_mtok is None:
+            unpriced += cache_read
+        if price is not None and not free and price.cache_write_usd_per_mtok is None:
+            unpriced += cache_write
+        if unpriced:
+            metadata["unpriced_cache_tokens"] = unpriced
+        reasoning = _token_count(usage.get("reasoningTokens"))
+        if reasoning is not None:
+            # Kept as evidence only: providers count reasoning inside output.
+            metadata["reasoning_tokens"] = reasoning
+    elif total is not None:
+        input_tokens = round(total * input_ratio)
+        output_tokens = total - input_tokens
+        cache_read = cache_write = 0
+        metadata.update(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            input_ratio=input_ratio,
+            token_split="input_ratio",
+        )
+    else:
+        return []
+    if total is not None:
+        metadata["reported_total_tokens"] = total
+    unpriced_cache = metadata.get("unpriced_cache_tokens", 0)
+    all_tokens = input_tokens + output_tokens + cache_read + cache_write
+    if price is None:
+        metadata["cost_measurement"] = "unmeasured_unknown_model"
+    elif unpriced_cache and unpriced_cache == all_tokens:
+        metadata["cost_measurement"] = "unmeasured_unknown_cache_rate"
+    else:
+        metadata["cost_measurement"] = "estimated_total_tokens"
     context = extract_openclaw_context(payload)
     if context.agent_id is not None:
         metadata["agent_id"] = context.agent_id
@@ -159,11 +215,50 @@ def translate_openclaw_llm_event(
         ToolEvent(
             tool=model or "<llm>",
             kind=EventKind.LLM_CALL,
-            cost_usd=cost_of(model, input_tokens, output_tokens, prices),
+            cost_usd=cost_of(
+                model,
+                input_tokens,
+                output_tokens,
+                prices,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                unwrap_ids=unwrap_model_ids,
+            ),
             run_id=context.run_id,
             metadata=metadata,
         )
     ]
+
+
+_SPLIT_COUNTERS = ("input", "output", "cacheRead", "cacheWrite")
+
+
+def _token_count(value: Any) -> int | None:
+    """A token counter, or ``None`` unless it is a non-negative integer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _reported_split(usage: Mapping[str, Any]) -> tuple[int, int, int, int] | None:
+    """``(input, output, cacheRead, cacheWrite)`` when OpenClaw reported a split.
+
+    OpenClaw omits a counter at zero, so an absent one counts as 0 once any of
+    the four is present. A present counter that is not a non-negative integer
+    makes the whole split unusable.
+    """
+    if not any(name in usage for name in _SPLIT_COUNTERS):
+        return None
+    counts: list[int] = []
+    for name in _SPLIT_COUNTERS:
+        if name not in usage:
+            counts.append(0)
+            continue
+        count = _token_count(usage[name])
+        if count is None:
+            return None
+        counts.append(count)
+    return counts[0], counts[1], counts[2], counts[3]
 
 
 def _validate_input_ratio(input_ratio: float) -> None:

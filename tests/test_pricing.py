@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from pathlayer.pricing import DEFAULT_PRICES, ModelPrice, cost_of
+from pathlayer.pricing import (
+    DEFAULT_PRICES,
+    ModelPrice,
+    cost_of,
+    has_price,
+    normalize_model_id,
+    resolve_price,
+)
 
 
 def test_known_model_cost_is_input_plus_output() -> None:
@@ -87,15 +94,134 @@ def test_extra_prices_extends_without_dropping_defaults() -> None:
 
 
 def test_extra_prices_overrides_a_default_entry() -> None:
+    extra = {"gpt-4o": ModelPrice(input_usd_per_mtok=1.0, output_usd_per_mtok=1.0)}
+    assert cost_of("gpt-4o", 1_000_000, 0, extra_prices=extra) == pytest.approx(1.0)
+
+
+def test_extra_prices_pins_a_sub_version_the_table_does_not_list() -> None:
     # A family price drop is pinned explicitly so prefix-matching cannot inherit
-    # the older, higher base rate and over-charge into a wrongful STOP.
-    extra = {"claude-opus-4-5": ModelPrice(input_usd_per_mtok=5.0, output_usd_per_mtok=25.0)}
-    # Without the override, a dated opus-4.5 id prefix-matches claude-opus-4 ($15/$75).
-    assert cost_of("claude-opus-4-5-20260101", 1_000_000, 0) == pytest.approx(15.0)
-    # With it, the correct (cheaper) rate wins via the longer exact-prefix key.
-    assert cost_of("claude-opus-4-5-20260101", 1_000_000, 0, extra_prices=extra) == pytest.approx(
-        5.0
+    # the older, higher base rate and over-charge into a wrongful STOP. The
+    # sub-version below is hypothetical: without a pin it borrows its base
+    # claude-opus-5 ($5).
+    extra = {"claude-opus-5-6": ModelPrice(input_usd_per_mtok=3.0, output_usd_per_mtok=15.0)}
+    assert cost_of("claude-opus-5-6-20270101", 1_000_000, 0) == pytest.approx(5.0)
+    # With the pin, the correct (cheaper) rate wins via the longer key.
+    assert cost_of("claude-opus-5-6-20270101", 1_000_000, 0, extra_prices=extra) == pytest.approx(
+        3.0
     )
+
+
+@pytest.mark.parametrize(
+    ("model", "input_rate", "output_rate"),
+    [
+        # A sub-version cheaper than its base keeps its own rate: Opus 4.5 is
+        # not Opus 4 ($15/$75), and Opus 5.5 is not Opus 5 ($5/$25).
+        ("claude-opus-4-5-20251101", 5.0, 25.0),
+        ("claude-opus-4-8", 5.0, 25.0),
+        ("claude-opus-5-5", 4.0, 20.0),
+        ("claude-opus-4-1-20250805", 15.0, 75.0),
+        ("claude-opus-4-0", 15.0, 75.0),
+        ("claude-sonnet-4-5-20250929", 3.0, 15.0),
+        ("claude-sonnet-5-5", 2.0, 10.0),
+        ("claude-haiku-4-5-20251001", 1.0, 5.0),
+        ("claude-fable-5-1", 10.0, 50.0),
+        ("claude-mythos-5", 10.0, 50.0),
+        ("claude-mythos-5-1", 10.0, 50.0),
+    ],
+)
+def test_claude_sub_versions_have_their_own_price(
+    model: str, input_rate: float, output_rate: float
+) -> None:
+    assert cost_of(model, 1_000_000, 0) == pytest.approx(input_rate)
+    assert cost_of(model, 0, 1_000_000) == pytest.approx(output_rate)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # Amazon Bedrock: region profile, vendor segment, version qualifiers.
+        ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("anthropic.claude-opus-5-5", "claude-opus-5-5"),
+        ("us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("anthropic.claude-3-haiku-20240307-v1:0:200k", "claude-3-haiku-20240307"),
+        # Routing prefixes, as OpenClaw's resolvedRef or OpenRouter write them.
+        ("bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"),
+        ("openrouter/anthropic/claude-opus-4.5", "claude-opus-4-5"),
+        # Google Vertex AI snapshot separator.
+        ("claude-opus-4-5@20251101", "claude-opus-4-5"),
+        # Nothing to unwrap: lowered, dots kept outside Claude ids, no -vN strip.
+        ("GPT-4.1", "gpt-4.1"),
+        ("deepseek-v3", "deepseek-v3"),
+        ("eu.meta.llama3-70b-instruct-v1:0", "eu.meta.llama3-70b-instruct-v1:0"),
+    ],
+)
+def test_normalize_model_id(model: str, expected: str) -> None:
+    assert normalize_model_id(model) == expected
+
+
+@pytest.mark.parametrize(
+    ("model", "input_rate"),
+    [
+        # The id a live OpenClaw 2026.7.1 gateway on Bedrock reports, and its resolvedRef.
+        ("eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.0),
+        ("bedrock/eu.anthropic.claude-sonnet-4-5-20250929-v1:0", 3.0),
+        ("us.anthropic.claude-3-5-haiku-20241022-v1:0", 0.8),
+        ("global.anthropic.claude-opus-4-5-20251101-v1:0", 5.0),
+        # Claude Mythos 5 and 5.1, raw and as Bedrock names them.
+        ("anthropic.claude-mythos-5", 10.0),
+        ("anthropic.claude-mythos-5-1", 10.0),
+        ("us.anthropic.claude-mythos-5-1-v1:0", 10.0),
+        ("bedrock/anthropic.claude-mythos-5", 10.0),
+        ("anthropic/claude-sonnet-4", 3.0),
+        ("anthropic/claude-sonnet-4.5", 3.0),
+        # A raw snapshot match would read this as claude-opus-4 ($15).
+        ("claude-opus-4-5@20251101", 5.0),
+        ("claude-3-5-sonnet@20240620", 3.0),
+    ],
+)
+def test_provider_wrapped_ids_resolve_to_the_vendor_price(model: str, input_rate: float) -> None:
+    assert has_price(model)
+    assert cost_of(model, 1_000_000, 0) == pytest.approx(input_rate)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "eu.anthropic.claude-unknown-v1:0",
+        "eu.meta.llama3-70b-instruct-v1:0",
+        # The non-digit suffix rule survives unwrapping: o3-pro is not o3.
+        "openai/o3-pro",
+        "anthropic/claude-opus-4-mini",
+        # A variant of a listed sub-version never falls back to its base:
+        # Opus 4.5 to 4.8 would cost Opus 4's $15, Opus 5.5 Opus 5's $5.
+        "claude-opus-4-5-thinking",
+        "claude-opus-4.7-thinking",
+        "openrouter/anthropic/claude-opus-4.5:nitro",
+        "anthropic/claude-opus-4-6:floor",
+        "claude-opus-5-5-thinking",
+        "anthropic/claude-opus-5-5:floor",
+        "claude-sonnet-4-5-20250929-thinking",
+    ],
+)
+def test_unknown_wrapped_ids_stay_unpriced(model: str) -> None:
+    assert not has_price(model)
+    assert cost_of(model, 1_000_000, 1_000_000) == 0.0
+
+
+def test_a_custom_vendor_key_prices_every_wrapper() -> None:
+    prices = {"house-model": ModelPrice(1.0, 1.0)}
+    for model in ("house-model-2026", "vertex/house-model@1", "eu.anthropic.house-model-v1:0"):
+        assert cost_of(model, 1_000_000, 0, prices=prices) == pytest.approx(1.0)
+
+
+def test_a_key_equal_to_the_raw_id_prices_that_id_alone() -> None:
+    # A deployment can price one Bedrock profile (regional endpoints cost more)
+    # without the rate leaking to other profiles or to first-party calls.
+    regional = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    extra = {regional: ModelPrice(3.3, 16.5)}
+    assert cost_of(regional, 1_000_000, 0, extra_prices=extra) == pytest.approx(3.3)
+    for other in ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5-20250929"):
+        assert cost_of(other, 1_000_000, 0, extra_prices=extra) == pytest.approx(3.0)
 
 
 def test_extra_prices_layers_on_top_of_custom_prices() -> None:
@@ -107,3 +233,73 @@ def test_extra_prices_layers_on_top_of_custom_prices() -> None:
     )
     # gpt-4o is absent from both -> still unknown -> $0 (prices= replaced defaults).
     assert cost_of("gpt-4o", 1_000_000, 0, prices=prices, extra_prices=extra) == 0.0
+
+
+def test_cache_tokens_are_priced_at_the_cache_rates() -> None:
+    # Sonnet 4.5: $0.30 per 1M cache reads, $3.75 per 1M (5-minute) cache writes.
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.30)
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_write_tokens=1_000_000) == pytest.approx(3.75)
+    both = cost_of(
+        "claude-sonnet-4-5",
+        1_000_000,
+        1_000_000,
+        cache_read_tokens=1_000_000,
+        cache_write_tokens=1_000_000,
+    )
+    assert both == pytest.approx(3.0 + 15.0 + 0.30 + 3.75)
+
+
+def test_cache_tokens_without_a_cache_rate_are_left_out() -> None:
+    # gpt-4o has no cache rate in the table: its cache tokens are unpriced, not
+    # billed at the input rate.
+    assert cost_of("gpt-4o", 0, 0, cache_read_tokens=1_000_000) == 0.0
+    read_only = {"house": ModelPrice(1.0, 2.0, cache_read_usd_per_mtok=0.5)}
+    cost = cost_of(
+        "house", 0, 0, prices=read_only, cache_read_tokens=1_000_000, cache_write_tokens=1_000_000
+    )
+    assert cost == pytest.approx(0.5)
+
+
+def test_negative_cache_tokens_are_free() -> None:
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=-5, cache_write_tokens=-5) == 0.0
+
+
+def test_without_unwrapping_ids_match_as_pathlayer_0_1_0_did() -> None:
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert cost_of(bedrock, 1_000_000, 0) == pytest.approx(3.0)
+    assert cost_of(bedrock, 1_000_000, 0, unwrap_ids=False) == 0.0
+    assert resolve_price(bedrock, unwrap_ids=False) is None
+    # A first-party dated id needs no unwrapping either way.
+    assert cost_of("claude-sonnet-4-5-20250929", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(3.0)
+    )
+    # 0.1.0's looser snapshot rule, kept so a rebuilt report matches trace.json:
+    # it read this variant as a snapshot of claude-opus-4.
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0) == 0.0
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(15.0)
+    )
+
+
+def test_resolve_price_returns_the_matched_entry() -> None:
+    assert resolve_price("eu.anthropic.claude-opus-5-5-v1:0") == DEFAULT_PRICES["claude-opus-5-5"]
+    assert resolve_price("house") is None
+    custom = {"house": ModelPrice(1.0, 2.0)}
+    assert resolve_price("house-2026", custom) == custom["house"]
+
+
+@pytest.mark.parametrize("model", sorted(key for key in DEFAULT_PRICES if key.startswith("claude")))
+def test_claude_cache_rates_follow_the_published_multipliers(model: str) -> None:
+    # Guards against a typo in the table: the 5-minute write is 1.25x the input
+    # rate, and a read 0.1x, except on the models with a cheaper read.
+    price = DEFAULT_PRICES[model]
+    read_multiplier = {
+        "claude-fable-5-1": 0.025,
+        "claude-mythos-5-1": 0.025,
+        "claude-opus-5-5": 0.05,
+        "claude-sonnet-5-5": 0.05,
+    }
+    assert price.cache_write_usd_per_mtok == pytest.approx(1.25 * price.input_usd_per_mtok)
+    assert price.cache_read_usd_per_mtok == pytest.approx(
+        read_multiplier.get(model, 0.1) * price.input_usd_per_mtok
+    )

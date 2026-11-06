@@ -417,10 +417,10 @@ class PricingSection:
     the models it has vetted and bill everything else at $0.
 
     :meth:`~pathlayer.adapters.langgraph.LangGraphAdapter.from_config` wires
-    this table into LangGraph. OpenClaw can price a reported *total* token
-    counter by splitting it with ``openclaw_input_ratio``; this is an estimate,
-    not provider-reported input/output usage, and is therefore labelled as
-    such in event metadata and reports.
+    this table into LangGraph. OpenClaw prices the input, output and cache
+    counters it reports; when it reports only a *total*, that total is split
+    with ``openclaw_input_ratio``. Both are estimates at local rates, not
+    provider-billed costs, and are labelled as such in event metadata and reports.
     """
 
     models: dict[str, ModelPrice] = field(default_factory=dict)
@@ -730,7 +730,10 @@ def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
     Both rates are required per model: a table entry that silently defaulted the
     output rate to 0 would under-charge every completion and quietly weaken the
     budget brake. An empty model id is rejected too -- ``cost_of`` can never
-    match it, so it would be a typo that prices nothing.
+    match it, so it would be a typo that prices nothing. The prompt-cache rates
+    (``cache_read_usd_per_mtok``, ``cache_write_usd_per_mtok``) are optional: an
+    entry without them leaves cache tokens unpriced, even for a model whose
+    default entry has cache rates, since those follow the input rate it replaces.
     """
     section = _Section(data, "pricing")
     replace_defaults = section.bool_("replace_defaults", False)
@@ -760,9 +763,17 @@ def _parse_pricing(data: Mapping[str, Any]) -> PricingSection:
         spec_s = _Section(spec_map, where)
         input_rate = spec_s.nonnegative_float("input_usd_per_mtok", 0.0)
         output_rate = spec_s.nonnegative_float("output_usd_per_mtok", 0.0)
+        cache_rates = {
+            key: spec_s.nonnegative_float(key, 0.0)
+            for key in ("cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
+            if key in spec_map
+        }
         spec_s.finish()
         models[str(model)] = ModelPrice(
-            input_usd_per_mtok=input_rate, output_usd_per_mtok=output_rate
+            input_usd_per_mtok=input_rate,
+            output_usd_per_mtok=output_rate,
+            cache_read_usd_per_mtok=cache_rates.get("cache_read_usd_per_mtok"),
+            cache_write_usd_per_mtok=cache_rates.get("cache_write_usd_per_mtok"),
         )
     return PricingSection(
         models=models,

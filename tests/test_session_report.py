@@ -1056,7 +1056,7 @@ def test_a_run_with_no_cost_source_says_so_instead_of_zero(tmp_path: Path) -> No
     assert report.cost.captured_usd is None
     assert report.cost.priced_events == 0
     assert "$0.00" not in report.format()
-    assert "total-token usage" in report.cost.source
+    assert "estimated when token usage and model pricing are available" in report.cost.source
     assert "budget detector was not enabled" in report.cost.source
     assert "cost: not measured" in report.format()
 
@@ -1720,7 +1720,9 @@ def test_adapter_estimates_are_reported_once(amount: float, manifest_mode: str) 
 
     events = [
         ToolEvent(
-            tool="model", cost_usd=amount, metadata={"cost_measurement": "estimated_total_tokens"}
+            tool="model",
+            cost_usd=amount,
+            metadata={"cost_measurement": "estimated_total_tokens", "token_split": "reported"},
         )
     ]
     detector = BudgetDetector(default_cost_usd=10.0)
@@ -1734,7 +1736,7 @@ def test_adapter_estimates_are_reported_once(amount: float, manifest_mode: str) 
     assert cost.captured_usd is None
     assert cost.priced_events == 0
     assert cost.estimated_usd == pytest.approx(amount + (0.1 if manifest_mode == "legacy" else 0))
-    assert "estimated from total tokens" in cost.source
+    assert "estimated from the reported input, output and cache token counters" in cost.source
     assert "estimated" in cost.describe()
 
 

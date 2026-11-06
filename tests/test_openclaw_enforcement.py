@@ -45,7 +45,9 @@ def _read(run_id: str, index: int) -> dict[str, Any]:
 
 
 def _end(run_id: str) -> dict[str, Any]:
-    return {"hook": "agent_end", "event": {"success": False}, "ctx": _ctx(run_id)}
+    # A successful end: a failed one ends only an attempt, and a STOP keeps
+    # blocking the next attempt (see test_openclaw_multi_attempt.py).
+    return {"hook": "agent_end", "event": {"success": True}, "ctx": _ctx(run_id)}
 
 
 def _query(run_id: str) -> dict[str, Any]:

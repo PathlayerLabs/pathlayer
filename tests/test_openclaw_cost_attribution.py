@@ -26,7 +26,7 @@ from pathlayer.adapters.openclaw_report import (
     main,
 )
 from pathlayer.adapters.openclaw_run_store import RunDirectory, RunStore
-from pathlayer.config import PathlayerConfig, PricingSection
+from pathlayer.config import BudgetConfig, DetectorsConfig, PathlayerConfig, PricingSection
 from pathlayer.pipeline import Pipeline
 from pathlayer.postmortem import (
     TRIGGER_ABSENT,
@@ -87,11 +87,14 @@ def _llm(
     event_run_id: str | None = None,
     model: str = "model",
     total: int | None = 1000,
+    usage: dict[str, int] | None = None,
     session: str = "sess-1",
     trigger: str | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {"model": model}
-    if total is not None:
+    if usage is not None:
+        event["usage"] = usage
+    elif total is not None:
         event["usage"] = {"total": total}
     if event_run_id is not None:
         event["runId"] = event_run_id
@@ -164,8 +167,10 @@ def test_llm_output_after_agent_end_is_kept_and_attributed_late(tmp_path: Path) 
     report = json.loads(run.report_path.read_text())
     assert report["cost_attribution"]["late"]["total_usd"] == pytest.approx(_CALL_USD)
     assert any("after this run had ended" in note for note in report["notes"])
-    # The run's own cost figure still covers only what the recording analyzed.
+    # The in-run component is preserved; the headline total includes the annex.
     assert report["cost"]["estimated_usd"] == pytest.approx(_CALL_USD)
+    assert report["cost"]["post_run_estimated_usd"] == pytest.approx(_CALL_USD)
+    assert report["cost"]["total_usd"] == pytest.approx(2 * _CALL_USD)
 
 
 def test_llm_output_after_a_restart_interruption_is_kept_and_attributed_late(
@@ -184,6 +189,7 @@ def test_llm_output_after_a_restart_interruption_is_kept_and_attributed_late(
 
     assert _snapshot(run) == before
     assert [line["after_status"] for line in _late_lines(run)] == ["interrupted"]
+    assert build_run_report(run).cost.total_usd == pytest.approx(2 * _CALL_USD)
     assert build_cost_attribution(run).late.total_usd == pytest.approx(_CALL_USD)
 
 
@@ -408,6 +414,175 @@ def test_attribution_uses_the_prices_pinned_at_recording(tmp_path: Path) -> None
     assert attribution.attributed.total_usd == pytest.approx(5 * _CALL_USD)
 
 
+# The split OpenClaw reports, mostly cache reads: 100 * $1 + 50 * $2 + 850 * $0.1
+# per million at the cached rates below, against _CALL_USD for the total split.
+_SPLIT = {"input": 100, "output": 50, "cacheRead": 850, "total": 1000}
+_SPLIT_USD = 0.000285
+_CACHED = PathlayerConfig(pricing=PricingSection(models={"model": ModelPrice(1.0, 2.0, 0.1, 1.25)}))
+
+
+def test_a_reported_split_is_priced_at_the_pinned_cache_rates(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_CACHED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))  # late, as OpenClaw 2026.7 sends it
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    assert snapshot["split_usage"] is True
+    assert snapshot["models"]["model"]["cache_read_usd_per_mtok"] == 0.1
+    traced = sum(event.cost_usd or 0.0 for event in load_trace(run.trace_path).events)
+
+    attribution = build_cost_attribution(run)
+
+    assert traced == pytest.approx(_SPLIT_USD)
+    assert attribution.attributed.total_usd == pytest.approx(2 * _SPLIT_USD)
+    assert attribution.late.total_usd == pytest.approx(_SPLIT_USD)
+
+
+def _gpt_4o_run(root: Path, usage: dict[str, int]) -> RunDirectory:
+    # gpt-4o is in the default table without a cache rate.
+    recorder = OpenClawRunRecorder(root, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage=usage))
+    recorder.process_payload(_end("r1"))
+    return _run(root, "r1")
+
+
+def test_a_partially_priced_call_says_which_cache_tokens_it_left_out(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"input": 1_000, "cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    # 1,000 input tokens at $2.50 per million; the million cache reads have no rate.
+    assert attribution.attributed == CostShare(
+        estimated_usd=pytest.approx(0.0025),
+        costed_events=1,
+        partially_priced_events=1,
+        unpriced_cache_tokens=1_000_000,
+    )
+    assert "1 partially priced; 1,000,000 cache token(s) without a known rate" in (
+        attribution.attributed.describe()
+    )
+    assert report.cost.source.count("estimated from") == 1
+    assert "estimated from the reported input, output and cache token counters" in (
+        report.cost.source
+    )
+    assert "input/output ratio" not in report.cost.source
+    assert (
+        "1,000,000 cache token(s) over 1 model call(s) are not priced: no cache rate is "
+        "known for gpt-4o" in report.cost.source
+    )
+
+
+def test_a_call_with_only_unpriced_cache_tokens_is_unmeasured(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    assert attribution.attributed == CostShare(unmeasured_events=1, unpriced_cache_tokens=1_000_000)
+    assert attribution.attributed.total_usd is None
+    assert report.cost.estimated_usd is None
+    assert "1,000,000 cache token(s) over 1 model call(s) are not priced" in report.cost.source
+
+
+def test_post_run_usage_names_its_method_and_unpriced_cache_tokens(tmp_path: Path) -> None:
+    # OpenClaw 2026.7 reports the usage after agent_end: the report still says
+    # how that spend was priced and which cache tokens it left out.
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(
+        _llm("r1", model="gpt-4o", usage={"input": 1_000, "cacheRead": 1_000_000})
+    )
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage={"cacheRead": 500}))
+
+    report = build_run_report(_run(tmp_path, "r1"))
+
+    assert report.cost.post_run_estimated_usd == pytest.approx(0.0025)
+    assert report.cost_attribution is not None
+    assert report.cost_attribution.late == CostShare(
+        estimated_usd=pytest.approx(0.0025),
+        costed_events=1,
+        unmeasured_events=1,
+        partially_priced_events=1,
+        unpriced_cache_tokens=1_000_500,
+    )
+    assert (
+        "$0.002500 estimated from the reported input, output and cache token counters at "
+        "local rates, received after the run" in report.cost.source
+    )
+    assert (
+        "1,000,500 cache token(s) over 2 usage report(s) received after the run are not "
+        "priced: no cache rate is known for gpt-4o" in report.cost.source
+    )
+
+
+def test_post_run_usage_with_only_unpriced_cache_tokens_is_still_named(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage={"cacheRead": 500}))
+
+    report = build_run_report(_run(tmp_path, "r1"))
+
+    assert report.cost.post_run_estimated_usd is None
+    assert "estimated from" not in report.cost.source
+    assert "500 cache token(s) over 1 usage report(s) received after the run" in report.cost.source
+
+
+def test_a_total_only_call_names_the_input_ratio_method(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"total": 1_000})
+
+    report = build_run_report(run)
+
+    assert "estimated from total tokens and an input/output ratio" in report.cost.source
+    assert "cache token" not in report.cost.source
+
+
+def test_a_run_recorded_before_split_pricing_keeps_its_total_split(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_CACHED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))
+    recorder.process_payload(_end("r1"))
+    run = _run(tmp_path, "r1")
+    # The snapshot a 0.1.0 recorder pinned: no rule, no cache rates.
+    run.update_manifest(
+        llm_pricing_snapshot={"input_ratio": 0.8, "models": {"model": dict(_RATES)}}
+    )
+
+    attribution = build_cost_attribution(run)
+
+    assert attribution.attributed.total_usd == pytest.approx(_CALL_USD)
+
+
+def test_a_run_recorded_before_wrapped_ids_keeps_them_unmeasured(tmp_path: Path) -> None:
+    # Pathlayer 0.1.0 did not unwrap Bedrock ids: its runs priced nothing for
+    # them, and a report rebuilt today must not invent that figure.
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", model=bedrock))
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    assert snapshot["unwrap_model_ids"] is True
+    assert build_cost_attribution(run).late.costed_events == 1
+
+    # The snapshot a 0.1.0 recorder pinned: no split, no unwrapping.
+    run.update_manifest(
+        llm_pricing_snapshot={
+            "input_ratio": 0.8,
+            "models": {"claude-sonnet-4": {"input_usd_per_mtok": 3.0, "output_usd_per_mtok": 15.0}},
+        }
+    )
+
+    late = build_cost_attribution(run).late
+    assert late == CostShare(unmeasured_events=1)
+
+
 def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
     recorder.process_payload(_before("r1"))
@@ -425,7 +600,12 @@ def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
         {"input_ratio": -0.1, "models": {}},
         *(
             {"input_ratio": 0.8, "models": {"model": {**_RATES, side: bad}}}
-            for side in ("input_usd_per_mtok", "output_usd_per_mtok")
+            for side in (
+                "input_usd_per_mtok",
+                "output_usd_per_mtok",
+                "cache_read_usd_per_mtok",
+                "cache_write_usd_per_mtok",
+            )
             for bad in (-1.0, float("nan"), float("inf"), "1.0", True)
         ),
     ):
@@ -433,6 +613,48 @@ def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
         attribution = build_cost_attribution(run)
         assert attribution.attributed.costed_events == 0
         assert attribution.attributed.unmeasured_events == 1
+
+
+def test_a_run_recorded_before_0_1_1_keeps_post_run_usage_out_of_its_total(
+    tmp_path: Path,
+) -> None:
+    # 0.1.0 attributed usage received after agent_end to the run but left it out
+    # of the total: a report rebuilt today keeps that total.
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1"))
+    run = _run(tmp_path, "r1")
+    assert build_run_report(run).cost.post_run_estimated_usd == pytest.approx(_CALL_USD)
+    run.update_manifest(llm_pricing_snapshot={"input_ratio": 0.8, "models": {"model": _RATES}})
+
+    report = build_run_report(run)
+
+    assert report.cost.post_run_estimated_usd is None
+    assert report.cost.total_usd is None
+    assert report.cost_attribution is not None
+    assert report.cost_attribution.late.total_usd == pytest.approx(_CALL_USD)
+    assert any("recorded before Pathlayer 0.1.1" in note for note in report.notes)
+    assert "received after the run" not in report.cost.source
+
+
+def test_post_run_usage_without_a_usable_snapshot_is_not_blamed_on_0_1_0(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1"))
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    snapshot["models"]["model"]["input_usd_per_mtok"] = -1  # unusable as a whole
+    run.update_manifest(llm_pricing_snapshot=snapshot)
+
+    report = build_run_report(run)
+
+    assert report.cost.post_run_estimated_usd is None
+    assert not any("before Pathlayer 0.1.1" in note for note in report.notes)
+    assert any("Unpriced usage stays unmeasured" in note for note in report.notes)
 
 
 def test_a_corrupt_hook_journal_costs_the_attribution_not_the_report(tmp_path: Path) -> None:
@@ -449,6 +671,7 @@ def test_a_corrupt_hook_journal_costs_the_attribution_not_the_report(tmp_path: P
     assert report.cost_attribution is None
     assert report.cost.estimated_usd == pytest.approx(_CALL_USD)  # from trace.json
     assert any("cost attribution is unavailable" in note for note in report.notes)
+    assert any("leaves out any usage received after the run" in note for note in report.notes)
     assert report.to_dict()["cost_attribution"] is None
     with pytest.raises(ValueError):
         build_cost_attribution(run)
@@ -497,6 +720,8 @@ def test_cli_cost_attribution_separates_captured_attributed_unattributed(
             "estimated_usd": pytest.approx(_CALL_USD),
             "costed_events": 1,
             "unmeasured_events": 0,
+            "partially_priced_events": 0,
+            "unpriced_cache_tokens": 0,
         }
     ]
 
@@ -520,7 +745,7 @@ def test_single_run_report_prints_its_attribution(
     assert "cost attribution:\n  captured: $0.0024 over 2 event(s)" in out
     assert "  attributed to a run: $0.0024 over 2 event(s)" in out
     assert "  unattributed: no costed event" in out
-    assert "note: 1 model call(s) reached Pathlayer after this run had ended" in out
+    assert "note: 1 model usage report(s) reached Pathlayer after this run had ended" in out
 
 
 def test_the_attribution_partition_holds_and_reports_unmeasured_events() -> None:
@@ -535,3 +760,124 @@ def test_the_attribution_partition_holds_and_reports_unmeasured_events() -> None
     lines = attribution.describe_lines()
     assert lines[1] == "attributed to a run: $0.5000 over 1 event(s), 1 unmeasured"
     assert "start was never recorded: no costed event, 1 unmeasured" in lines[2]
+
+
+@pytest.mark.parametrize("ordering", ["in_run", "post_run"])
+@pytest.mark.parametrize("budget_enabled", [False, True])
+def test_2026_7_hook_order_reports_model_and_same_total(
+    tmp_path: Path,
+    ordering: str,
+    budget_enabled: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "openclaw_2026_7" / f"{ordering}.json"
+    payloads = json.loads(fixture.read_text())
+    config = PathlayerConfig(detectors=DetectorsConfig(budget=BudgetConfig(enabled=budget_enabled)))
+    recorder = OpenClawRunRecorder(tmp_path, config=config, enforce=True)
+    for payload in payloads:
+        recorder.process_payload(payload)
+    run = _run(tmp_path, "fixture-run")
+    manifest = run.read_manifest()
+    assert manifest["openclaw_model"] == "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert manifest["openclaw_provider"] == "bedrock"
+    report = build_run_report(run)
+    assert report.cost.total_usd == pytest.approx(0.021)
+    assert report.cost.post_run_estimated_usd == (
+        pytest.approx(0.021) if ordering == "post_run" else None
+    )
+    assert report.cost.estimated_usd == (
+        pytest.approx(0.021) if ordering == "in_run" else (0.0 if budget_enabled else None)
+    )
+    assert run.late_events_path.exists() == (ordering == "post_run")
+    assert not manifest["stopped"]
+    assert main(["fixture-run", "--runs-root", str(tmp_path)]) == 0
+    text = capsys.readouterr().out
+    assert "$0.0210 effective" in text
+    assert (
+        "estimated received after run" if ordering == "post_run" else "estimated during run"
+    ) in text
+
+
+@pytest.mark.parametrize(
+    "model,total,expected",
+    [
+        ("model", 1000, _CALL_USD),
+        ("free", 1000, 0.0),
+        ("mystery", 1000, None),
+        ("model", None, None),
+    ],
+)
+def test_post_run_only_cost_preserves_unknown_and_free(
+    tmp_path: Path,
+    model: str,
+    total: int | None,
+    expected: float | None,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    run = _run(tmp_path, "r1")
+    before = _snapshot(run)
+    recorder.process_payload(_llm("r1", model=model, total=total))
+    report = build_run_report(run)
+    assert report.cost.total_usd == expected
+    assert report.cost.post_run_estimated_usd == expected
+    assert report.cost.estimated_usd is None
+    assert _snapshot(run) == before
+    assert report.cost_attribution is not None
+    assert report.cost_attribution.late.unmeasured_events == (1 if expected is None else 0)
+
+
+def test_multiple_post_run_usage_reports_are_added_once_each(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    run = _run(tmp_path, "r1")
+    before = _snapshot(run)
+    recorder.process_payload(_llm("r1"))
+    recorder.process_payload(_llm("r1", total=2000))
+    for _ in range(2):
+        assert build_run_report(run).cost.total_usd == pytest.approx(3 * _CALL_USD)
+    assert _snapshot(run) == before
+    assert json.loads(run.report_path.read_text())["cost"]["total_usd"] == pytest.approx(
+        3 * _CALL_USD
+    )
+
+
+def test_corrupt_late_annex_keeps_in_run_cost_without_inventing_post_run_cost(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1"))
+    recorder.process_payload(_end("r1"))
+    run = _run(tmp_path, "r1")
+    run.late_events_path.write_text("{broken\n")
+    report = build_run_report(run)
+    assert report.cost.total_usd == pytest.approx(_CALL_USD)
+    assert report.cost.post_run_estimated_usd is None
+    assert any("cost attribution is unavailable" in note for note in report.notes)
+
+
+def test_post_run_cost_adds_to_tool_estimate_and_baseline(tmp_path: Path) -> None:
+    config = PathlayerConfig(
+        pricing=_PRICED.pricing,
+        detectors=DetectorsConfig(
+            budget=BudgetConfig(
+                enabled=True,
+                baseline_usd=0.5,
+                tool_costs_usd={"read": 0.1},
+            )
+        ),
+    )
+    recorder = OpenClawRunRecorder(tmp_path, config=config)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_tool("r1"))
+    recorder.process_payload(_llm("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1"))
+    cost = build_run_report(_run(tmp_path, "r1")).cost
+    assert cost.baseline_usd == 0.5
+    assert cost.estimated_usd == pytest.approx(0.1 + _CALL_USD)
+    assert cost.post_run_estimated_usd == pytest.approx(_CALL_USD)
+    assert cost.total_usd == pytest.approx(0.6 + 2 * _CALL_USD)

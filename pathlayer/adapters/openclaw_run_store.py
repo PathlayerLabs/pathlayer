@@ -29,7 +29,15 @@ DEFAULT_RUNS_ROOT = Path("/var/lib/pathlayer/runs")
 # both the recorder (any further hook) and the startup sweep skip them. The one
 # exception is ``late.jsonl``: a cost hook that lost the race with
 # ``agent_end`` is appended there, and the derived ``report.json`` rebuilt.
+# ``awaiting_retry`` (a run between two attempts) is deliberately not terminal.
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "interrupted"})
+
+# Manifest ``ended_by`` value of a run ended by the start of the next run of
+# its session while it waited for another attempt.
+ENDED_BY_NEXT_RUN = "next_run_in_session"
+# Manifest flag of a run the startup sweep interrupted while it waited for
+# another attempt after a failed ``agent_end``.
+INTERRUPTED_WHILE_AWAITING_RETRY = "interrupted_while_awaiting_retry"
 
 
 def utc_now_iso() -> str:
