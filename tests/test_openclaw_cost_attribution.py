@@ -488,6 +488,51 @@ def test_a_call_with_only_unpriced_cache_tokens_is_unmeasured(tmp_path: Path) ->
     assert "1,000,000 cache token(s) over 1 model call(s) are not priced" in report.cost.source
 
 
+def test_post_run_usage_names_its_method_and_unpriced_cache_tokens(tmp_path: Path) -> None:
+    # OpenClaw 2026.7 reports the usage after agent_end: the report still says
+    # how that spend was priced and which cache tokens it left out.
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(
+        _llm("r1", model="gpt-4o", usage={"input": 1_000, "cacheRead": 1_000_000})
+    )
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage={"cacheRead": 500}))
+
+    report = build_run_report(_run(tmp_path, "r1"))
+
+    assert report.cost.post_run_estimated_usd == pytest.approx(0.0025)
+    assert report.cost_attribution is not None
+    assert report.cost_attribution.late == CostShare(
+        estimated_usd=pytest.approx(0.0025),
+        costed_events=1,
+        unmeasured_events=1,
+        partially_priced_events=1,
+        unpriced_cache_tokens=1_000_500,
+    )
+    assert (
+        "$0.002500 estimated from the reported input, output and cache token counters at "
+        "local rates, received after the run" in report.cost.source
+    )
+    assert (
+        "1,000,500 cache token(s) over 2 model call(s) received after the run are not "
+        "priced: no cache rate is known for gpt-4o" in report.cost.source
+    )
+
+
+def test_post_run_usage_with_only_unpriced_cache_tokens_is_still_named(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage={"cacheRead": 500}))
+
+    report = build_run_report(_run(tmp_path, "r1"))
+
+    assert report.cost.post_run_estimated_usd is None
+    assert "estimated from" not in report.cost.source
+    assert "500 cache token(s) over 1 model call(s) received after the run" in report.cost.source
+
+
 def test_a_total_only_call_names_the_input_ratio_method(tmp_path: Path) -> None:
     run = _gpt_4o_run(tmp_path, {"total": 1_000})
 
