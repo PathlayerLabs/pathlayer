@@ -528,8 +528,12 @@ Provider-wrapped model ids (Amazon Bedrock's
 `claude-opus-4-5@20251101`, routing prefixes such as `bedrock/`) are priced as
 the vendor's model at its first-party list rates. Partner platforms bill
 separately (Bedrock regional endpoints cost about 10 percent more), so that
-estimate errs low. A `pricing.models` key equal to the full wrapped id prices
-that id alone.
+rate errs low. A variant of a listed model (`claude-opus-4-5-thinking`,
+OpenRouter's `:nitro`) stays unpriced rather than borrowing its family's base
+price. A `pricing.models` key equal to the full wrapped id prices that id
+alone. Known over-estimate: LangGraph's `usage_metadata.input_tokens` includes
+prompt-cache tokens, and the LangGraph adapter bills them at the input rate,
+so a LangGraph run with prompt caching is estimated too high, on any provider.
 State semantics version 2 rejects older durable scopes: estimated token costs
 now belong to the estimated counter, and a known zero estimate no longer
 receives a fallback charge. Start a new state key for runs created with the

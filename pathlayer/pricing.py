@@ -19,7 +19,7 @@ does not list yet is expected to be supplied by the caller via ``extra_prices``
 rather than being guessed here.
 
 Watch out for *family price drops*: prefix matching resolves a dated/sub-version
-id to its base key (``claude-opus-4-1-...`` -> ``claude-opus-4``). If a newer
+id to its base key (``claude-opus-5-6-...`` -> ``claude-opus-5``). If a newer
 sub-version is cheaper than its base, that inherits the **older, higher** price
 and over-charges -- which could trip a wrongful budget STOP. That is why every
 Claude sub-version is listed explicitly (Opus 4.5 is $5 / $25, not Opus 4's
@@ -32,8 +32,9 @@ Cloud providers wrap the vendor's own id: Amazon Bedrock
 ``anthropic/...``) and dotted versions (``anthropic/claude-sonnet-4.5``). They
 resolve to the vendor's id (see :func:`normalize_model_id`) and are priced at
 the vendor's first-party list rates. A partner platform bills separately
-(Bedrock regional endpoints add about 10 percent), so such a cost is an
-estimate that errs low, never high.
+(Bedrock regional endpoints add about 10 percent), so that rate errs low. The
+estimate as a whole also depends on the token counts an adapter passes: billing
+prompt-cache tokens at the input rate over-counts whatever the rate.
 
 Unknown model or missing token usage resolves to ``0.0`` (documented, never a
 crash): we would rather under-count spend than guess. The trade-off is that a
@@ -139,6 +140,11 @@ def normalize_model_id(model: str) -> str:
     return normalized
 
 
+# What may follow ``<key>-`` in a dated snapshot of that key: digits and dashes
+# only (``20251101``, ``2024-08-06``, ``1-20250805``).
+_SNAPSHOT_SUFFIX = re.compile(r"\d[\d-]*")
+
+
 def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
     """Exact key, else the longest key ``model`` is a dated snapshot of."""
     exact = table.get(model)
@@ -148,7 +154,11 @@ def _match(model: str, table: Mapping[str, ModelPrice]) -> ModelPrice | None:
     for key in table:
         prefix = f"{key}-"
         suffix = model[len(prefix) :]
-        if model.startswith(prefix) and suffix[:1].isdigit() and len(key) > len(best_key):
+        if (
+            model.startswith(prefix)
+            and _SNAPSHOT_SUFFIX.fullmatch(suffix)
+            and len(key) > len(best_key)
+        ):
             best_key = key
     return table[best_key] if best_key else None
 
@@ -157,11 +167,14 @@ def _lookup(model: str | None, prices: Mapping[str, ModelPrice]) -> ModelPrice |
     """Resolve ``model`` to a price, case-insensitively.
 
     Exact match first. Otherwise treat the id as a *dated snapshot* of a table
-    key only when the suffix after ``"<key>-"`` starts with a digit, e.g.
-    ``gpt-4o-2024-08-06`` -> ``gpt-4o``. A non-digit suffix marks a *different*
+    key only when the suffix after ``"<key>-"`` is made of digits and dashes,
+    e.g. ``gpt-4o-2024-08-06`` -> ``gpt-4o``. Anything else marks a *different*
     model (``o3-mini`` is not ``o3``, ``gpt-4o-mini`` is not ``gpt-4o``), so it
     must NOT borrow the base price -- mispricing toward over-charge could trip
-    ``BudgetDetector`` into a wrongful STOP. Unknown ids return ``None`` (the
+    ``BudgetDetector`` into a wrongful STOP. That includes a variant of a listed
+    sub-version (``claude-opus-4-5-thinking``, OpenRouter's
+    ``claude-opus-4.5:nitro``): read as ``4-5-thinking`` after ``claude-opus-4``,
+    it would borrow Opus 4's price, three times Opus 4.5's. Unknown ids return ``None`` (the
     caller bills $0, an under-count we accept over a wrong stop). Longest key
     wins on ties. Returns ``None`` when nothing matches.
 
