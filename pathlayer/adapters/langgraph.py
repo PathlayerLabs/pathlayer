@@ -16,6 +16,9 @@ token cost in ``cost_usd``, so ``BudgetDetector`` can guard model spend (the
 real cost is in tokens, not tool calls). Tokens come from the model response
 (``usage_metadata`` per generation, falling back to ``llm_output``); the price
 table lives in :mod:`pathlayer.pricing` and is overridable via ``prices``.
+Prompt-cache tokens, which LangChain counts inside ``input_tokens``, are priced
+at the model's cache rates; a model without one leaves them unpriced
+(``unpriced_cache_tokens``), an under-count rather than billing them as input.
 Missing tokens or an unpriceable model yield ``cost_usd=0.0`` (never a crash).
 Action detectors ignore ``LLM_CALL`` events via their ``event_kinds`` filter.
 
@@ -74,7 +77,7 @@ from pathlayer.adapters.base import Adapter, EventSink, RunAwareEventSink
 from pathlayer.detectors.proof import PROOF_METADATA_KEYS
 from pathlayer.detectors.proof_producer import ProgressProofProducer
 from pathlayer.events import PROGRESS_SUMMARY_TOOL, EventKind, ToolEvent
-from pathlayer.pricing import ModelPrice, cost_of
+from pathlayer.pricing import ModelPrice, cost_of, resolve_price
 from pathlayer.session import SessionJournal, _identity
 from pathlayer.state_evidence import StateCapture, StateEvidenceProducer
 
@@ -210,15 +213,55 @@ def _model_from_serialized(serialized: dict[str, Any] | None) -> str | None:
     return str(model) if model else None
 
 
-def _extract_tokens(response: LLMResult) -> tuple[int, int]:
-    """Return ``(input_tokens, output_tokens)`` from an ``LLMResult``.
+@dataclass(frozen=True, slots=True)
+class _TokenUsage:
+    """One call's tokens. ``input_tokens`` excludes the two cache counts."""
 
-    Prefers per-generation ``message.usage_metadata`` (chat models); falls back
-    to ``llm_output["token_usage"]`` (``prompt_tokens``/``completion_tokens``).
-    Returns ``(0, 0)`` when neither is present (some providers report nothing).
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    def plus(self, other: _TokenUsage) -> _TokenUsage:
+        return _TokenUsage(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_read_tokens + other.cache_read_tokens,
+            self.cache_write_tokens + other.cache_write_tokens,
+        )
+
+
+def _count(value: Any) -> int:
+    """A token count, ``0`` unless it is a non-negative integer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _split_input(total_input: int, cache_read: int, cache_write: int) -> _TokenUsage:
+    """Take the cache tokens out of an input count that includes them.
+
+    Counters that do not add up (cache above the total) never yield negative
+    fresh input; the cache counts are trusted, since they carry the lower rate.
     """
-    input_tokens = 0
-    output_tokens = 0
+    return _TokenUsage(
+        input_tokens=max(0, total_input - cache_read - cache_write),
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+    )
+
+
+def _extract_tokens(response: LLMResult) -> _TokenUsage:
+    """The token usage an ``LLMResult`` reports, cache tokens apart.
+
+    Prefers per-generation ``message.usage_metadata`` (chat models), whose
+    ``input_tokens`` is the sum of all input tokens and whose
+    ``input_token_details`` gives ``cache_read`` and ``cache_creation`` (cache
+    writes). Falls back to ``llm_output["token_usage"]`` (``prompt_tokens``,
+    ``completion_tokens``, and OpenAI's ``prompt_tokens_details.cached_tokens``).
+    Returns zeros when neither is present (some providers report nothing).
+    """
+    usage_total = _TokenUsage()
     found = False
     for generations in response.generations:
         # ``generations`` is the candidate list for one prompt; usage is reported
@@ -229,17 +272,38 @@ def _extract_tokens(response: LLMResult) -> tuple[int, int]:
             message = getattr(generation, "message", None)
             usage = getattr(message, "usage_metadata", None) if message is not None else None
             if usage:
-                input_tokens += int(usage.get("input_tokens", 0) or 0)
-                output_tokens += int(usage.get("output_tokens", 0) or 0)
+                details = usage.get("input_token_details") or {}
+                call = _split_input(
+                    _count(usage.get("input_tokens")),
+                    _count(details.get("cache_read")),
+                    _count(details.get("cache_creation")),
+                )
+                usage_total = usage_total.plus(
+                    _TokenUsage(output_tokens=_count(usage.get("output_tokens"))).plus(call)
+                )
                 found = True
                 break
     if found:
-        return input_tokens, output_tokens
+        return usage_total
     token_usage = (response.llm_output or {}).get("token_usage") or {}
-    return (
-        int(token_usage.get("prompt_tokens", 0) or 0),
-        int(token_usage.get("completion_tokens", 0) or 0),
+    prompt_details = token_usage.get("prompt_tokens_details") or {}
+    return _TokenUsage(output_tokens=_count(token_usage.get("completion_tokens"))).plus(
+        _split_input(
+            _count(token_usage.get("prompt_tokens")), _count(prompt_details.get("cached_tokens")), 0
+        )
     )
+
+
+def _unpriced_cache_tokens(price: ModelPrice | None, usage: _TokenUsage) -> int:
+    """The cache tokens ``price`` has no rate for; a free model prices them all at 0."""
+    if price is None or not (price.input_usd_per_mtok or price.output_usd_per_mtok):
+        return 0
+    unpriced = 0
+    if price.cache_read_usd_per_mtok is None:
+        unpriced += usage.cache_read_tokens
+    if price.cache_write_usd_per_mtok is None:
+        unpriced += usage.cache_write_tokens
+    return unpriced
 
 
 def _model_from_response(response: LLMResult) -> str | None:
@@ -507,13 +571,31 @@ class LangGraphAdapter(Adapter):
         held under the lock so LLM and tool events share one monotonic ``ts``.
         The model on the response takes precedence over the one seen at start.
         """
-        input_tokens, output_tokens = _extract_tokens(response)
+        usage = _extract_tokens(response)
         with self._lock:
             pending = self._pending_llm.pop(run_id, None)
             if pending is None:
                 return
             model = _model_from_response(response) or pending.model
-            cost = cost_of(model, input_tokens, output_tokens, self._prices)
+            cost = cost_of(
+                model,
+                usage.input_tokens,
+                usage.output_tokens,
+                self._prices,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+            )
+            metadata: dict[str, Any] = {
+                "parent_run_id": pending.parent_run_id,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+            }
+            if usage.cache_read_tokens or usage.cache_write_tokens:
+                metadata["cache_read_tokens"] = usage.cache_read_tokens
+                metadata["cache_write_tokens"] = usage.cache_write_tokens
+                unpriced = _unpriced_cache_tokens(resolve_price(model, self._prices), usage)
+                if unpriced:
+                    metadata["unpriced_cache_tokens"] = unpriced
             ts = self._ts
             self._ts += 1
             self.emit(
@@ -523,11 +605,7 @@ class LangGraphAdapter(Adapter):
                     ts=ts,
                     kind=EventKind.LLM_CALL,
                     run_id=run_id,
-                    metadata={
-                        "parent_run_id": pending.parent_run_id,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                    },
+                    metadata=metadata,
                 )
             )
 

@@ -600,6 +600,108 @@ def test_llm_cost_falls_back_to_llm_output_token_usage() -> None:
     assert events[0].cost_usd == pytest.approx(0.005)  # 2000 * 2.5 / 1e6
 
 
+def _cached_result(
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    *,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+) -> LLMResult:
+    """A chat result whose input_tokens include cache tokens, as LangChain counts them."""
+    message = AIMessage(
+        content="ok",
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "input_token_details": {"cache_read": cache_read, "cache_creation": cache_creation},
+        },
+    )
+    return LLMResult(
+        generations=[[ChatGeneration(message=message)]], llm_output={"model_name": model}
+    )
+
+
+def test_llm_cache_tokens_are_priced_at_cache_rates() -> None:
+    # Bedrock Sonnet 4.5: 100,000 input tokens of which 95,000 cache reads, plus
+    # 1,000 output. Billed all as input it read $0.315, 5.4 times the list price.
+    events, adapter = _capture()
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    _drive_llm(adapter, _cached_result(100_000, 1_000, bedrock, cache_read=95_000), serialized=None)
+
+    [event] = events
+    assert event.cost_usd == pytest.approx((5_000 * 3.0 + 95_000 * 0.30 + 1_000 * 15.0) / 1e6)
+    assert event.cost_usd == pytest.approx(0.0585)
+    assert event.metadata["input_tokens"] == 5_000
+    assert event.metadata["cache_read_tokens"] == 95_000
+    assert event.metadata["cache_write_tokens"] == 0
+    assert "unpriced_cache_tokens" not in event.metadata
+
+
+def test_llm_cache_writes_are_priced_at_the_cache_write_rate() -> None:
+    events, adapter = _capture()
+    _drive_llm(
+        adapter,
+        _cached_result(10_000, 0, "claude-opus-4-5", cache_creation=8_000),
+        serialized=None,
+    )
+    assert events[0].cost_usd == pytest.approx((2_000 * 5.0 + 8_000 * 6.25) / 1e6)
+
+
+def test_llm_cache_tokens_without_a_cache_rate_stay_unpriced() -> None:
+    # gpt-4o has no cache rate in the table: an under-count, never input-priced.
+    events, adapter = _capture()
+    _drive_llm(adapter, _cached_result(10_000, 0, "gpt-4o", cache_read=8_000), serialized=None)
+    [event] = events
+    assert event.cost_usd == pytest.approx(2_000 * 2.5 / 1e6)
+    assert event.metadata["unpriced_cache_tokens"] == 8_000
+
+
+def test_llm_cache_tokens_of_a_free_model_are_free() -> None:
+    events: list[ToolEvent] = []
+    adapter = LangGraphAdapter(events.append, prices={"local": ModelPrice(0.0, 0.0)})
+    adapter.attach()
+    _drive_llm(adapter, _cached_result(10_000, 10, "local", cache_read=8_000), serialized=None)
+    assert events[0].cost_usd == 0.0
+    assert "unpriced_cache_tokens" not in events[0].metadata
+
+
+def test_llm_cache_counts_above_the_input_never_make_input_negative() -> None:
+    events, adapter = _capture()
+    _drive_llm(
+        adapter, _cached_result(100, 0, "claude-sonnet-4-5", cache_read=500), serialized=None
+    )
+    assert events[0].metadata["input_tokens"] == 0
+    assert events[0].cost_usd == pytest.approx(500 * 0.30 / 1e6)
+
+
+def test_llm_without_cache_details_is_priced_as_before() -> None:
+    events, adapter = _capture()
+    _drive_llm(adapter, _chat_result(1000, 1000, "claude-sonnet-4-5"), serialized=None)
+    assert events[0].cost_usd == pytest.approx((1000 * 3.0 + 1000 * 15.0) / 1e6)
+    assert "cache_read_tokens" not in events[0].metadata
+
+
+def test_llm_output_fallback_takes_openai_cached_tokens_out_of_the_prompt() -> None:
+    events, adapter = _capture()
+    response = LLMResult(
+        generations=[[Generation(text="x")]],
+        llm_output={
+            "model_name": "gpt-4o",
+            "token_usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 0,
+                "prompt_tokens_details": {"cached_tokens": 1500},
+            },
+        },
+    )
+    _drive_llm(adapter, response, serialized=None)
+    [event] = events
+    assert event.cost_usd == pytest.approx(500 * 2.5 / 1e6)
+    assert event.metadata["unpriced_cache_tokens"] == 1500
+
+
 def test_llm_call_with_no_tokens_costs_zero_but_still_emits() -> None:
     events, adapter = _capture()
     response = LLMResult(generations=[[Generation(text="x")]], llm_output={"model_name": "gpt-4o"})

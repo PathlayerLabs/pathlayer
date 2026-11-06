@@ -531,9 +531,12 @@ separately (Bedrock regional endpoints cost about 10 percent more), so that
 rate errs low. A variant of a listed model (`claude-opus-4-5-thinking`,
 OpenRouter's `:nitro`) stays unpriced rather than borrowing its family's base
 price. A `pricing.models` key equal to the full wrapped id prices that id
-alone. Known over-estimate: LangGraph's `usage_metadata.input_tokens` includes
-prompt-cache tokens, and the LangGraph adapter bills them at the input rate,
-so a LangGraph run with prompt caching is estimated too high, on any provider.
+alone. On LangGraph, `usage_metadata.input_tokens` includes prompt-cache
+tokens; the adapter takes `input_token_details.cache_read` and `cache_creation`
+out of it and prices them at the model's cache rates (OpenAI's
+`prompt_tokens_details.cached_tokens` likewise on the `llm_output` fallback). A
+model without a cache rate leaves them unpriced, counted in the event's
+`unpriced_cache_tokens`.
 State semantics version 2 rejects older durable scopes: estimated token costs
 now belong to the estimated counter, and a known zero estimate no longer
 receives a fallback charge. Start a new state key for runs created with the
