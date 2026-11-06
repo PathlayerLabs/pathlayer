@@ -420,8 +420,8 @@ run run-abc123 (session sess-1, agent agent-1)
 outcome: stopped -- Pathlayer halted the run
 status: completed   2026-08-10T12:30:58+00:00 -> 2026-08-10T12:30:59+00:00, 4.2s
 events: 8 recorded, 5 analyzed
-cost: $0.0123 effective = $0.0123 estimated [... $0.012300 estimated from total
-  tokens and an input/output ratio]
+cost: $0.0123 effective = $0.0123 estimated [... $0.012300 estimated from the
+  reported input, output and cache token counters at local rates]
 cost attribution:
   captured: $0.0123 over 4 event(s)
   attributed to a run: $0.0123 over 4 event(s)

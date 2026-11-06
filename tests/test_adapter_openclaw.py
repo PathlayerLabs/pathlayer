@@ -251,6 +251,25 @@ def test_llm_cache_tokens_without_a_cache_rate_stay_unpriced() -> None:
     assert event.metadata["unpriced_cache_tokens"] == 500
 
 
+def test_llm_call_with_only_unpriced_cache_tokens_is_unmeasured() -> None:
+    # Nothing in this call has a rate: an estimated $0 would read as a priced call.
+    no_cache = {"house": ModelPrice(1.0, 2.0)}
+    [event] = translate_openclaw_llm_event(
+        _llm_payload({"cacheRead": 5000, "cacheWrite": 200}, "house"), prices=no_cache
+    )
+    assert event.cost_usd == 0.0
+    assert event.metadata["cost_measurement"] == "unmeasured_unknown_cache_rate"
+    assert event.metadata["unpriced_cache_tokens"] == 5200
+
+    # The same tokens with a known read rate leave only the write unpriced.
+    read_only = {"house": ModelPrice(1.0, 2.0, cache_read_usd_per_mtok=0.1)}
+    [event] = translate_openclaw_llm_event(
+        _llm_payload({"cacheRead": 5000, "cacheWrite": 200}, "house"), prices=read_only
+    )
+    assert event.metadata["cost_measurement"] == "estimated_total_tokens"
+    assert event.metadata["unpriced_cache_tokens"] == 200
+
+
 def test_llm_reasoning_tokens_are_evidence_not_billed_twice() -> None:
     usage = {"input": 10, "output": 100, "reasoningTokens": 40}
     [event] = translate_openclaw_llm_event(_llm_payload(usage))

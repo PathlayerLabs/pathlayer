@@ -629,14 +629,19 @@ class CostShare:
     a computed zero for a configured free model included). ``costed_events``
     counts the events behind those figures and ``unmeasured_events`` the
     cost-bearing events nothing could price -- unknown model, no usable token
-    counter, no pinned price table. They are counted, never priced: a dollar
-    figure for them would be invented.
+    counter, no pinned price table, only cache tokens without a known cache
+    rate. They are counted, never priced: a dollar figure for them would be
+    invented. ``partially_priced_events`` are costed events that left some
+    cache tokens out, and ``unpriced_cache_tokens`` sums the cache tokens no
+    rate priced, costed or not: those figures under-count by that much.
     """
 
     measured_usd: float = 0.0
     estimated_usd: float = 0.0
     costed_events: int = 0
     unmeasured_events: int = 0
+    partially_priced_events: int = 0
+    unpriced_cache_tokens: int = 0
 
     @property
     def total_usd(self) -> float | None:
@@ -651,6 +656,8 @@ class CostShare:
             estimated_usd=self.estimated_usd + other.estimated_usd,
             costed_events=self.costed_events + other.costed_events,
             unmeasured_events=self.unmeasured_events + other.unmeasured_events,
+            partially_priced_events=self.partially_priced_events + other.partially_priced_events,
+            unpriced_cache_tokens=self.unpriced_cache_tokens + other.unpriced_cache_tokens,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -660,6 +667,8 @@ class CostShare:
             "estimated_usd": self.estimated_usd,
             "costed_events": self.costed_events,
             "unmeasured_events": self.unmeasured_events,
+            "partially_priced_events": self.partially_priced_events,
+            "unpriced_cache_tokens": self.unpriced_cache_tokens,
         }
 
     def describe(self) -> str:
@@ -669,8 +678,12 @@ class CostShare:
             if total is not None
             else "no costed event"
         )
+        if self.partially_priced_events:
+            line += f", {self.partially_priced_events} partially priced"
         if self.unmeasured_events:
             line += f", {self.unmeasured_events} unmeasured"
+        if self.unpriced_cache_tokens:
+            line += f"; {self.unpriced_cache_tokens:,} cache token(s) without a known rate"
         return line
 
 
