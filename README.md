@@ -76,6 +76,12 @@ python -m pip install pathlayer
 python -m pip install "pathlayer[langgraph,yaml]"  # LangGraph integration, YAML config
 ```
 
+On an OpenClaw host, the package (0.1.1 or later) also brings the OpenClaw
+plugin and the `pathlayer-openclaw` command: `pathlayer-openclaw install-plugin` copies the
+plugin into OpenClaw's extensions directory, and `pathlayer-openclaw record`
+starts the recording listener. See
+[`examples/openclaw_plugin/README.md`](https://github.com/PathlayerLabs/pathlayer/blob/main/examples/openclaw_plugin/README.md#installation).
+
 The demos live in the repository, not in the package. To try them, use a
 source checkout in a virtual environment; the development extra includes the
 dependencies they need:

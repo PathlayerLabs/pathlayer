@@ -3,8 +3,10 @@
 Pathlayer observes OpenClaw through a **loopback HTTP bridge** (not a sidecar
 daemon, not in-process Python inside the Node gateway). A small JavaScript
 plugin forwards hook payloads; Python translates them and runs detectors. With
-`record.py --enforce`, a STOP also blocks the stopped run's later tool calls
-(see [Enforce STOP](#enforce-stop-opt-in)).
+`pathlayer-openclaw record --enforce`, a STOP also blocks the stopped run's
+later tool calls (see [Enforce STOP](#enforce-stop-opt-in)).
+`pip install pathlayer` (0.1.1 or later) installs both the plugin and the
+`pathlayer-openclaw` command.
 
 ## Architecture
 
@@ -15,12 +17,19 @@ OpenClaw Gateway (Node)
         │     └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
         └── before_tool_call
               └── POST .../ingest, awaited (fails open)  ->  allow, or block after a STOP
-                    └── record.py  OR  listen.py (demo)
+                    └── pathlayer-openclaw record  OR  listen.py (demo)
                           └── OpenClawRunRecorder  OR  print ToolEvents
 ```
 
-- **`listen.py`** — print-only demo listener (unchanged behaviour).
-- **`record.py`** — production per-run recorder (durable directories).
+- **`pathlayer-openclaw`** — command installed with the package: `record`
+  (production per-run recorder, durable directories), `install-plugin` and
+  `plugin-path`.
+- **`pathlayer/adapters/openclaw_plugin/`** — the OpenClaw plugin, shipped in
+  the package.
+- **`listen.py`** — print-only demo listener, in this directory (source
+  checkout only).
+- **`record.py`** — same as `pathlayer-openclaw record`, kept for setups started
+  from a checkout.
 - **`pathlayer/adapters/openclaw.py`** — translates `after_tool_call` → `ToolEvent`,
   and `llm_output` → a separate `LLM_CALL` event carrying an estimated cost.
 - **`pathlayer/adapters/openclaw_recorder.py`** — one pipeline per `ctx.runId`.
@@ -52,39 +61,67 @@ Install Pathlayer on the same host as the OpenClaw gateway: the plugin posts to
 a loopback address.
 
 ```bash
-git clone https://github.com/PathlayerLabs/pathlayer.git
-cd pathlayer
-python3 -m venv .venv
-.venv/bin/pip install -e ".[yaml]"
+python3 -m venv ~/.venvs/pathlayer
+~/.venvs/pathlayer/bin/pip install "pathlayer[yaml]>=0.1.1"  # 0.1.0 lacks this command
+export PATH="$HOME/.venvs/pathlayer/bin:$PATH"
 
-# Recording storage, outside the git checkout (the default location is shown;
-# any directory you own works)
+# Recording storage (the default location is shown; any directory you own works)
 export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
 sudo mkdir -p "$PATHLAYER_RUNS_DIR"
 sudo chown "$USER" "$PATHLAYER_RUNS_DIR"
 ```
 
-Install the OpenClaw plugin from the checkout:
+Install the OpenClaw plugin shipped in the package, then restart the gateway:
 
 ```bash
-cp -r examples/openclaw_plugin/pathlayer-plugin ~/.openclaw/extensions/pathlayer-plugin
+pathlayer-openclaw install-plugin
 openclaw gateway restart
 ```
 
-## Start the recording listener
+`install-plugin` copies the plugin's three files into
+`~/.openclaw/extensions/pathlayer-plugin` (`--dest` picks another directory).
+It never overwrites a file without `--force` and never deletes one. After
+upgrading Pathlayer, rerun it with `--force`, so the plugin and the listener
+come from the same release. OpenClaw can also link the plugin instead of
+copying it, with `openclaw plugins install -l "$(pathlayer-openclaw plugin-path)"`;
+only the copy into `~/.openclaw/extensions/` has been tried on a live gateway.
 
-From the checkout:
+### From a source checkout
 
 ```bash
-source .venv/bin/activate
-export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
-python examples/openclaw_plugin/record.py
+git clone https://github.com/PathlayerLabs/pathlayer.git
+cd pathlayer
+python3 -m venv .venv
+.venv/bin/pip install -e ".[yaml]"
+.venv/bin/pathlayer-openclaw install-plugin
+openclaw gateway restart
 ```
 
-Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. To keep the
-listener running after you log out, run it under your service manager, or in
-the background with
-`nohup python examples/openclaw_plugin/record.py > record.log 2>&1 &`.
+The commands below then run from `.venv/bin/`. The older
+`python examples/openclaw_plugin/record.py` still works: it takes the same
+options as `pathlayer-openclaw record`.
+
+## Start the recording listener
+
+```bash
+export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
+pathlayer-openclaw record
+```
+
+Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. Ctrl+C or SIGTERM
+stops it. To keep the listener running after you log out, run it under your
+service manager, or in the background with
+`nohup pathlayer-openclaw record > record.log 2>&1 &`.
+
+The listener refuses to start, with a message saying what to change, when it
+cannot create or use the runs directory (`--runs-root` or
+`$PATHLAYER_RUNS_DIR`), when another listener is already recording into that
+directory (its startup would mark the other one's live runs interrupted), or
+when its port is already taken, most likely by another listener (`--port` or
+`$PATHLAYER_PORT`). One listener per runs directory: it holds the lock file
+`.listener.lock` there while it runs, released when it stops or dies. A
+listener on another port needs the gateway to post there too: set
+`PATHLAYER_URL` in the gateway's environment.
 
 ### Detector configuration
 
@@ -94,7 +131,7 @@ discovery of `.pathlayer/config.{yaml,yml,json}` in the working directory. With
 no config file the built-in defaults apply.
 
 ```bash
-python examples/openclaw_plugin/record.py --config path/to/config.yaml
+pathlayer-openclaw record --config path/to/config.yaml
 ```
 
 An unreadable, malformed or out-of-range config **fails at startup** with a
@@ -108,7 +145,7 @@ but OpenClaw keeps running the agent's tool calls. Start the listener with
 `--enforce` to act on it:
 
 ```bash
-python examples/openclaw_plugin/record.py --enforce
+pathlayer-openclaw record --enforce
 ```
 
 Before each tool call, the plugin's `before_tool_call` hook asks the listener
@@ -542,5 +579,5 @@ commit run directories into git.
 
 ```bash
 rm -rf ~/.openclaw/extensions/pathlayer-plugin && openclaw gateway restart
-pkill -f "examples/openclaw_plugin/record.py" || true
+pkill -f "pathlayer-openclaw record|openclaw_plugin/record.py" || true
 ```

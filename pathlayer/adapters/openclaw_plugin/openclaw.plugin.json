@@ -2,6 +2,9 @@
   "id": "pathlayer-plugin",
   "name": "Pathlayer capture",
   "description": "Forwards before_agent_run, llm_output, after_tool_call and agent_end events to a local Pathlayer instance (loop/no-progress detection). Best-effort reference plugin for the Pathlayer OpenClaw adapter -- see pathlayer's examples/openclaw_plugin/README.md.",
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "properties": {},
