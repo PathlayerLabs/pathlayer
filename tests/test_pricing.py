@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from pathlayer.pricing import DEFAULT_PRICES, ModelPrice, cost_of, has_price, normalize_model_id
+from pathlayer.pricing import (
+    DEFAULT_PRICES,
+    ModelPrice,
+    cost_of,
+    has_price,
+    normalize_model_id,
+    resolve_price,
+)
 
 
 def test_known_model_cost_is_input_plus_output() -> None:
@@ -226,3 +233,73 @@ def test_extra_prices_layers_on_top_of_custom_prices() -> None:
     )
     # gpt-4o is absent from both -> still unknown -> $0 (prices= replaced defaults).
     assert cost_of("gpt-4o", 1_000_000, 0, prices=prices, extra_prices=extra) == 0.0
+
+
+def test_cache_tokens_are_priced_at_the_cache_rates() -> None:
+    # Sonnet 4.5: $0.30 per 1M cache reads, $3.75 per 1M (5-minute) cache writes.
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=1_000_000) == pytest.approx(0.30)
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_write_tokens=1_000_000) == pytest.approx(3.75)
+    both = cost_of(
+        "claude-sonnet-4-5",
+        1_000_000,
+        1_000_000,
+        cache_read_tokens=1_000_000,
+        cache_write_tokens=1_000_000,
+    )
+    assert both == pytest.approx(3.0 + 15.0 + 0.30 + 3.75)
+
+
+def test_cache_tokens_without_a_cache_rate_are_left_out() -> None:
+    # gpt-4o has no cache rate in the table: its cache tokens are unpriced, not
+    # billed at the input rate.
+    assert cost_of("gpt-4o", 0, 0, cache_read_tokens=1_000_000) == 0.0
+    read_only = {"house": ModelPrice(1.0, 2.0, cache_read_usd_per_mtok=0.5)}
+    cost = cost_of(
+        "house", 0, 0, prices=read_only, cache_read_tokens=1_000_000, cache_write_tokens=1_000_000
+    )
+    assert cost == pytest.approx(0.5)
+
+
+def test_negative_cache_tokens_are_free() -> None:
+    assert cost_of("claude-sonnet-4-5", 0, 0, cache_read_tokens=-5, cache_write_tokens=-5) == 0.0
+
+
+def test_without_unwrapping_ids_match_as_pathlayer_0_1_0_did() -> None:
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert cost_of(bedrock, 1_000_000, 0) == pytest.approx(3.0)
+    assert cost_of(bedrock, 1_000_000, 0, unwrap_ids=False) == 0.0
+    assert resolve_price(bedrock, unwrap_ids=False) is None
+    # A first-party dated id needs no unwrapping either way.
+    assert cost_of("claude-sonnet-4-5-20250929", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(3.0)
+    )
+    # 0.1.0's looser snapshot rule, kept so a rebuilt report matches trace.json:
+    # it read this variant as a snapshot of claude-opus-4.
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0) == 0.0
+    assert cost_of("claude-opus-4-5-thinking", 1_000_000, 0, unwrap_ids=False) == (
+        pytest.approx(15.0)
+    )
+
+
+def test_resolve_price_returns_the_matched_entry() -> None:
+    assert resolve_price("eu.anthropic.claude-opus-5-5-v1:0") == DEFAULT_PRICES["claude-opus-5-5"]
+    assert resolve_price("house") is None
+    custom = {"house": ModelPrice(1.0, 2.0)}
+    assert resolve_price("house-2026", custom) == custom["house"]
+
+
+@pytest.mark.parametrize("model", sorted(key for key in DEFAULT_PRICES if key.startswith("claude")))
+def test_claude_cache_rates_follow_the_published_multipliers(model: str) -> None:
+    # Guards against a typo in the table: the 5-minute write is 1.25x the input
+    # rate, and a read 0.1x, except on the models with a cheaper read.
+    price = DEFAULT_PRICES[model]
+    read_multiplier = {
+        "claude-fable-5-1": 0.025,
+        "claude-mythos-5-1": 0.025,
+        "claude-opus-5-5": 0.05,
+        "claude-sonnet-5-5": 0.05,
+    }
+    assert price.cache_write_usd_per_mtok == pytest.approx(1.25 * price.input_usd_per_mtok)
+    assert price.cache_read_usd_per_mtok == pytest.approx(
+        read_multiplier.get(model, 0.1) * price.input_usd_per_mtok
+    )

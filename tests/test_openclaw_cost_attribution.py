@@ -87,11 +87,14 @@ def _llm(
     event_run_id: str | None = None,
     model: str = "model",
     total: int | None = 1000,
+    usage: dict[str, int] | None = None,
     session: str = "sess-1",
     trigger: str | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {"model": model}
-    if total is not None:
+    if usage is not None:
+        event["usage"] = usage
+    elif total is not None:
         event["usage"] = {"total": total}
     if event_run_id is not None:
         event["runId"] = event_run_id
@@ -408,6 +411,130 @@ def test_attribution_uses_the_prices_pinned_at_recording(tmp_path: Path) -> None
     assert attribution.attributed.total_usd == pytest.approx(5 * _CALL_USD)
 
 
+# The split OpenClaw reports, mostly cache reads: 100 * $1 + 50 * $2 + 850 * $0.1
+# per million at the cached rates below, against _CALL_USD for the total split.
+_SPLIT = {"input": 100, "output": 50, "cacheRead": 850, "total": 1000}
+_SPLIT_USD = 0.000285
+_CACHED = PathlayerConfig(pricing=PricingSection(models={"model": ModelPrice(1.0, 2.0, 0.1, 1.25)}))
+
+
+def test_a_reported_split_is_priced_at_the_pinned_cache_rates(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_CACHED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))  # late, as OpenClaw 2026.7 sends it
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    assert snapshot["split_usage"] is True
+    assert snapshot["models"]["model"]["cache_read_usd_per_mtok"] == 0.1
+    traced = sum(event.cost_usd or 0.0 for event in load_trace(run.trace_path).events)
+
+    attribution = build_cost_attribution(run)
+
+    assert traced == pytest.approx(_SPLIT_USD)
+    assert attribution.attributed.total_usd == pytest.approx(2 * _SPLIT_USD)
+    assert attribution.late.total_usd == pytest.approx(_SPLIT_USD)
+
+
+def _gpt_4o_run(root: Path, usage: dict[str, int]) -> RunDirectory:
+    # gpt-4o is in the default table without a cache rate.
+    recorder = OpenClawRunRecorder(root, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", model="gpt-4o", usage=usage))
+    recorder.process_payload(_end("r1"))
+    return _run(root, "r1")
+
+
+def test_a_partially_priced_call_says_which_cache_tokens_it_left_out(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"input": 1_000, "cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    # 1,000 input tokens at $2.50 per million; the million cache reads have no rate.
+    assert attribution.attributed == CostShare(
+        estimated_usd=pytest.approx(0.0025),
+        costed_events=1,
+        partially_priced_events=1,
+        unpriced_cache_tokens=1_000_000,
+    )
+    assert "1 partially priced; 1,000,000 cache token(s) without a known rate" in (
+        attribution.attributed.describe()
+    )
+    assert report.cost.source.count("estimated from") == 1
+    assert "estimated from the reported input, output and cache token counters" in (
+        report.cost.source
+    )
+    assert "input/output ratio" not in report.cost.source
+    assert (
+        "1,000,000 cache token(s) over 1 model call(s) are not priced: no cache rate is "
+        "known for gpt-4o" in report.cost.source
+    )
+
+
+def test_a_call_with_only_unpriced_cache_tokens_is_unmeasured(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"cacheRead": 1_000_000})
+
+    attribution = build_cost_attribution(run)
+    report = build_run_report(run)
+
+    assert attribution.attributed == CostShare(unmeasured_events=1, unpriced_cache_tokens=1_000_000)
+    assert attribution.attributed.total_usd is None
+    assert report.cost.estimated_usd is None
+    assert "1,000,000 cache token(s) over 1 model call(s) are not priced" in report.cost.source
+
+
+def test_a_total_only_call_names_the_input_ratio_method(tmp_path: Path) -> None:
+    run = _gpt_4o_run(tmp_path, {"total": 1_000})
+
+    report = build_run_report(run)
+
+    assert "estimated from total tokens and an input/output ratio" in report.cost.source
+    assert "cache token" not in report.cost.source
+
+
+def test_a_run_recorded_before_split_pricing_keeps_its_total_split(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, config=_CACHED)
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_llm("r1", usage=_SPLIT))
+    recorder.process_payload(_end("r1"))
+    run = _run(tmp_path, "r1")
+    # The snapshot a 0.1.0 recorder pinned: no rule, no cache rates.
+    run.update_manifest(
+        llm_pricing_snapshot={"input_ratio": 0.8, "models": {"model": dict(_RATES)}}
+    )
+
+    attribution = build_cost_attribution(run)
+
+    assert attribution.attributed.total_usd == pytest.approx(_CALL_USD)
+
+
+def test_a_run_recorded_before_wrapped_ids_keeps_them_unmeasured(tmp_path: Path) -> None:
+    # Pathlayer 0.1.0 did not unwrap Bedrock ids: its runs priced nothing for
+    # them, and a report rebuilt today must not invent that figure.
+    bedrock = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    recorder = OpenClawRunRecorder(tmp_path, config=PathlayerConfig())
+    recorder.process_payload(_before("r1"))
+    recorder.process_payload(_end("r1"))
+    recorder.process_payload(_llm("r1", model=bedrock))
+    run = _run(tmp_path, "r1")
+    snapshot = run.read_manifest()["llm_pricing_snapshot"]
+    assert snapshot["unwrap_model_ids"] is True
+    assert build_cost_attribution(run).late.costed_events == 1
+
+    # The snapshot a 0.1.0 recorder pinned: no split, no unwrapping.
+    run.update_manifest(
+        llm_pricing_snapshot={
+            "input_ratio": 0.8,
+            "models": {"claude-sonnet-4": {"input_usd_per_mtok": 3.0, "output_usd_per_mtok": 15.0}},
+        }
+    )
+
+    late = build_cost_attribution(run).late
+    assert late == CostShare(unmeasured_events=1)
+
+
 def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
     recorder = OpenClawRunRecorder(tmp_path, config=_PRICED)
     recorder.process_payload(_before("r1"))
@@ -425,7 +552,12 @@ def test_a_corrupt_price_snapshot_is_unmeasured(tmp_path: Path) -> None:
         {"input_ratio": -0.1, "models": {}},
         *(
             {"input_ratio": 0.8, "models": {"model": {**_RATES, side: bad}}}
-            for side in ("input_usd_per_mtok", "output_usd_per_mtok")
+            for side in (
+                "input_usd_per_mtok",
+                "output_usd_per_mtok",
+                "cache_read_usd_per_mtok",
+                "cache_write_usd_per_mtok",
+            )
             for bad in (-1.0, float("nan"), float("inf"), "1.0", True)
         ),
     ):
@@ -497,6 +629,8 @@ def test_cli_cost_attribution_separates_captured_attributed_unattributed(
             "estimated_usd": pytest.approx(_CALL_USD),
             "costed_events": 1,
             "unmeasured_events": 0,
+            "partially_priced_events": 0,
+            "unpriced_cache_tokens": 0,
         }
     ]
 

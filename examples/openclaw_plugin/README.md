@@ -350,7 +350,7 @@ unattributed: $0.0742 over 11 event(s)
   timing, because that would invent a causality the source did not report. It is
   grouped by the source's own `ctx.trigger` (`cron`, `heartbeat`, ...), or
   `absent` when the source gave none.
-- **Unmeasured** calls (unknown model, no usable `usage.total`, no pinned price
+- **Unmeasured** calls (unknown model, no usable token counter, no pinned price
   table) are counted and never priced.
 
 What the split cannot see: a payload the plugin failed to forward within its
@@ -374,8 +374,8 @@ run run-abc123 (session sess-1, agent agent-1)
 outcome: stopped -- Pathlayer halted the run
 status: completed   2026-08-10T12:30:58+00:00 -> 2026-08-10T12:30:59+00:00, 4.2s
 events: 8 recorded, 5 analyzed
-cost: $0.0123 effective = $0.0123 estimated [... $0.012300 estimated from total
-  tokens and an input/output ratio]
+cost: $0.0123 effective = $0.0123 estimated [... $0.012300 estimated from the
+  reported input, output and cache token counters at local rates]
 cost attribution:
   captured: $0.0123 over 4 event(s)
   attributed to a run: $0.0123 over 4 event(s)
@@ -400,10 +400,14 @@ absent rather than as zero — and, symmetrically, a figure that *was* computed 
 reported even when it comes out at zero:
 
 - **Cost.** Tool hooks carry no cost. Model spend comes from `llm_output`: when
-  it reports a model and a non-negative `usage.total`, the total is split into
-  input and output with `pricing.openclaw_input_ratio` (default 0.8) and priced
-  with the `pricing` table. That is an *estimate*, never an invoice-grade
-  measurement, and the report labels it as such. An unknown model or a missing
+  it reports a model and its input, output, cache-read and cache-write tokens,
+  each counter is priced at its own rate from the `pricing` table (cache tokens
+  of a model without cache rates stay unpriced, counted in
+  `unpriced_cache_tokens`). When it reports only a non-negative `usage.total`,
+  the total is split into input and output with `pricing.openclaw_input_ratio`
+  (default 0.8). Either way that is an *estimate* at local rates, never an
+  invoice-grade measurement, and the report labels it as such. A run recorded
+  before split pricing keeps the total split it was priced with. An unknown model or a missing
   counter leaves that call unmeasured rather than free. The other substitute is
   `detectors.budget.tool_costs_usd`: a known price per tool times the
   number of calls, also reported as an estimate, separately from captured cost.
@@ -465,8 +469,9 @@ commit run directories into git.
   stops analysis without affecting the OpenClaw run.
 - No retention: run directories accumulate until you archive or delete them.
 - Only the four forwarded hooks are recorded; the `before_tool_call` query is
-  answered, never recorded. Model cost is an estimate from
-  `usage.total` and a configured input/output ratio, not a provider invoice.
+  answered, never recorded. Model cost is an estimate from the reported token
+  counters (or `usage.total` and a configured input/output ratio) at local
+  rates, not a provider invoice.
 - Hook payload shapes follow the public OpenClaw docs and may differ slightly
   on your gateway version — inspect `events.raw.jsonl` when in doubt.
 - `ts` on ToolEvents reflects HTTP arrival order, not wall-clock time.
