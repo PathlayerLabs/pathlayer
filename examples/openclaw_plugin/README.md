@@ -345,6 +345,14 @@ failure kind says so; an `exec` whose approval was denied is a blocked call.
 Identical facts are grouped with a count, and every
 entry names the raw journal records it rests on. The ledger feeds no detector.
 
+The ledger puts the agent's commands (clipped to 200 characters), working
+directories, file paths and error texts in `report.json` and in
+`pathlayer-report` output, where the rest of the report holds no tool
+argument. A command can carry a secret (a token in a `curl` header): review a
+report before sharing it, as you would a run directory. In the text report,
+control characters in that text are escaped, so a command cannot forge
+report lines or terminal output.
+
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being
 normalized, kept in order and appended to `trace.json`. Those events appear in

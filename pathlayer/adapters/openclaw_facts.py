@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -144,9 +145,13 @@ def _fact(event: Mapping[str, Any], sequence: int) -> OpenClawFact | None:
     if details.get("status") == "blocked" or exec_denied is not None:
         reason = details.get("reason")
         denied = exec_denied if exec_denied is not None else details.get("deniedReason")
+        params = event.get("params")
+        command = params.get("command") if isinstance(params, Mapping) else None
         return make(
             FactKind.CALL_BLOCKED,
             {
+                "command": _clip(command) if isinstance(command, str) else None,
+                "command_sha256": _sha256(command) if isinstance(command, str) else None,
                 "denied_reason": denied if isinstance(denied, str) else None,
                 "reason": _clip(reason) if isinstance(reason, str) else None,
                 "by_pathlayer": details.get("deniedReason") == "plugin-before-tool-call"
@@ -302,23 +307,29 @@ def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
       they started), and tool calls whose result says nothing observable about
       how they ended (a read, a search), counted per tool.
 
-    Identical facts (same kind, same command, path or error) are one entry with
-    a count, in the order of their first occurrence.
+    Identical facts (same kind, full command, working directory, path, content
+    and error) are one entry with a count, in the order of their first
+    occurrence. A command's working directory is named when it differs from the
+    run's most common one. Text the agent controls (commands, paths, errors) is
+    rendered on one line, with control characters escaped, so it cannot forge
+    ledger lines or terminal output.
     """
     materialized = list(records)
     facts = extract_facts(materialized)
     with_fact = {fact.sequence for fact in facts}
-    groups: dict[tuple[str, str], list[OpenClawFact]] = {}
+    cwds = Counter(fact.detail["cwd"] for fact in facts if isinstance(fact.detail.get("cwd"), str))
+    usual_cwd = cwds.most_common(1)[0][0] if cwds else None
+    groups: dict[tuple[Any, ...], list[OpenClawFact]] = {}
     for fact in facts:
-        groups.setdefault((_status(fact), _statement(fact)), []).append(fact)
+        groups.setdefault(_identity(fact), []).append(fact)
     entries = [
         LedgerEntry(
-            status=status,
-            statement=statement,
+            status=_status(group[0]),
+            statement=_statement(group[0], usual_cwd),
             count=len(group),
             sequences=tuple(fact.sequence for fact in group),
         )
-        for (status, statement), group in groups.items()
+        for group in groups.values()
     ]
     silent: dict[str, list[int]] = {}
     for record in materialized:
@@ -335,7 +346,7 @@ def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
     entries.extend(
         LedgerEntry(
             status=LEDGER_UNPROVEN,
-            statement=f"{tool}: no observable outcome",
+            statement=f"{_inline(tool)}: no outcome fact in its result",
             count=len(sequences),
             sequences=tuple(sequences),
         )
@@ -352,23 +363,59 @@ def _status(fact: OpenClawFact) -> str:
     return LEDGER_FAILED
 
 
-def _statement(fact: OpenClawFact) -> str:
+def _identity(fact: OpenClawFact) -> tuple[Any, ...]:
+    """What makes two facts the same fact: never the clipped text alone."""
     detail = fact.detail
-    command = detail.get("command") or "a command"
+    return (
+        fact.kind,
+        fact.tool,
+        detail.get("command_sha256"),
+        detail.get("cwd"),
+        detail.get("exit_code"),
+        detail.get("failure_kind"),
+        detail.get("path"),
+        detail.get("content_sha256"),
+        detail.get("reported_size"),
+        detail.get("error"),
+        detail.get("denied_reason"),
+        detail.get("by_pathlayer"),
+    )
+
+
+def _inline(value: Any) -> str:
+    """Agent-controlled text on one line: control characters escaped, never interpreted."""
+    text = str(value)
+    return "".join(
+        char
+        if char.isprintable()
+        else {"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(char, f"\\x{ord(char):02x}")
+        if ord(char) < 0x100
+        else f"\\u{ord(char):04x}"
+        for char in text
+    )
+
+
+def _statement(fact: OpenClawFact, usual_cwd: str | None = None) -> str:
+    detail = fact.detail
+    command = f"`{_inline(detail['command'])}`" if detail.get("command") else "a command"
+    cwd = detail.get("cwd")
+    where = f" in {_inline(cwd)}" if isinstance(cwd, str) and cwd != usual_cwd else ""
     if fact.kind is FactKind.COMMAND_BACKGROUNDED:
-        return f"`{command}` started in the background: whether it ran is not observed"
+        return f"{command}{where} started in the background: whether it ran is not observed"
     if fact.kind is FactKind.COMMAND_SUCCEEDED:
-        return f"`{command}` exited 0"
+        return f"{command}{where} exited 0"
     if fact.kind is FactKind.COMMAND_FAILED:
-        kind = f", {detail['failure_kind']}" if detail.get("failure_kind") else ""
-        return f"`{command}` exited {detail.get('exit_code')}{kind}"
+        kind = f", {_inline(detail['failure_kind'])}" if detail.get("failure_kind") else ""
+        return f"{command}{where} exited {detail.get('exit_code')}{kind}"
     if fact.kind is FactKind.COMMAND_TIMED_OUT:
-        return f"`{command}` timed out"
+        return f"{command}{where} timed out"
     if fact.kind is FactKind.FILE_WRITTEN:
-        return f"wrote {detail.get('path')} (reported size {detail.get('reported_size')})"
+        return f"wrote {_inline(detail.get('path'))} (reported size {detail.get('reported_size')})"
+    tool = _inline(fact.tool)
     if fact.kind is FactKind.CALL_BLOCKED:
+        what = command if detail.get("command") else f"{tool} call"
         if detail.get("by_pathlayer"):
-            return f"{fact.tool} call blocked by Pathlayer"
-        denied = detail.get("denied_reason") or "no reason given"
-        return f"{fact.tool} call blocked by OpenClaw ({denied})"
-    return f"{fact.tool} failed: {detail.get('error')}"
+            return f"{what} blocked by Pathlayer"
+        denied = _inline(detail.get("denied_reason") or "no reason given")
+        return f"{what} blocked by OpenClaw ({denied})"
+    return f"{tool} failed: {_inline(detail.get('error'))}"

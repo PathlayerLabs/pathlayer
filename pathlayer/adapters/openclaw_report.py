@@ -864,8 +864,13 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
 
     try:
-        raw_records, _ = _read_journal(run.raw_events_path)
+        raw_records, torn = _read_journal(run.raw_events_path)
         ledger: ProofLedger | None = build_proof_ledger(raw_records)
+        if torn and not truncated_journal:
+            notes.append(
+                "the last line of the raw event journal was truncated: the proof ledger "
+                "stops one record short"
+            )
     except ValueError:
         ledger = None
         notes.append("the raw event journal is corrupt: the proof ledger is not reported")

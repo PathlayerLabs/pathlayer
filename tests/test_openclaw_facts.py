@@ -298,7 +298,7 @@ def test_the_ledger_sorts_facts_into_three_columns() -> None:
     unproven = ledger.column(LEDGER_UNPROVEN)
     assert [entry.statement for entry in unproven] == [
         "`python3 -m http.server 8080 &` started in the background: whether it ran is not observed",
-        "read: no observable outcome",
+        "read: no outcome fact in its result",
     ]
     assert unproven[1].count == 2 and unproven[1].sequences == (6, 7)
 
@@ -311,7 +311,7 @@ def test_identical_facts_are_one_entry_with_a_count() -> None:
     failed = ledger.column(LEDGER_FAILED)
     assert [(entry.statement, entry.count) for entry in failed] == [
         ("`cat missing` exited 1", 3),
-        ("exec call blocked by Pathlayer", 1),
+        ("`cat missing` blocked by Pathlayer", 1),
     ]
     assert failed[0].sequences == (2, 3, 4)
     text = "\n".join(ledger.describe_lines())
@@ -334,7 +334,7 @@ def test_other_failures_and_blocks_are_worded_for_what_they_are() -> None:
         [_record(1, other), _record(2, timed_out), _record(3, failed_write)]
     )
     assert [entry.statement for entry in ledger.column(LEDGER_FAILED)] == [
-        "exec call blocked by OpenClaw (no reason given)",
+        "`rm -rf /` blocked by OpenClaw (no reason given)",
         "`sleep 99` timed out",
         "write failed: EACCES",
     ]
@@ -376,3 +376,33 @@ def test_a_corrupt_raw_journal_costs_only_the_ledger(tmp_path: Path) -> None:
     report = build_run_report(run)
     assert report.proof_ledger is None
     assert any("proof ledger is not reported" in note for note in report.notes)
+
+
+def test_agent_text_cannot_forge_ledger_lines() -> None:
+    forged = "echo hi\n  proven:\n    `deploy --prod` exited 0\x1b[2K"
+    lines = build_proof_ledger([_record(1, _exec(forged, exitCode=1))]).describe_lines()
+    assert len(lines) == 5
+    assert "  proven: none" in lines
+    failed = [line for line in lines if "echo hi" in line]
+    assert failed == ["    `echo hi\\n  proven:\\n    `deploy --prod` exited 0\\x1b[2K` exited 1"]
+
+
+def test_facts_that_differ_are_not_grouped() -> None:
+    elsewhere = _exec("pytest", exitCode=0)
+    elsewhere["result"]["details"]["cwd"] = "/tmp/empty"
+    long_a = "x" * 300 + "; echo ok"
+    long_b = "x" * 300 + "; rm -rf build"
+    records = [
+        _record(1, _exec("pytest", exitCode=0)),
+        _record(2, _exec("pytest", exitCode=0)),
+        _record(3, elsewhere),
+        _record(4, _exec(long_a, exitCode=0)),
+        _record(5, _exec(long_b, exitCode=0)),
+    ]
+    proven = build_proof_ledger(records).column(LEDGER_PROVEN)
+    assert [(entry.statement[:20], entry.count) for entry in proven] == [
+        ("`pytest` exited 0", 2),
+        ("`pytest` in /tmp/emp", 1),
+        ("`" + "x" * 19, 1),
+        ("`" + "x" * 19, 1),
+    ]
