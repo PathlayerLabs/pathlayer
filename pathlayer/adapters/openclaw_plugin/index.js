@@ -27,7 +27,7 @@
  * down, slow, or answers anything but a block, the tool call runs.
  */
 
-import { createHash } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 
 // Keep in sync with DEFAULT_PORT in pathlayer/adapters/openclaw.py
 const DEFAULT_PORT = 8787;
@@ -116,6 +116,11 @@ function delay(ms) {
   });
 }
 
+// Keyed per plugin process: equal calls get equal fingerprints within one
+// gateway process, and a fingerprint in gate.jsonl cannot be confirmed by
+// hashing guessed arguments.
+const DIGEST_KEY = randomBytes(32);
+
 function canonical(value) {
   if (Array.isArray(value)) {
     return value.map(canonical);
@@ -130,22 +135,25 @@ function canonical(value) {
   return value;
 }
 
-// One-way fingerprint of (tool, arguments): equal for identical calls, so
+// Keyed fingerprint of (tool, arguments): equal for identical calls, so
 // Pathlayer can cap identical calls in flight without seeing the arguments.
+// The JSON round trip first applies toJSON (a Date) and drops what JSON drops,
+// so canonical() only ever sees plain JSON values.
 function paramsDigest(event) {
   try {
+    const params = event?.params === undefined ? null : JSON.parse(JSON.stringify(event.params));
     const identity = JSON.stringify({
       tool: event?.toolName ?? null,
-      params: canonical(event?.params ?? null),
+      params: canonical(params ?? null),
     });
-    return createHash("sha256").update(identity).digest("hex");
+    return createHmac("sha256", DIGEST_KEY).update(identity).digest("hex");
   } catch {
     // Unserializable arguments (a cycle, a BigInt): no fingerprint, no cap.
     return undefined;
   }
 }
 
-// Identifiers and a one-way fingerprint only: tool arguments never leave
+// Identifiers and a keyed fingerprint only: tool arguments never leave
 // OpenClaw for a decision.
 function decisionQuery(event, ctx) {
   return {

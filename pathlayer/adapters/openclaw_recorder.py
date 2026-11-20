@@ -143,8 +143,11 @@ GATE_ALLOW = "allow"
 # once before the gate blocks the next. OpenClaw runs the tool calls of one
 # assistant message in parallel, and decides every gate query of the batch
 # before any of them runs: a STOP that needs failures to be observed can never
-# stop such a batch. Three matches the retry detector's default threshold.
-DEFAULT_MAX_IDENTICAL_IN_FLIGHT = 3
+# stop such a batch. Four is one below the run of identical actions the default
+# pipeline already stops as a loop: the cap only blocks calls of a batch that
+# would be stopped anyway, so it never adds a STOP of its own (a blocked call
+# comes back as a failed action and is analyzed like any other).
+DEFAULT_MAX_IDENTICAL_IN_FLIGHT = 4
 
 
 @dataclass(slots=True)
@@ -793,8 +796,8 @@ class OpenClawRunRecorder:
             return {
                 "block": True,
                 "blockReason": (
-                    f"Pathlayer blocked this call ({reason}). Do not repeat the same call: "
-                    "wait for the results of the calls already running."
+                    f"Pathlayer blocked this call ({reason}). This exact call is already "
+                    "running: use its result and do not call it again."
                 ),
             }
         return {
