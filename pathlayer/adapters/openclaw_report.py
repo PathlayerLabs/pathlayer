@@ -66,12 +66,14 @@ from pathlayer.postmortem import (
     COMPLETED_STATUS,
     TRIGGER_ABSENT,
     UNATTRIBUTED_MISSING_RUN_ID,
+    BlockedToolCall,
     CostAttribution,
     CostBreakdown,
     CostShare,
     SessionReport,
     SignalObservation,
     TickRecord,
+    ToolCallGate,
     UnattributedCost,
     build_session_report,
 )
@@ -861,7 +863,12 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             else "trace.json is absent: this run was cut before its final agent_end"
         )
 
-    return build_session_report(
+    try:
+        gate = _tool_call_gate(run)
+    except ValueError:
+        gate = None
+        notes.append("the tool-call gate log is corrupt: the blocked calls are not reported")
+    report = build_session_report(
         run_id=str(manifest.get("run_id") or run.original_run_id),
         status=status,
         ticks=ticks,
@@ -877,6 +884,44 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         duration_seconds=duration,
         notes=notes,
     )
+    return replace(report, tool_call_gate=gate) if gate is not None else report
+
+
+def _tool_call_gate(run: RunDirectory) -> ToolCallGate | None:
+    """Summarize ``gate.jsonl``: the tool calls OpenClaw asked about, and those blocked.
+
+    ``None`` for a run without the log (no tool call was asked about, or the
+    run was recorded before the log existed). A torn last line is dropped like
+    in every other journal.
+    """
+    records, _ = _read_journal(run.gate_path)
+    if not records:
+        return None
+    blocked = tuple(
+        BlockedToolCall(
+            tool_name=_optional_str(record.get("tool_name")),
+            tool_call_id=_optional_str(record.get("tool_call_id")),
+            at=_optional_str(record.get("received_at")),
+            reason=_optional_str(record.get("reason")),
+        )
+        for record in records
+        if record.get("decision") == "block"
+    )
+    would_have_blocked = sum(
+        1
+        for record in records
+        if record.get("decision") != "block" and record.get("run_stopped") is True
+    )
+    return ToolCallGate(
+        queries=len(records),
+        enforced=any(record.get("enforced") is True for record in records),
+        blocked=blocked,
+        would_have_blocked=would_have_blocked,
+    )
+
+
+def _optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def write_run_report(run: RunDirectory) -> SessionReport:
