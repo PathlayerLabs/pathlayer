@@ -372,6 +372,8 @@ def _contract_entries(records: list[Mapping[str, Any]]) -> list[LedgerEntry]:
     """
     required: tuple[str, ...] = ()
     last: dict[str, tuple[str, int, str | None]] = {}
+    # The last observed value of each checkpoint, kept through unobserved probes.
+    known: dict[str, tuple[bool, int]] = {}
     for record in records:
         payload = record.get("payload")
         sequence = record.get("sequence")
@@ -387,6 +389,7 @@ def _contract_entries(records: list[Mapping[str, Any]]) -> list[LedgerEntry]:
             if names != required:
                 required = names
                 last = {}
+                known = {}
         proof = payload.get("progress_proof")
         checkpoints = proof.get("checkpoints") if isinstance(proof, Mapping) else None
         if isinstance(checkpoints, Mapping):
@@ -394,6 +397,7 @@ def _contract_entries(records: list[Mapping[str, Any]]) -> list[LedgerEntry]:
                 if isinstance(name, str) and isinstance(value, bool):
                     status = LEDGER_PROVEN if value else LEDGER_FAILED
                     last[name] = (status, sequence, None)
+                    known[name] = (value, sequence)
         marker = payload.get("progress_proof_unobserved")
         unobserved = marker.get("unobserved") if isinstance(marker, Mapping) else None
         if isinstance(unobserved, list):
@@ -418,13 +422,25 @@ def _contract_entries(records: list[Mapping[str, Any]]) -> list[LedgerEntry]:
             )
             continue
         status, sequence, reason = last[name]
+        label = _inline(name)
         if status == LEDGER_PROVEN:
-            statement = f"contract checkpoint `{name}` satisfied (operator probe)"
+            statement = (
+                f"contract checkpoint `{label}` satisfied at the last probe (record {sequence})"
+            )
         elif status == LEDGER_FAILED:
-            statement = f"contract checkpoint `{name}` not satisfied (operator probe)"
+            statement = (
+                f"contract checkpoint `{label}` not satisfied at the last probe (record {sequence})"
+            )
         else:
-            why = f": {reason}" if reason else ""
-            statement = f"contract checkpoint `{name}` not observed by the last probe{why}"
+            why = f": {_inline(reason)}" if reason else ""
+            earlier = ""
+            if name in known:
+                value, seen_at = known[name]
+                state = "satisfied" if value else "not satisfied"
+                earlier = f" (last observed {state} at record {seen_at})"
+            statement = (
+                f"contract checkpoint `{label}` not observed by the last probe{why}{earlier}"
+            )
         entries.append(
             LedgerEntry(status=status, statement=statement, count=1, sequences=(sequence,))
         )
