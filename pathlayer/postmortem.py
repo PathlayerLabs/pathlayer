@@ -868,6 +868,10 @@ class BlockedToolCall:
         }
 
 
+# Blocked calls listed one by one in the text report; report.json lists all.
+_MAX_BLOCKED_LINES = 10
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCallGate:
     """What a pre-execution tool-call gate was asked, and what it answered.
@@ -897,11 +901,14 @@ class ToolCallGate:
             f"tool-call gate ({mode}): {self.queries} tool call(s) checked, "
             f"{len(self.blocked)} blocked by Pathlayer"
         ]
-        for call in self.blocked:
+        for call in self.blocked[:_MAX_BLOCKED_LINES]:
             name = call.tool_name or "unknown tool"
             ident = f" ({call.tool_call_id})" if call.tool_call_id else ""
             when = f" at {call.at}" if call.at else ""
             lines.append(f"  blocked {name}{ident}{when}")
+        hidden = len(self.blocked) - _MAX_BLOCKED_LINES
+        if hidden > 0:
+            lines.append(f"  ... and {hidden} more blocked call(s) (all listed in report.json)")
         if self.would_have_blocked:
             lines.append(
                 f"  {self.would_have_blocked} tool call(s) ran after the STOP and would "

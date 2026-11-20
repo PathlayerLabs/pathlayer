@@ -768,11 +768,16 @@ class OpenClawRunRecorder:
         ``decision`` is what OpenClaw was told (``block`` or ``allow``);
         ``run_stopped`` says whether the run was stopped at that moment, so a
         passive recording shows which calls an enforced one would have blocked.
-        A failure to log never changes the answer: it is logged and dropped.
+        ``answered_at`` is when the answer was computed, under the run's lock:
+        the moment that orders it against a STOP. The line is flushed, not
+        fsynced: the log is diagnostic, a torn last line is tolerated by its
+        readers, and an fsync on the gate's critical path could outlast the
+        plugin's budget and turn a block into a fail-open. A failure to log
+        never changes the answer: it is logged and dropped.
         """
         event = _hook_part(payload, "event")
         record = {
-            "received_at": utc_now_iso(),
+            "answered_at": utc_now_iso(),
             "tool_call_id": event.get("toolCallId"),
             "tool_name": event.get("toolName"),
             "decision": GATE_BLOCK if block else GATE_ALLOW,
@@ -781,7 +786,8 @@ class OpenClawRunRecorder:
             "enforced": self._enforce,
         }
         try:
-            append_jsonl(active.directory.gate_path, record)
+            with active.directory.gate_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             logger.exception(
                 "could not log a gate query of OpenClaw run %r", active.directory.original_run_id

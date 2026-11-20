@@ -252,16 +252,18 @@ def test_a_finished_or_unknown_run_logs_nothing(tmp_path: Path) -> None:
 
 
 def test_a_gate_log_failure_never_changes_the_answer(tmp_path: Path, monkeypatch: Any) -> None:
-    import pathlayer.adapters.openclaw_recorder as recorder_module
-
     recorder = OpenClawRunRecorder(tmp_path, enforce=True)
     recorder.startup()
     _loop_until_stop(recorder, "run-a")
 
-    def fail(_path: Path, _record: Any) -> None:
-        raise OSError("disk full")
+    real_open = Path.open
 
-    monkeypatch.setattr(recorder_module, "append_jsonl", fail)
+    def fail(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path.name == "gate.jsonl":
+            raise OSError("disk full")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail)
     answer = recorder.tool_call_decision(_query("run-a"))
     assert answer is not None and answer["block"] is True
 
@@ -406,3 +408,24 @@ def test_the_recording_listener_enforces_only_with_enforce(tmp_path: Path) -> No
         recorder.startup()
         answers = _loop_until_stop(recorder, "run-a")
         assert (answers[-1] is not None) is expected
+
+
+def test_the_text_report_lists_the_first_blocked_calls_only(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    _loop_until_stop(recorder, "run-a")
+    for _ in range(20):
+        recorder.tool_call_decision(_query("run-a"))
+    recorder.process_payload(_end("run-a"))
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+
+    report = build_run_report(run)
+    assert report.tool_call_gate is not None
+    blocked = len(report.tool_call_gate.blocked)
+    assert blocked > 10
+    text = report.format()
+    assert text.count("  blocked exec") == 10
+    assert f"... and {blocked - 10} more blocked call(s)" in text
+    listed = json.loads(run.report_path.read_text(encoding="utf-8"))["tool_call_gate"]["blocked"]
+    assert len(listed) == blocked

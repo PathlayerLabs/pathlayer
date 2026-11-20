@@ -328,8 +328,8 @@ is lost, that attempt runs with the duration watchdog paused, and a failed end
 identical to the previous one is taken for a repeated delivery.
 
 **Every tool-call gate query is logged.** Each `before_tool_call` query about
-a run being recorded is appended to its `gate.jsonl` with the answer OpenClaw
-got: `decision` (`allow` or `block`), whether the run was stopped at that moment
+a run being recorded is appended to its `gate.jsonl` with Pathlayer's answer
+and the time it was computed (`answered_at`): `decision` (`allow` or `block`), whether the run was stopped at that moment
 (`run_stopped`), the stop reason, and whether enforcement was on. The tool
 arguments are not in it: the plugin never sends them. The log is kept apart
 from `events.raw.jsonl` and is never analyzed or replayed, so a recording is

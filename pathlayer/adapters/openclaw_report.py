@@ -901,7 +901,7 @@ def _tool_call_gate(run: RunDirectory) -> ToolCallGate | None:
         BlockedToolCall(
             tool_name=_optional_str(record.get("tool_name")),
             tool_call_id=_optional_str(record.get("tool_call_id")),
-            at=_optional_str(record.get("received_at")),
+            at=_optional_str(record.get("answered_at")),
             reason=_optional_str(record.get("reason")),
         )
         for record in records
