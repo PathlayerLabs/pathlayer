@@ -1,0 +1,80 @@
+{
+ "label": "loop",
+ "description": "One message with five identical calls.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "result": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "npm install"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

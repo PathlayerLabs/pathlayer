@@ -910,7 +910,8 @@ def _tool_call_gate(run: RunDirectory) -> ToolCallGate | None:
     would_have_blocked = sum(
         1
         for record in records
-        if record.get("decision") != "block" and record.get("run_stopped") is True
+        if record.get("decision") != "block"
+        and (record.get("run_stopped") is True or record.get("cap_exceeded") is True)
     )
     return ToolCallGate(
         queries=len(records),
