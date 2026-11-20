@@ -290,7 +290,7 @@ def test_the_ledger_sorts_facts_into_three_columns() -> None:
 
     assert [entry.statement for entry in ledger.column(LEDGER_PROVEN)] == [
         "`mkdir -p game` exited 0",
-        "wrote 10 bytes to game/app.js",
+        "wrote game/app.js (reported size 10)",
     ]
     assert [entry.statement for entry in ledger.column(LEDGER_FAILED)] == [
         "`node --check app.js` exited 127, shell-command-not-found"
@@ -328,7 +328,7 @@ def test_a_command_chain_ending_in_and_is_not_backgrounded() -> None:
 def test_other_failures_and_blocks_are_worded_for_what_they_are() -> None:
     other = _exec("rm -rf /")
     other["result"]["details"] = {"status": "blocked"}
-    timed_out = _exec("sleep 99", timedOut=True)
+    timed_out = _exec("sleep 99", timedOut=True, failureKind="overall-timeout")
     failed_write = {"toolName": "write", "params": {"path": "/x"}, "error": "EACCES"}
     ledger = build_proof_ledger(
         [_record(1, other), _record(2, timed_out), _record(3, failed_write)]

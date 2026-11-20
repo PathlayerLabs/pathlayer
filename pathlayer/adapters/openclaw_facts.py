@@ -344,17 +344,8 @@ def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
     return ProofLedger(entries=tuple(entries))
 
 
-def _backgrounded(fact: OpenClawFact) -> bool:
-    """A shell command sent to the background: its exit 0 only says it started."""
-    command = fact.detail.get("command")
-    if not isinstance(command, str):
-        return False
-    stripped = command.rstrip()
-    return stripped.endswith("&") and not stripped.endswith("&&")
-
-
 def _status(fact: OpenClawFact) -> str:
-    if fact.kind is FactKind.COMMAND_SUCCEEDED and _backgrounded(fact):
+    if fact.kind is FactKind.COMMAND_BACKGROUNDED:
         return LEDGER_UNPROVEN
     if fact.kind in {FactKind.COMMAND_SUCCEEDED, FactKind.FILE_WRITTEN}:
         return LEDGER_PROVEN
@@ -364,7 +355,7 @@ def _status(fact: OpenClawFact) -> str:
 def _statement(fact: OpenClawFact) -> str:
     detail = fact.detail
     command = detail.get("command") or "a command"
-    if fact.kind is FactKind.COMMAND_SUCCEEDED and _backgrounded(fact):
+    if fact.kind is FactKind.COMMAND_BACKGROUNDED:
         return f"`{command}` started in the background: whether it ran is not observed"
     if fact.kind is FactKind.COMMAND_SUCCEEDED:
         return f"`{command}` exited 0"
@@ -374,7 +365,7 @@ def _statement(fact: OpenClawFact) -> str:
     if fact.kind is FactKind.COMMAND_TIMED_OUT:
         return f"`{command}` timed out"
     if fact.kind is FactKind.FILE_WRITTEN:
-        return f"wrote {detail.get('bytes')} bytes to {detail.get('path')}"
+        return f"wrote {detail.get('path')} (reported size {detail.get('reported_size')})"
     if fact.kind is FactKind.CALL_BLOCKED:
         if detail.get("by_pathlayer"):
             return f"{fact.tool} call blocked by Pathlayer"

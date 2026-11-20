@@ -339,7 +339,10 @@ columns:
 The agent chooses the command, never its exit code, so these are observed
 facts. They say what each call did, not whether the task was done: a command
 that exited 0 proves it exited 0, and a write proves what was written then, not
-what the file holds now. Identical facts are grouped with a count, and every
+what the file holds now (its size is as the tool reported it: characters in
+OpenClaw 2026.7.1, UTF-8 bytes later). A timeout counts only when OpenClaw's
+failure kind says so; an `exec` whose approval was denied is a blocked call.
+Identical facts are grouped with a count, and every
 entry names the raw journal records it rests on. The ledger feeds no detector.
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
