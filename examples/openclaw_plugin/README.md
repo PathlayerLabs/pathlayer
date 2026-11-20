@@ -164,11 +164,13 @@ What this does and does not do:
 - **One run at a time.** Other runs and later requests are not affected; each
   OpenClaw run has its own pipeline. A blocked run is not ended: the agent can
   still answer without tools.
-- **Nothing extra is recorded.** The query carries identifiers only (run,
-  session, agent, tool name), never tool arguments. It is never journaled and
-  never reaches a detector, so recordings and their replay are the same with or
-  without `--enforce`. Blocked calls that OpenClaw still reports through
-  `after_tool_call` are recorded like any event after a STOP.
+- **The analysis is unchanged.** The query carries identifiers only (run,
+  session, agent, tool name), never tool arguments. It is logged with its
+  answer in the run's `gate.jsonl` (see below), with or without `--enforce`,
+  but never journaled with the events and never reaches a detector, so the
+  analysis and its replay are the same with or without `--enforce`. Blocked
+  calls that OpenClaw still reports through `after_tool_call` are recorded like
+  any event after a STOP.
 - **It fails open.** OpenClaw blocks a tool call when a `before_tool_call`
   handler throws or times out (15 seconds by default). The plugin never throws,
   gives up on Pathlayer after at most 0.8 s, and then lets the call run: a
