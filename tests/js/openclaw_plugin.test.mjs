@@ -111,15 +111,33 @@ test("the gate's own budget stays far below the hook timeout that would block", 
   assert.ok(worstCase * 4 <= opts.timeoutMs, `${worstCase} ms against ${opts.timeoutMs} ms`);
 });
 
-test("the query carries identifiers, never tool arguments", async () => {
+test("the query carries identifiers and a fingerprint, never tool arguments", async () => {
   await gate();
+  const digest = _internals.paramsDigest(toolEvent);
+  assert.match(digest, /^[0-9a-f]{64}$/);
   assert.deepEqual(received, [
     {
       hook: "before_tool_call",
-      event: { toolName: "exec", toolCallId: "call-1" },
+      event: { toolName: "exec", toolCallId: "call-1", paramsDigest: digest },
       ctx: { runId: "run-a", sessionKey: "s", agentId: "a" },
     },
   ]);
+  assert.ok(!JSON.stringify(received).includes("rm -rf build"));
+});
+
+test("the fingerprint is equal for identical calls and only for them", () => {
+  const digest = _internals.paramsDigest;
+  const a = { toolName: "exec", toolCallId: "c1", params: { command: "ls", cwd: "/w" } };
+  // Another call id and another key order: the same call.
+  const same = { toolName: "exec", toolCallId: "c2", params: { cwd: "/w", command: "ls" } };
+  assert.equal(digest(a), digest(same));
+  assert.notEqual(digest(a), digest({ ...a, params: { command: "ls -a", cwd: "/w" } }));
+  assert.notEqual(digest(a), digest({ ...a, toolName: "read" }));
+  assert.equal(digest({ toolName: "x" }), digest({ toolName: "x", params: undefined }));
+  const cycle = {};
+  cycle.self = cycle;
+  assert.equal(digest({ toolName: "x", params: cycle }), undefined);
+  assert.equal(digest({ toolName: "x", params: { n: 1n } }), undefined);
 });
 
 test("the query waits until the run's in-flight forward is answered", async () => {

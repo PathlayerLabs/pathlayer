@@ -139,6 +139,12 @@ _CAPTURE_METADATA_KEYS = (*PROOF_METADATA_KEYS, SESSION_METADATA_KEY)
 # The answer a ``before_tool_call`` query got, as logged in gate.jsonl.
 GATE_BLOCK = "block"
 GATE_ALLOW = "allow"
+# Identical tool calls (same tool, same arguments) one run may have in flight at
+# once before the gate blocks the next. OpenClaw runs the tool calls of one
+# assistant message in parallel, and decides every gate query of the batch
+# before any of them runs: a STOP that needs failures to be observed can never
+# stop such a batch. Three matches the retry detector's default threshold.
+DEFAULT_MAX_IDENTICAL_IN_FLIGHT = 3
 
 
 @dataclass(slots=True)
@@ -184,6 +190,10 @@ class _ActiveRun:
     # attempt has started, an identical end is that attempt's own: two attempts
     # can fail with the same error, snapshot and duration.
     last_attempt_end_digest: str | None = None
+    # Tool calls the gate let through and whose after_tool_call has not arrived
+    # yet: toolCallId -> the plugin's fingerprint of (tool, arguments). Used
+    # only by the gate's cap on identical calls in flight; never analyzed.
+    in_flight: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +300,7 @@ class OpenClawRunRecorder:
         scheduler: Scheduler | None = None,
         sample_rss: Callable[[], int | None] = sample_rss_bytes,
         enforce: bool = False,
+        max_identical_in_flight: int = DEFAULT_MAX_IDENTICAL_IN_FLIGHT,
     ) -> None:
         """Record runs under ``runs_root``, one pipeline per ``ctx.runId``.
 
@@ -302,6 +313,11 @@ class OpenClawRunRecorder:
         plugin's ``before_tool_call`` query (:meth:`tool_call_decision`). It is
         off by default: the recorder then never blocks anything.
 
+        ``max_identical_in_flight`` caps how many identical tool calls (same
+        tool, same arguments, as fingerprinted by the plugin) of one run may be
+        running at once; with ``enforce``, the next one is blocked. ``0``
+        disables the cap. See :meth:`tool_call_decision`.
+
         An invalid configuration raises :class:`~pathlayer.config.ConfigError`
         here, at construction: per-run pipelines are built lazily, and the HTTP
         ingest path deliberately swallows handler errors, so a config
@@ -309,6 +325,9 @@ class OpenClawRunRecorder:
         """
         if config is not None and pipeline_factory is not None:
             raise ValueError("pass either config or pipeline_factory, not both")
+        if isinstance(max_identical_in_flight, bool) or max_identical_in_flight < 0:
+            raise ValueError("max_identical_in_flight must be a non-negative int")
+        self._max_identical_in_flight = max_identical_in_flight
         self._store = RunStore(runs_root)
         self._pipeline_factory = pipeline_factory
         self._config: PathlayerConfig | None = None
@@ -632,6 +651,13 @@ class OpenClawRunRecorder:
         if active is None:
             return
         with active.lock:
+            if hook_kind is OpenClawHookKind.TOOL:
+                call_id = _hook_part(payload, "event").get("toolCallId")
+                if isinstance(call_id, str):
+                    active.in_flight.pop(call_id, None)
+            elif hook_kind in {OpenClawHookKind.RUN_START, OpenClawHookKind.RUN_END}:
+                # An attempt boundary: no tool call of the run is running.
+                active.in_flight.clear()
             if active.completed:
                 self._record_late_cost(_FinishedRun(active.directory), payload, hook_kind)
                 return
@@ -728,24 +754,49 @@ class OpenClawRunRecorder:
             active = self._runs.get(run_id)
         if active is None:
             return None
+        event = _hook_part(payload, "event")
+        tool_name = event.get("toolName")
+        call_id = event.get("toolCallId")
+        digest = event.get("paramsDigest")
         with active.lock:
             if active.completed:
                 return None
             stopped = active.pipeline.stopped
             reason: str | None = None
+            identical = 0
             if stopped:
                 post_mortem = active.pipeline.post_mortem
                 reason = post_mortem.reason if post_mortem is not None else "stop"
-            block = self._enforce and stopped
-            self._log_gate(active, payload, block=block, stopped=stopped, reason=reason)
+            elif isinstance(digest, str) and digest and self._max_identical_in_flight:
+                identical = sum(1 for other in active.in_flight.values() if other == digest)
+                if identical >= self._max_identical_in_flight:
+                    reason = (
+                        f"identical calls in flight: {identical} {tool_name} call(s) with "
+                        "the same arguments already running"
+                    )
+            capped = not stopped and reason is not None
+            block = self._enforce and (stopped or capped)
+            if not block and isinstance(call_id, str) and isinstance(digest, str) and digest:
+                active.in_flight[call_id] = digest
+            self._log_gate(
+                active,
+                payload,
+                block=block,
+                stopped=stopped,
+                reason=reason,
+                cap_exceeded=capped,
+            )
         if not block:
             return None
-        logger.info(
-            "blocking tool call %r of stopped OpenClaw run %r (%s)",
-            _hook_part(payload, "event").get("toolName"),
-            run_id,
-            reason,
-        )
+        logger.info("blocking tool call %r of OpenClaw run %r (%s)", tool_name, run_id, reason)
+        if capped:
+            return {
+                "block": True,
+                "blockReason": (
+                    f"Pathlayer blocked this call ({reason}). Do not repeat the same call: "
+                    "wait for the results of the calls already running."
+                ),
+            }
         return {
             "block": True,
             "blockReason": (
@@ -762,12 +813,14 @@ class OpenClawRunRecorder:
         block: bool,
         stopped: bool,
         reason: str | None,
+        cap_exceeded: bool = False,
     ) -> None:
         """Append one gate query and its answer to the run's ``gate.jsonl``.
 
         ``decision`` is what OpenClaw was told (``block`` or ``allow``);
         ``run_stopped`` says whether the run was stopped at that moment, so a
-        passive recording shows which calls an enforced one would have blocked.
+        passive recording shows which calls an enforced one would have blocked;
+        ``cap_exceeded`` does the same for the cap on identical calls in flight.
         ``answered_at`` is when the answer was computed, under the run's lock:
         the moment that orders it against a STOP. The line is flushed, not
         fsynced: the log is diagnostic, a torn last line is tolerated by its
@@ -780,8 +833,10 @@ class OpenClawRunRecorder:
             "answered_at": utc_now_iso(),
             "tool_call_id": event.get("toolCallId"),
             "tool_name": event.get("toolName"),
+            "params_digest": event.get("paramsDigest"),
             "decision": GATE_BLOCK if block else GATE_ALLOW,
             "run_stopped": stopped,
+            "cap_exceeded": cap_exceeded,
             "reason": reason,
             "enforced": self._enforce,
         }

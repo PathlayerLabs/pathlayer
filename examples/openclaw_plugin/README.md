@@ -171,6 +171,29 @@ What this does and does not do:
   analysis and its replay are the same with or without `--enforce`. Blocked
   calls that OpenClaw still reports through `after_tool_call` are recorded like
   any event after a STOP.
+- **Identical calls in flight are capped.** OpenClaw runs the tool calls of
+  one assistant message in parallel, and asks the gate about all of them before
+  any runs: a STOP that needs observed failures cannot stop such a batch (in a
+  live test, 20 identical calls ran although the run was stopped at the third
+  failure). The plugin therefore sends a one-way fingerprint of each call
+  (SHA-256 of the tool name and its arguments; the arguments themselves never
+  leave OpenClaw), and with `--enforce` a call is blocked when 3 identical
+  calls of the run are already running. Change the cap with
+  `--max-identical-in-flight N` (`0` disables it). The cap never blocks
+  sequential calls, distinct calls in one batch, or up to 3 identical ones
+  (labeled scenarios in `tests/fixtures/openclaw_gate/`). The agent receives:
+
+  ```text
+  Pathlayer blocked this call (identical calls in flight: 3 exec call(s) with
+  the same arguments already running). Do not repeat the same call: wait for
+  the results of the calls already running.
+  ```
+
+  A blocked call is reported back by OpenClaw as a failed call, so a burst of
+  several identical blocked calls can then trigger the retry detector's STOP.
+  On OpenAI-compatible APIs, `params.parallel_tool_calls: false` on the model
+  in OpenClaw's config also prevents parallel batches. OpenClaw 2026.10.10 and
+  later also has its own `repeated_tool_error` guard.
 - **It fails open.** OpenClaw blocks a tool call when a `before_tool_call`
   handler throws or times out (15 seconds by default). The plugin never throws,
   gives up on Pathlayer after at most 0.8 s, and then lets the call run: a

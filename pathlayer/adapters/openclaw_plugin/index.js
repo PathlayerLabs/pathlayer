@@ -27,6 +27,8 @@
  * down, slow, or answers anything but a block, the tool call runs.
  */
 
+import { createHash } from "node:crypto";
+
 // Keep in sync with DEFAULT_PORT in pathlayer/adapters/openclaw.py
 const DEFAULT_PORT = 8787;
 const PATHLAYER_URL = process.env.PATHLAYER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}/ingest`;
@@ -114,11 +116,46 @@ function delay(ms) {
   });
 }
 
-// Identifiers only: tool arguments never leave OpenClaw for a decision.
+function canonical(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonical);
+  }
+  if (value !== null && typeof value === "object") {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = canonical(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+// One-way fingerprint of (tool, arguments): equal for identical calls, so
+// Pathlayer can cap identical calls in flight without seeing the arguments.
+function paramsDigest(event) {
+  try {
+    const identity = JSON.stringify({
+      tool: event?.toolName ?? null,
+      params: canonical(event?.params ?? null),
+    });
+    return createHash("sha256").update(identity).digest("hex");
+  } catch {
+    // Unserializable arguments (a cycle, a BigInt): no fingerprint, no cap.
+    return undefined;
+  }
+}
+
+// Identifiers and a one-way fingerprint only: tool arguments never leave
+// OpenClaw for a decision.
 function decisionQuery(event, ctx) {
   return {
     hook: DECISION_HOOK,
-    event: { toolName: event?.toolName, toolCallId: event?.toolCallId, runId: event?.runId },
+    event: {
+      toolName: event?.toolName,
+      toolCallId: event?.toolCallId,
+      runId: event?.runId,
+      paramsDigest: paramsDigest(event),
+    },
     ctx: { runId: ctx?.runId, sessionKey: ctx?.sessionKey, agentId: ctx?.agentId },
   };
 }
@@ -172,6 +209,7 @@ const plugin = {
 
 // Read by the plugin's tests only.
 export const _internals = {
+  paramsDigest,
   DECISION_TIMEOUT_MS,
   DECISION_HOOK_TIMEOUT_MS,
   ORDERING_WAIT_MS,
