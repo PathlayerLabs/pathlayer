@@ -16,9 +16,13 @@ This module extracts them, and nothing else:
   on a run of identical successful calls; that needs its own labeled evidence.
 - It abstains on anything it cannot read: an absent, mistyped or malformed
   field yields no fact rather than a guess.
+- A command sent to the background with a trailing ``&`` is only known to
+  have been started. Edits, patches and writes that change nothing yield no
+  fact.
 - A fact says what a call did, never that the task was done. An exit code of 0
   proves that a command exited 0; a write proves that bytes were written at
-  that moment, not what the file holds now.
+  that moment, not what the file holds now, and its size is as the tool
+  reported it (characters in 2026.7.1, UTF-8 bytes later).
 
 Each fact points back to the raw journal record (``sequence``, which
 ``decisions.jsonl`` also names) and to the normalized event the recorder
@@ -42,6 +46,8 @@ from pathlayer.adapters.openclaw_lifecycle import AFTER_TOOL_CALL
 MAX_FACT_TEXT_CHARS = 200
 
 # "Successfully wrote 1113 bytes to chess/index.html": OpenClaw's write tool.
+# The number is a character count in 2026.7.1 and a UTF-8 byte count in later
+# versions, so it is kept as reported, not as bytes.
 _WROTE = re.compile(r"^Successfully wrote (\d+) bytes to (.+)$")
 
 
@@ -51,6 +57,7 @@ class FactKind(str, Enum):
     COMMAND_SUCCEEDED = "command_succeeded"
     COMMAND_FAILED = "command_failed"
     COMMAND_TIMED_OUT = "command_timed_out"
+    COMMAND_BACKGROUNDED = "command_backgrounded"
     FILE_WRITTEN = "file_written"
     CALL_BLOCKED = "call_blocked"
     CALL_FAILED = "call_failed"
@@ -126,15 +133,18 @@ def _fact(event: Mapping[str, Any], sequence: int) -> OpenClawFact | None:
             detail=detail,
         )
 
-    if details.get("status") == "blocked":
+    exec_denied = _exec_approval_denied(tool, result)
+    if details.get("status") == "blocked" or exec_denied is not None:
         reason = details.get("reason")
-        denied = details.get("deniedReason")
+        denied = exec_denied if exec_denied is not None else details.get("deniedReason")
         return make(
             FactKind.CALL_BLOCKED,
             {
                 "denied_reason": denied if isinstance(denied, str) else None,
                 "reason": _clip(reason) if isinstance(reason, str) else None,
-                "by_pathlayer": isinstance(reason, str) and reason.startswith("Pathlayer "),
+                "by_pathlayer": details.get("deniedReason") == "plugin-before-tool-call"
+                and isinstance(reason, str)
+                and reason.startswith("Pathlayer "),
             },
         )
     if tool == "exec":
@@ -157,19 +167,26 @@ def _exec_fact(
         "command_sha256": _sha256(command) if isinstance(command, str) else None,
         "cwd": details.get("cwd") if isinstance(details.get("cwd"), str) else None,
     }
-    if details.get("timedOut") is True:
+    failure_kind = details.get("failureKind")
+    if failure_kind in _TIMEOUT_FAILURE_KINDS:
         return make(FactKind.COMMAND_TIMED_OUT, base)
     exit_code = details.get("exitCode")
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        # No exit code: a background command, a signal, an unknown runtime.
-        # Nothing observed about how it ended.
+        # No exit code: still running (``background`` / ``yieldMs``), killed
+        # by a signal, or an unknown runtime. Nothing observed about its end.
         error = event.get("error")
         if isinstance(error, str) and error.strip():
             return make(FactKind.CALL_FAILED, {**base, "error": _clip(error.strip())})
         return None
-    if exit_code == 0:
+    if exit_code == 0 and details.get("status") == "completed" and not _has_error(event):
+        if isinstance(command, str) and _shell_backgrounded(command):
+            # The shell exited 0 after sending the command to the background:
+            # nothing says the command itself ran.
+            return make(FactKind.COMMAND_BACKGROUNDED, {**base, "exit_code": 0})
         return make(FactKind.COMMAND_SUCCEEDED, {**base, "exit_code": 0})
-    failure_kind = details.get("failureKind")
+    if exit_code == 0:
+        # Exit 0 with a failed status or an error: contradictory, no fact.
+        return None
     return make(
         FactKind.COMMAND_FAILED,
         {
@@ -193,12 +210,50 @@ def _write_fact(event: Mapping[str, Any], result: Any, make: _Make) -> OpenClawF
         FactKind.FILE_WRITTEN,
         {
             "path": match.group(2),
-            "bytes": int(match.group(1)),
+            # As the write tool reported it: characters in 2026.7.1, UTF-8
+            # bytes later.
+            "reported_size": int(match.group(1)),
+            "content_utf8_bytes": (
+                len(content.encode("utf-8")) if isinstance(content, str) else None
+            ),
             # The content the agent asked to write: what was written at that
             # moment, not what the file holds now.
             "content_sha256": _sha256(content) if isinstance(content, str) else None,
         },
     )
+
+
+# exec failure kinds that mean the command ran out of time. A denied approval
+# also sets ``timedOut`` when its reason mentions a timeout, without running.
+_TIMEOUT_FAILURE_KINDS = frozenset({"overall-timeout", "no-output-timeout"})
+
+
+def _has_error(event: Mapping[str, Any]) -> bool:
+    error = event.get("error")
+    return isinstance(error, str) and bool(error.strip())
+
+
+def _shell_backgrounded(command: str) -> bool:
+    """A command ending with a shell ``&`` (not ``&&``): sent to the background."""
+    stripped = command.rstrip()
+    return stripped.endswith("&") and not stripped.endswith("&&")
+
+
+def _exec_approval_denied(tool: str, result: Any) -> str | None:
+    """The reason of an ``exec`` the gateway's approval denied, or ``None``.
+
+    OpenClaw answers such a call with ``status: failed``, no exit code and the
+    text ``Exec denied (gateway id=..., <reason>): <command>``: the command
+    never ran.
+    """
+    if tool != "exec":
+        return None
+    text = _first_text(result)
+    if text is None or not text.startswith("Exec denied ("):
+        return None
+    head = text[len("Exec denied (") :].split(")", 1)[0]
+    reason = head.split(", ", 1)[1] if ", " in head else ""
+    return f"exec-approval: {reason}" if reason else "exec-approval"
 
 
 def _first_text(result: Any) -> str | None:

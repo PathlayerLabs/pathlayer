@@ -59,14 +59,57 @@ def test_exec_exit_codes_become_command_facts() -> None:
     assert ko.detail["failure_kind"] == "shell-command-not-found"
 
 
-def test_a_timed_out_command_is_its_own_fact() -> None:
-    (fact,) = extract_facts([_record(1, _exec("sleep 999", timedOut=True))])
+@pytest.mark.parametrize("failure_kind", ["overall-timeout", "no-output-timeout"])
+def test_a_timed_out_command_is_its_own_fact(failure_kind: str) -> None:
+    event = _exec("sleep 999", timedOut=True, failureKind=failure_kind)
+    event["result"]["details"]["status"] = "failed"
+    (fact,) = extract_facts([_record(1, event)])
     assert fact.kind is FactKind.COMMAND_TIMED_OUT
+
+
+def test_a_denied_exec_approval_is_a_block_not_a_timeout() -> None:
+    text = "Exec denied (gateway id=ap-1, approval-timeout: allowlist-miss): rm -rf build"
+    event = {
+        "toolName": "exec",
+        "params": {"command": "rm -rf build"},
+        "result": {
+            "content": [{"type": "text", "text": text}],
+            "details": {"status": "failed", "exitCode": None, "durationMs": 0, "timedOut": True},
+        },
+    }
+    (fact,) = extract_facts([_record(1, event)])
+    assert fact.kind is FactKind.CALL_BLOCKED
+    assert fact.detail["denied_reason"] == "exec-approval: approval-timeout: allowlist-miss"
+    assert fact.detail["by_pathlayer"] is False
+
+
+def test_a_shell_backgrounded_command_is_only_started() -> None:
+    # The real shape: the shell exits 0 at once, status completed.
+    command = "cd game && python3 -m http.server 8080 > /dev/null 2>&1 &"
+    (fact,) = extract_facts([_record(7, _exec(command, exitCode=0))])
+    assert fact.kind is FactKind.COMMAND_BACKGROUNDED
+    (chained,) = extract_facts([_record(8, _exec("make &&", exitCode=0))])
+    assert chained.kind is FactKind.COMMAND_SUCCEEDED
+
+
+@pytest.mark.parametrize("status", ["failed", "running"])
+def test_exit_zero_with_another_status_proves_nothing(status: str) -> None:
+    event = _exec("x", exitCode=0)
+    event["result"]["details"]["status"] = status
+    assert extract_facts([_record(1, event)]) == ()
+
+
+def test_exit_zero_with_an_error_proves_nothing() -> None:
+    event = _exec("x", exitCode=0)
+    event["error"] = "boom"
+    assert extract_facts([_record(1, event)]) == ()
 
 
 @pytest.mark.parametrize("exit_code", [None, "0", True, 1.0])
 def test_exec_without_a_usable_exit_code_proves_nothing(exit_code: Any) -> None:
-    event = _exec("server &")
+    # Still running (background=true / yieldMs), or killed by a signal.
+    event = _exec("serve")
+    event["result"]["details"]["status"] = "running"
     if exit_code is not None:
         event["result"]["details"]["exitCode"] = exit_code
     assert extract_facts([_record(1, event)]) == ()
@@ -94,7 +137,8 @@ def test_a_write_confirmation_becomes_a_file_fact() -> None:
     assert fact.kind is FactKind.FILE_WRITTEN
     assert fact.detail == {
         "path": "game/index.html",
-        "bytes": 15,
+        "reported_size": 15,
+        "content_utf8_bytes": 15,
         "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
     }
 
@@ -129,7 +173,7 @@ def test_a_blocked_call_says_who_blocked_it() -> None:
         "reason": reason,
     }
     other = _exec("rm -rf /")
-    other["result"]["details"] = {"status": "blocked", "deniedReason": "approval-denied"}
+    other["result"]["details"] = {"status": "blocked", "deniedReason": "plugin-approval"}
     by_pathlayer, by_other = extract_facts([_record(5, blocked), _record(6, other)])
 
     assert by_pathlayer.kind is FactKind.CALL_BLOCKED
