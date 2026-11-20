@@ -1,0 +1,52 @@
+{
+ "label": "healthy",
+ "description": "Boundary: exactly the cap of identical calls in flight is allowed.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "web_search",
+   "params": {
+    "query": "openclaw release notes"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

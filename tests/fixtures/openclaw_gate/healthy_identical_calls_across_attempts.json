@@ -1,0 +1,49 @@
+{
+ "label": "healthy",
+ "description": "Three identical calls whose results never arrived, then a failed attempt and a retry: the retry's identical call is allowed.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "make test"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "make test"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "make test"
+   }
+  },
+  {
+   "end": false
+  },
+  "start",
+  {
+   "query": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "make test"
+   }
+  },
+  {
+   "result": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "make test"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

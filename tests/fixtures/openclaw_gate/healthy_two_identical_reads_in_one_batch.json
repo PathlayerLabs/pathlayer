@@ -1,0 +1,52 @@
+{
+ "label": "healthy",
+ "description": "A model reads the same file twice in one message: redundant, harmless.",
+ "steps": [
+  "start",
+  {
+   "query": "c1",
+   "tool": "read",
+   "params": {
+    "path": "a.py"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "read",
+   "params": {
+    "path": "a.py"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "read",
+   "params": {
+    "path": "b.py"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "read",
+   "params": {
+    "path": "a.py"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "read",
+   "params": {
+    "path": "a.py"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "read",
+   "params": {
+    "path": "b.py"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

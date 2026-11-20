@@ -1,0 +1,310 @@
+{
+ "label": "loop",
+ "description": "The 2026-11-18 retest: one message with 20 identical calls that all fail.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c8",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c10",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c11",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c12",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c13",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c14",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c15",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c16",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c17",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c18",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "query": "c19",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c8",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c10",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c11",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c12",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c13",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c14",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c15",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c16",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c17",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c18",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "result": "c19",
+   "tool": "exec",
+   "params": {
+    "command": "cat /missing/file"
+   },
+   "error": "cat: /missing/file: No such file or directory"
+  },
+  {
+   "end": true
+  }
+ ]
+}
