@@ -751,7 +751,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     if provisional:
         last_error = attempt_end_error(attempt_ends[-1]) if attempt_ends else None
         notes.append(
-            f"provisional report: attempt {len(attempt_ends)} of this run ended in error "
+            f"provisional report: attempt {len(attempt_ends)} of this run did not succeed "
             f"({last_error or 'success=false'}). "
             "OpenClaw may start another attempt of the same run (after a "
             "compaction, a timeout or a provider failover); this report is rewritten when "
@@ -760,7 +760,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
     if completed and manifest.get("ended_by") == ENDED_BY_NEXT_RUN:
         notes.append(
             "this run ended when the next run of its session started: OpenClaw runs one run "
-            "at a time per session, so its last attempt, which ended in error, "
+            "at a time per session, so its last attempt, which did not succeed, "
             "was its end"
         )
     if completed and len(attempt_ends) > 1:
@@ -772,7 +772,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
         notes.append(
             f"OpenClaw ran this run in {len(attempt_ends)} attempts, {failed_attempts} of "
-            f"which ended in error; {measured}"
+            f"which did not succeed; {measured}"
         )
     error = manifest.get("error")
     if completed and manifest.get("outcome") == "error" and isinstance(error, str):

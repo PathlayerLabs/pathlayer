@@ -33,13 +33,15 @@ durable rather than reconstructed from a live pipeline.
 **A failed attempt does not end the run.** OpenClaw runs a loop of attempts
 under one ``runId``: after a context-overflow compaction, a timeout compaction
 or a provider failover it starts another attempt, and every attempt sends its
-own ``agent_end``. An ``agent_end`` whose ``success`` is exactly ``False`` is
+own ``agent_end``. An ``agent_end`` that reports a failure (``success: false``,
+an ``error``, or a last assistant message that ended in error, see
+:func:`~pathlayer.adapters.openclaw_lifecycle.attempt_end_failed`) is
 therefore the end of an attempt: the run becomes ``awaiting_retry`` (not
 terminal), gets a provisional report, and keeps its pipeline, sequence, cost
 and STOP. A later ``before_agent_run`` of the same ``runId`` resumes it; a
 model usage report does not, since OpenClaw sends one after every attempt, nor
 does a tool call, which can arrive after the failed end it preceded. The run
-ends for good at an ``agent_end`` with any other ``success`` value, when the
+ends for good at any other ``agent_end``, when the
 next run of its session starts (OpenClaw runs one run at a time per session),
 or at the startup sweep.
 """
@@ -188,6 +190,9 @@ class _ActiveRun:
     # attempt has started, an identical end is that attempt's own: two attempts
     # can fail with the same error, snapshot and duration.
     last_attempt_end_digest: str | None = None
+    # The run's session, kept in memory so finding the session's open run never
+    # reads every manifest from disk under the recorder's global lock.
+    session_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,7 +516,10 @@ class OpenClawRunRecorder:
                 )
                 atomic_write_json(run.trace_path, trace_to_dict(trace))
                 if waiting:
-                    run.update_manifest(**{INTERRUPTED_WHILE_AWAITING_RETRY: True})
+                    sealed: dict[str, Any] = {INTERRUPTED_WHILE_AWAITING_RETRY: True}
+                    if last_error is not None:
+                        sealed["error"] = last_error
+                    run.update_manifest(**sealed)
             except (OSError, ValueError, KeyError, TypeError, StateStoreError):
                 logger.exception(
                     "could not write the trace of OpenClaw run %r, left waiting for an attempt",
@@ -835,8 +843,7 @@ class OpenClawRunRecorder:
             candidates = [
                 run_id
                 for run_id, active in self._runs.items()
-                if not active.completed
-                and active.directory.read_manifest().get("session_key") == session_key
+                if not active.completed and active.session_key == session_key
             ]
         return candidates[0] if len(candidates) == 1 else None
 
@@ -935,6 +942,7 @@ class OpenClawRunRecorder:
                 directory=directory,
                 pipeline=pipeline,
                 cost_state=self._initial_cost_state(),
+                session_key=context.session_key,
             )
             self._arm_runtime(active)
             self._runs[run_id] = active
@@ -1012,9 +1020,11 @@ class OpenClawRunRecorder:
             pipeline = self._memory_pipeline()
             sequence, events = self._restore_recorded_events(existing, pipeline)
         sequence = max(sequence, _as_int(manifest.get("event_count")))
+        session_key = manifest.get("session_key")
         active = _ActiveRun(
             directory=existing,
             pipeline=pipeline,
+            session_key=session_key if isinstance(session_key, str) else None,
             sequence=sequence,
             started=existing.request_path.is_file(),
             events=events,
@@ -1749,11 +1759,7 @@ class OpenClawRunRecorder:
         health, health_reason = evaluate_health(
             active.pipeline, success=hook_event.get("success"), error=error
         )
-        outcome = run_outcome(
-            active.pipeline,
-            success=hook_event.get("success"),
-            failed=attempt_end_failed(hook_event),
-        )
+        outcome = run_outcome(active.pipeline, success=hook_event.get("success"), error=error)
         metadata: dict[str, Any] = {
             "run_id": active.directory.original_run_id,
             "session_key": hook_ctx.get("sessionKey"),
@@ -1904,26 +1910,28 @@ def evaluate_health(
     if pipeline.would_be_actions:
         tiers = sorted({entry.action.name for entry in pipeline.would_be_actions})
         return UNKNOWN_LABEL, f"dry-run would have acted: {', '.join(tiers)}"
-    if not pipeline.history:
-        return UNKNOWN_LABEL, "no tool call was analyzed"
     if error is not None:
         return UNKNOWN_LABEL, f"openclaw reported an error: {error}"
+    if not pipeline.history:
+        return UNKNOWN_LABEL, "no tool call was analyzed"
     if success is not True:
         return UNKNOWN_LABEL, f"agent_end did not report success (success={success!r})"
     return UNKNOWN_LABEL, "live recording requires human curation"
 
 
-def run_outcome(pipeline: Pipeline, *, success: Any, failed: bool) -> str:
+def run_outcome(pipeline: Pipeline, *, success: Any, error: str | None) -> str:
     """How a completed run ended, in one word: ``stopped``, ``error``, ``ok`` or ``unknown``.
 
     ``completed`` only says the run reached an end. This field says which one:
     Pathlayer stopped it, OpenClaw reported an error on its last attempt, or
     OpenClaw reported success. ``ok`` is OpenClaw's own claim, never a proof
-    that the task was done.
+    that the task was done. A last attempt that did not succeed without any
+    error text -- a user abort, which OpenClaw deliberately reports without
+    ``error`` -- is ``unknown``, not ``error``.
     """
     if pipeline.stopped:
         return OUTCOME_STOPPED
-    if failed:
+    if error is not None:
         return OUTCOME_ERROR
     if success is True:
         return OUTCOME_OK

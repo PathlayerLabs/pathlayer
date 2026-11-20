@@ -250,7 +250,7 @@ def test_the_next_attempt_continues_the_same_run(tmp_path: Path) -> None:
     assert report["outcome"] == "completed"
     assert report["duration_seconds"] == pytest.approx(4.0)
     assert any(
-        "2 attempts, 1 of which ended in error" in note
+        "2 attempts, 1 of which did not succeed" in note
         and "without the time between attempts" in note
         for note in report["notes"]
     )
@@ -978,7 +978,7 @@ def test_a_provider_error_ends_an_attempt_not_the_run(tmp_path: Path) -> None:
     assert not run.final_path.exists()
     assert any(
         note.startswith(
-            "provisional report: attempt 1 of this run ended in error (Context overflow)"
+            "provisional report: attempt 1 of this run did not succeed (Context overflow)"
         )
         for note in _report(run)["notes"]
     )
@@ -1173,3 +1173,60 @@ def test_an_attempt_error_is_truncated() -> None:
     assert attempt_end_error(["not", "an", "event"]) is None
     assert not attempt_end_failed({"success": True, "messages": "not a list"})
     assert not attempt_end_failed({"success": True, "messages": [{"role": "user"}]})
+
+
+def test_a_user_abort_is_not_reported_as_an_error(tmp_path: Path) -> None:
+    # OpenClaw reports an abort with success=false and no error, on purpose: it
+    # is not an errored completion.
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    end = _end("run-a", success=False)
+    del end["event"]["error"]
+    end["event"]["messages"] = [{"role": "assistant", "content": [], "stopReason": "aborted"}]
+    recorder.process_payload(end)
+    recorder.process_payload(_start("run-b"))
+
+    manifest = _run(tmp_path, "run-a").read_manifest()
+    assert manifest["outcome"] == "unknown"
+    assert "error" not in manifest
+    assert "did not report success" in manifest["health_reason"]
+
+
+def test_an_error_before_any_tool_call_is_named(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_error_end("run-a"))
+    recorder.process_payload(_start("run-b"))
+
+    manifest = _run(tmp_path, "run-a").read_manifest()
+    assert manifest["health_reason"] == "openclaw reported an error: Context overflow"
+
+
+def test_the_sweep_keeps_the_error_of_a_run_left_waiting(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    recorder.process_payload(_error_end("run-a"))
+
+    OpenClawRunRecorder(tmp_path).startup()
+
+    run = _run(tmp_path, "run-a")
+    manifest = run.read_manifest()
+    assert manifest["status"] == "interrupted"
+    assert manifest["error"] == "Context overflow"
+    trace = load_trace(run.trace_path)
+    assert trace.metadata["health_reason"] == "openclaw reported an error: Context overflow"
+
+
+def test_a_compaction_reaches_a_run_restored_after_a_restart(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    restarted = OpenClawRunRecorder(tmp_path)
+    # A hook of the run reattaches it in the new process, with its session.
+    restarted.process_payload(_tool("run-a", "c2"))
+    restarted.process_payload(_compaction("before_compaction"))
+
+    hooks = [r["payload"]["hook"] for r in _jsonl(_run(tmp_path, "run-a").raw_events_path)]
+    assert hooks[-1] == "before_compaction"

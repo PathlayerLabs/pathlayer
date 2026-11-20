@@ -271,14 +271,19 @@ release.
 | `health`            | curated verdict; live recordings remain `unknown`             |
 | `health_reason`     | observed OpenClaw/Pathlayer outcome awaiting human curation   |
 | `failed_attempts`   | attempts that ended in error (absent when none)               |
-| `outcome`           | on a `completed` run: `stopped` / `error` / `ok` / `unknown`  |
+| `outcome`           | on a `completed` run: `stopped` / `error` / `ok` / `unknown` (an abort is `unknown`) |
 | `error`             | OpenClaw's error text for the last attempt, truncated (absent when none) |
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
 was sound. `outcome` says which end it reached: Pathlayer stopped it
 (`stopped`), OpenClaw reported an error on its last attempt (`error`), or
 OpenClaw reported success (`ok`, OpenClaw's own claim, never a proof that the
-task was done). Live capture records OpenClaw's reported outcome and Pathlayer's
+task was done). A run whose last attempt failed is waiting for another
+attempt, so its `outcome` only appears when it ends: when the next run of its
+session starts, or as `interrupted` (with `error`) at the next listener start.
+A one-shot session, or one left with `/new`, keeps such a run waiting until
+then. In an OpenClaw incognito session the `agent_end` carries no messages and
+no error, so a provider error there is not seen and the run ends `ok`. Live capture records OpenClaw's reported outcome and Pathlayer's
 decision in `health_reason`, but always keeps `health` and the trace label
 at `unknown` until an explicit human curation step assigns ground truth. An
 absence of intervention is not evidence that the run was healthy, and a STOP
@@ -320,7 +325,7 @@ into a message instead of raising):
   a live timer would otherwise fire on a run that has already ended. If the
   deadline has passed, it fires at the next attempt's start.
 - `before_compaction` and `after_compaction` are journaled in the raw events of
-  the session's open run, counters only (`messageCount`, `tokenCount`,
+  the session's one run not yet ended (running or waiting for an attempt), counters only (`messageCount`, `tokenCount`,
   `compactedCount`, ...): the plugin never forwards the session history they
   carry. They are never analyzed. OpenClaw sends them with the session key
   only, so they are dropped when the session has no open run, or more than one.
