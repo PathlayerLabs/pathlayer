@@ -406,3 +406,57 @@ def test_facts_that_differ_are_not_grouped() -> None:
         ("`" + "x" * 19, 1),
         ("`" + "x" * 19, 1),
     ]
+
+
+def _proof(sequence: int, *, internal: bool = True, **parts: Any) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "sequence": sequence,
+        "payload": {"hook": "pathlayer_progress_proof", "for_event_id": "e", **parts},
+    }
+    if internal:
+        record["internal_lifecycle"] = True
+    return record
+
+
+_SPEC = {"proof_spec": {"required": ["build", "tests"]}}
+
+
+def test_contract_checkpoints_are_reported_at_their_last_observation() -> None:
+    records = [
+        _proof(2, **_SPEC, progress_proof={"checkpoints": {"build": False, "tests": False}}),
+        _proof(
+            4,
+            **_SPEC,
+            progress_proof={"checkpoints": {"build": True}},
+            progress_proof_unobserved={"unobserved": ["tests"], "reason": "timed out after 5s"},
+        ),
+    ]
+    entries = build_proof_ledger(records).entries
+    assert [(entry.status, entry.statement, entry.sequences) for entry in entries] == [
+        (LEDGER_PROVEN, "contract checkpoint `build` satisfied at the last probe (record 4)", (4,)),
+        (
+            LEDGER_UNPROVEN,
+            "contract checkpoint `tests` not observed by the last probe: timed out after 5s"
+            " (last observed not satisfied at record 2)",
+            (4,),
+        ),
+    ]
+
+
+def test_a_new_contract_resets_the_checkpoints() -> None:
+    records = [
+        _proof(2, **_SPEC, progress_proof={"checkpoints": {"build": True, "tests": True}}),
+        _proof(3, proof_spec={"required": ["deploy"]}),
+    ]
+    assert [entry.statement for entry in build_proof_ledger(records).entries] == [
+        "contract checkpoint `deploy`: never observed"
+    ]
+
+
+def test_a_proof_record_from_outside_the_recorder_is_ignored() -> None:
+    records = [
+        _proof(2, internal=False, **_SPEC, progress_proof={"checkpoints": {"build": True}}),
+        _proof(True, **_SPEC),  # type: ignore[arg-type]
+        {"sequence": 3, "internal_lifecycle": True, "payload": "not an object"},
+    ]
+    assert build_proof_ledger(records).entries == ()

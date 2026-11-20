@@ -50,6 +50,9 @@ from pathlayer.postmortem import (
     ProofLedger,
 )
 
+# The raw journal hook of the recorder's progress-probe records (ANC-2/ANC-4).
+PROOF_HOOK = "pathlayer_progress_proof"
+
 # Longest command or error text kept in a fact.
 MAX_FACT_TEXT_CHARS = 200
 
@@ -352,7 +355,96 @@ def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
         )
         for tool, sequences in silent.items()
     )
+    entries.extend(_contract_entries(materialized))
     return ProofLedger(entries=tuple(entries))
+
+
+def _contract_entries(records: list[Mapping[str, Any]]) -> list[LedgerEntry]:
+    """The checkpoints of the operator's progress contract, at their last observation.
+
+    Read from the proof records the recorder journals when a progress probe is
+    configured (``pathlayer_progress_proof``, internal records only: an
+    external payload can never use that hook). The probe runs outside the
+    agent, so a satisfied checkpoint is the strongest fact in the ledger. Each
+    required checkpoint of the latest contract is reported once, at its last
+    observation: satisfied (proven), not satisfied (failed), or not observed
+    by the last probe that named it (unproven).
+    """
+    required: tuple[str, ...] = ()
+    last: dict[str, tuple[str, int, str | None]] = {}
+    # The last observed value of each checkpoint, kept through unobserved probes.
+    known: dict[str, tuple[bool, int]] = {}
+    for record in records:
+        payload = record.get("payload")
+        sequence = record.get("sequence")
+        if record.get("internal_lifecycle") is not True or not isinstance(payload, Mapping):
+            continue
+        if payload.get("hook") != PROOF_HOOK:
+            continue
+        if isinstance(sequence, bool) or not isinstance(sequence, int):
+            continue
+        spec = payload.get("proof_spec")
+        if isinstance(spec, Mapping) and isinstance(spec.get("required"), list):
+            names = tuple(name for name in spec["required"] if isinstance(name, str))
+            if names != required:
+                required = names
+                last = {}
+                known = {}
+        proof = payload.get("progress_proof")
+        checkpoints = proof.get("checkpoints") if isinstance(proof, Mapping) else None
+        if isinstance(checkpoints, Mapping):
+            for name, value in checkpoints.items():
+                if isinstance(name, str) and isinstance(value, bool):
+                    status = LEDGER_PROVEN if value else LEDGER_FAILED
+                    last[name] = (status, sequence, None)
+                    known[name] = (value, sequence)
+        marker = payload.get("progress_proof_unobserved")
+        unobserved = marker.get("unobserved") if isinstance(marker, Mapping) else None
+        if isinstance(unobserved, list):
+            reason = marker.get("reason") if isinstance(marker, Mapping) else None
+            for name in unobserved:
+                if isinstance(name, str):
+                    last[name] = (
+                        LEDGER_UNPROVEN,
+                        sequence,
+                        _clip(reason) if isinstance(reason, str) else None,
+                    )
+    entries = []
+    for name in required:
+        if name not in last:
+            entries.append(
+                LedgerEntry(
+                    status=LEDGER_UNPROVEN,
+                    statement=f"contract checkpoint `{name}`: never observed",
+                    count=1,
+                    sequences=(),
+                )
+            )
+            continue
+        status, sequence, reason = last[name]
+        label = _inline(name)
+        if status == LEDGER_PROVEN:
+            statement = (
+                f"contract checkpoint `{label}` satisfied at the last probe (record {sequence})"
+            )
+        elif status == LEDGER_FAILED:
+            statement = (
+                f"contract checkpoint `{label}` not satisfied at the last probe (record {sequence})"
+            )
+        else:
+            why = f": {_inline(reason)}" if reason else ""
+            earlier = ""
+            if name in known:
+                value, seen_at = known[name]
+                state = "satisfied" if value else "not satisfied"
+                earlier = f" (last observed {state} at record {seen_at})"
+            statement = (
+                f"contract checkpoint `{label}` not observed by the last probe{why}{earlier}"
+            )
+        entries.append(
+            LedgerEntry(status=status, statement=statement, count=1, sequences=(sequence,))
+        )
+    return entries
 
 
 def _status(fact: OpenClawFact) -> str:

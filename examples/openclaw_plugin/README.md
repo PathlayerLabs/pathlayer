@@ -336,6 +336,12 @@ columns:
   started), and calls whose result says nothing observable about how they
   ended (a read, a search), counted per tool.
 
+With a progress contract configured (ANC-4, `detectors.progress_proof`), the
+ledger also lists each required checkpoint at its last observation by the
+operator's probe: satisfied (`proven`), not satisfied (`failed`), or not
+observed (`unproven`, with the probe's reason). The probe runs outside the
+agent, so these are the strongest entries.
+
 The agent chooses the command, never its exit code, so these are observed
 facts. They say what each call did, not whether the task was done: a command
 that exited 0 proves it exited 0, and a write proves what was written then, not
