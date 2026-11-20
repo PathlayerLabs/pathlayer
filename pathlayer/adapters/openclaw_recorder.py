@@ -136,6 +136,11 @@ _PROOF_HOOK = "pathlayer_progress_proof"
 _CAPTURE_METADATA_KEYS = (*PROOF_METADATA_KEYS, SESSION_METADATA_KEY)
 
 
+# The answer a ``before_tool_call`` query got, as logged in gate.jsonl.
+GATE_BLOCK = "block"
+GATE_ALLOW = "allow"
+
+
 @dataclass(slots=True)
 class _ActiveRun:
     directory: RunDirectory
@@ -705,17 +710,16 @@ class OpenClawRunRecorder:
         another attempt after a failed ``agent_end`` is not finished: its next
         attempt's tool calls stay blocked.
 
-        The query reads the run's pipeline state and writes nothing: no raw
-        journal line, no decision, no new run, so recordings and their replay
-        are the same with or without enforcement. A STOP is enforced from the
-        first query that arrives after the event that triggered it has been
-        processed; the reference plugin waits (for a bounded time) for its
-        previous forward of the run before asking.
+        Every query about a run being recorded is logged with its answer in the
+        run's ``gate.jsonl`` (see :meth:`_log_gate`), with or without
+        ``enforce``. Nothing else is written: no raw journal line, no decision,
+        no new run, so recordings and their replay are the same with or without
+        enforcement. A STOP is enforced from the first query that arrives after
+        the event that triggered it has been processed; the reference plugin
+        waits (for a bounded time) for its previous forward of the run before
+        asking.
         """
-        if (
-            not self._enforce
-            or classify_openclaw_hook(payload) is not OpenClawHookKind.TOOL_DECISION
-        ):
+        if classify_openclaw_hook(payload) is not OpenClawHookKind.TOOL_DECISION:
             return None
         run_id = extract_openclaw_run_id(payload)
         if run_id is None:
@@ -725,10 +729,17 @@ class OpenClawRunRecorder:
         if active is None:
             return None
         with active.lock:
-            if active.completed or not active.pipeline.stopped:
+            if active.completed:
                 return None
-            post_mortem = active.pipeline.post_mortem
-            reason = post_mortem.reason if post_mortem is not None else "stop"
+            stopped = active.pipeline.stopped
+            reason: str | None = None
+            if stopped:
+                post_mortem = active.pipeline.post_mortem
+                reason = post_mortem.reason if post_mortem is not None else "stop"
+            block = self._enforce and stopped
+            self._log_gate(active, payload, block=block, stopped=stopped, reason=reason)
+        if not block:
+            return None
         logger.info(
             "blocking tool call %r of stopped OpenClaw run %r (%s)",
             _hook_part(payload, "event").get("toolName"),
@@ -742,6 +753,45 @@ class OpenClawRunRecorder:
                 "report your progress and what blocked you."
             ),
         }
+
+    def _log_gate(
+        self,
+        active: _ActiveRun,
+        payload: dict[str, Any],
+        *,
+        block: bool,
+        stopped: bool,
+        reason: str | None,
+    ) -> None:
+        """Append one gate query and its answer to the run's ``gate.jsonl``.
+
+        ``decision`` is what OpenClaw was told (``block`` or ``allow``);
+        ``run_stopped`` says whether the run was stopped at that moment, so a
+        passive recording shows which calls an enforced one would have blocked.
+        ``answered_at`` is when the answer was computed, under the run's lock:
+        the moment that orders it against a STOP. The line is flushed, not
+        fsynced: the log is diagnostic, a torn last line is tolerated by its
+        readers, and an fsync on the gate's critical path could outlast the
+        plugin's budget and turn a block into a fail-open. A failure to log
+        never changes the answer: it is logged and dropped.
+        """
+        event = _hook_part(payload, "event")
+        record = {
+            "answered_at": utc_now_iso(),
+            "tool_call_id": event.get("toolCallId"),
+            "tool_name": event.get("toolName"),
+            "decision": GATE_BLOCK if block else GATE_ALLOW,
+            "run_stopped": stopped,
+            "reason": reason,
+            "enforced": self._enforce,
+        }
+        try:
+            with active.directory.gate_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            logger.exception(
+                "could not log a gate query of OpenClaw run %r", active.directory.original_run_id
+            )
 
     def attach_http(self, *, host: str = "127.0.0.1", port: int = 0) -> HttpIngestAdapter:
         """Start loopback ingest that routes payloads to this recorder.

@@ -164,11 +164,13 @@ What this does and does not do:
 - **One run at a time.** Other runs and later requests are not affected; each
   OpenClaw run has its own pipeline. A blocked run is not ended: the agent can
   still answer without tools.
-- **Nothing extra is recorded.** The query carries identifiers only (run,
-  session, agent, tool name), never tool arguments. It is never journaled and
-  never reaches a detector, so recordings and their replay are the same with or
-  without `--enforce`. Blocked calls that OpenClaw still reports through
-  `after_tool_call` are recorded like any event after a STOP.
+- **The analysis is unchanged.** The query carries identifiers only (run,
+  session, agent, tool name), never tool arguments. It is logged with its
+  answer in the run's `gate.jsonl` (see below), with or without `--enforce`,
+  but never journaled with the events and never reaches a detector, so the
+  analysis and its replay are the same with or without `--enforce`. Blocked
+  calls that OpenClaw still reports through `after_tool_call` are recorded like
+  any event after a STOP.
 - **It fails open.** OpenClaw blocks a tool call when a `before_tool_call`
   handler throws or times out (15 seconds by default). The plugin never throws,
   gives up on Pathlayer after at most 0.8 s, and then lets the call run: a
@@ -216,6 +218,7 @@ Each run directory contains:
 ├── events.raw.jsonl   # every hook payload (verbatim)
 ├── trace.json         # replayable ToolEvent trace (format: traces/README.md)
 ├── decisions.jsonl    # Pathlayer's per-tool-event tick: signals, score, action
+├── gate.jsonl         # every before_tool_call query and its answer (allow / block)
 ├── final.json         # agent_end snapshot
 └── report.json        # end-of-session report
 ```
@@ -323,6 +326,17 @@ reaches the ended run's `late.jsonl`) nor blocked (whether a run can actually
 be queued in that gap is unconfirmed). And if an attempt's `before_agent_run`
 is lost, that attempt runs with the duration watchdog paused, and a failed end
 identical to the previous one is taken for a repeated delivery.
+
+**Every tool-call gate query is logged.** Each `before_tool_call` query about
+a run being recorded is appended to its `gate.jsonl` with Pathlayer's answer
+and the time it was computed (`answered_at`): `decision` (`allow` or `block`), whether the run was stopped at that moment
+(`run_stopped`), the stop reason, and whether enforcement was on. The tool
+arguments are not in it: the plugin never sends them. The log is kept apart
+from `events.raw.jsonl` and is never analyzed or replayed, so a recording is
+the same with or without enforcement. The report's `tool_call_gate` section
+lists the blocked calls and, in a passive recording, counts the calls that ran
+after the STOP and would have been blocked with enforcement on. It says what
+Pathlayer answered, not that OpenClaw obeyed.
 
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being

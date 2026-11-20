@@ -17,6 +17,7 @@ from typing import Any
 
 from pathlayer.adapters import openclaw_cli
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
+from pathlayer.adapters.openclaw_report import build_run_report
 from pathlayer.adapters.openclaw_run_store import RunStore
 from pathlayer.config import DetectorsConfig, PathlayerConfig, ResourceConfig
 
@@ -67,12 +68,23 @@ def _decisions(recorder: OpenClawRunRecorder, run_id: str) -> list[dict[str, Any
 
 
 def _snapshot(recorder: OpenClawRunRecorder) -> dict[str, str]:
+    """Every recorded file except the gate log, which logs the queries themselves."""
     root = recorder.runs_root
     return {
         str(path.relative_to(root)): path.read_text(encoding="utf-8", errors="replace")
         for path in sorted(root.rglob("*"))
-        if path.is_file() and path.suffix not in {".db", ".db-wal", ".db-shm"}
+        if path.is_file()
+        and path.suffix not in {".db", ".db-wal", ".db-shm"}
+        and path.name != "gate.jsonl"
     }
+
+
+def _gate(recorder: OpenClawRunRecorder, run_id: str) -> list[dict[str, Any]]:
+    run = RunStore(recorder.runs_root).resolve_run(run_id)
+    assert run is not None
+    if not run.gate_path.is_file():
+        return []
+    return [json.loads(line) for line in run.gate_path.read_text(encoding="utf-8").splitlines()]
 
 
 def _loop_until_stop(recorder: OpenClawRunRecorder, run_id: str) -> list[dict[str, Any] | None]:
@@ -166,6 +178,121 @@ def test_queries_never_change_what_is_recorded(tmp_path: Path) -> None:
 
     assert _snapshot(recorder) == before
     assert RunStore(tmp_path).resolve_run("ghost") is None
+    # Only the two queries about the recorded run are logged.
+    assert len(_gate(recorder, "run-a")) == 8 + 2
+
+
+# --------------------------------------------------------------------------- #
+# Gate log (gate.jsonl)
+# --------------------------------------------------------------------------- #
+
+
+def test_every_gate_query_is_logged_with_its_answer(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    answers = _loop_until_stop(recorder, "run-a")
+
+    gate = _gate(recorder, "run-a")
+    assert [line["decision"] for line in gate] == [
+        "block" if answer is not None else "allow" for answer in answers
+    ]
+    assert all(line["enforced"] is True for line in gate)
+    assert all(line["tool_name"] == "exec" for line in gate)
+    blocked = [line for line in gate if line["decision"] == "block"]
+    assert blocked and all(line["run_stopped"] is True for line in blocked)
+    assert all(line["reason"].startswith("loop:") for line in blocked)
+    assert all(line["reason"] is None for line in gate if not line["run_stopped"])
+
+    recorder.process_payload(_end("run-a"))
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+    report = json.loads(run.report_path.read_text(encoding="utf-8"))
+    assert report["tool_call_gate"]["queries"] == len(gate)
+    assert report["tool_call_gate"]["enforced"] is True
+    assert len(report["tool_call_gate"]["blocked"]) == len(blocked)
+    assert report["tool_call_gate"]["would_have_blocked"] == 0
+    text = build_run_report(run).format()
+    assert (
+        f"tool-call gate (enforced): {len(gate)} tool call(s) checked, {len(blocked)} blocked"
+        in text
+    )
+    assert "  blocked exec (next) at " in text
+
+
+def test_a_passive_recording_logs_what_enforcement_would_have_blocked(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.startup()
+    answers = _loop_until_stop(recorder, "run-a")
+    assert answers == [None] * len(answers)
+
+    gate = _gate(recorder, "run-a")
+    assert all(line["decision"] == "allow" and line["enforced"] is False for line in gate)
+    stopped = [line for line in gate if line["run_stopped"]]
+    assert stopped
+
+    recorder.process_payload(_end("run-a"))
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+    report = json.loads(run.report_path.read_text(encoding="utf-8"))
+    assert report["tool_call_gate"]["blocked"] == []
+    assert report["tool_call_gate"]["would_have_blocked"] == len(stopped)
+    assert "would have been blocked with enforcement on" in build_run_report(run).format()
+
+
+def test_a_finished_or_unknown_run_logs_nothing(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_end("run-a"))
+
+    assert recorder.tool_call_decision(_query("run-a")) is None
+    assert recorder.tool_call_decision(_query("ghost")) is None
+    assert _gate(recorder, "run-a") == []
+    assert RunStore(tmp_path).resolve_run("ghost") is None
+
+
+def test_a_gate_log_failure_never_changes_the_answer(tmp_path: Path, monkeypatch: Any) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    _loop_until_stop(recorder, "run-a")
+
+    real_open = Path.open
+
+    def fail(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path.name == "gate.jsonl":
+            raise OSError("disk full")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail)
+    answer = recorder.tool_call_decision(_query("run-a"))
+    assert answer is not None and answer["block"] is True
+
+
+def test_a_report_without_a_gate_log_has_no_gate_section(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_read("run-a", 0))
+    recorder.process_payload(_end("run-a"))
+
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+    assert json.loads(run.report_path.read_text(encoding="utf-8"))["tool_call_gate"] is None
+
+
+def test_a_corrupt_gate_log_costs_only_the_gate_section(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    _loop_until_stop(recorder, "run-a")
+    recorder.process_payload(_end("run-a"))
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+    run.gate_path.write_text("not json\n{}\n", encoding="utf-8")
+
+    report = build_run_report(run)
+    assert report.tool_call_gate is None
+    assert any("tool-call gate log is corrupt" in note for note in report.notes)
+    assert report.actions
 
 
 class _Handle:
@@ -281,3 +408,24 @@ def test_the_recording_listener_enforces_only_with_enforce(tmp_path: Path) -> No
         recorder.startup()
         answers = _loop_until_stop(recorder, "run-a")
         assert (answers[-1] is not None) is expected
+
+
+def test_the_text_report_lists_the_first_blocked_calls_only(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    _loop_until_stop(recorder, "run-a")
+    for _ in range(20):
+        recorder.tool_call_decision(_query("run-a"))
+    recorder.process_payload(_end("run-a"))
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+
+    report = build_run_report(run)
+    assert report.tool_call_gate is not None
+    blocked = len(report.tool_call_gate.blocked)
+    assert blocked > 10
+    text = report.format()
+    assert text.count("  blocked exec") == 10
+    assert f"... and {blocked - 10} more blocked call(s)" in text
+    listed = json.loads(run.report_path.read_text(encoding="utf-8"))["tool_call_gate"]["blocked"]
+    assert len(listed) == blocked
