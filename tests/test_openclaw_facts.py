@@ -433,10 +433,11 @@ def test_contract_checkpoints_are_reported_at_their_last_observation() -> None:
     ]
     entries = build_proof_ledger(records).entries
     assert [(entry.status, entry.statement, entry.sequences) for entry in entries] == [
-        (LEDGER_PROVEN, "contract checkpoint `build` satisfied (operator probe)", (4,)),
+        (LEDGER_PROVEN, "contract checkpoint `build` satisfied at the last probe (record 4)", (4,)),
         (
             LEDGER_UNPROVEN,
-            "contract checkpoint `tests` not observed by the last probe: timed out after 5s",
+            "contract checkpoint `tests` not observed by the last probe: timed out after 5s"
+            " (last observed not satisfied at record 2)",
             (4,),
         ),
     ]
