@@ -38,6 +38,8 @@ _CTX = {"runId": _RUN, "sessionKey": "sess-1", "agentId": "agent-1"}
 
 
 def _digest(tool: str, params: dict[str, Any]) -> str:
+    # Any injective encoding will do here: the recorder only compares digests.
+    # The plugin's own (a keyed HMAC of its canonical JSON) is tested in JS.
     identity = json.dumps({"tool": tool, "params": params}, sort_keys=True)
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
@@ -133,17 +135,18 @@ def test_a_burst_runs_only_the_cap(tmp_path: Path) -> None:
 
     assert answers[:DEFAULT_MAX_IDENTICAL_IN_FLIGHT] == [None] * DEFAULT_MAX_IDENTICAL_IN_FLIGHT
     assert _cap_blocks(answers) == 20 - DEFAULT_MAX_IDENTICAL_IN_FLIGHT
+    assert DEFAULT_MAX_IDENTICAL_IN_FLIGHT == 4
     blocked = answers[DEFAULT_MAX_IDENTICAL_IN_FLIGHT]
     assert blocked is not None
     assert blocked["blockReason"].startswith(
-        "Pathlayer blocked this call (identical calls in flight: 3 exec call(s)"
+        "Pathlayer blocked this call (identical calls in flight: 4 exec call(s)"
     )
     gate = _gate(_run(tmp_path))
-    assert [line["cap_exceeded"] for line in gate] == [False] * 3 + [True] * 17
+    assert [line["cap_exceeded"] for line in gate] == [False] * 4 + [True] * 16
     assert all(line["params_digest"] == gate[0]["params_digest"] for line in gate)
     report = build_run_report(_run(tmp_path))
     assert report.tool_call_gate is not None
-    assert len(report.tool_call_gate.blocked) == 17
+    assert len(report.tool_call_gate.blocked) == 16
 
 
 def test_a_finished_call_frees_its_slot(tmp_path: Path) -> None:
@@ -152,17 +155,17 @@ def test_a_finished_call_frees_its_slot(tmp_path: Path) -> None:
     query = {"query": "c0", "tool": "exec", "params": {"command": "make"}}
     result = {"result": "c0", "tool": "exec", "params": {"command": "make"}}
     steps: list[Any] = ["start"]
-    for index in range(3):
+    for index in range(4):
         steps.append({**query, "query": f"c{index}"})
     steps.append({**result, "result": "c0"})
-    steps.append({**query, "query": "c3"})
     steps.append({**query, "query": "c4"})
+    steps.append({**query, "query": "c5"})
 
     answers = _play(recorder, steps)
 
-    # c3 takes the slot c0 freed; c4 is the fourth identical call in flight.
-    assert answers[:4] == [None] * 4
-    assert _cap_blocks(answers[4:]) == 1
+    # c4 takes the slot c0 freed; c5 is the fifth identical call in flight.
+    assert answers[:5] == [None] * 5
+    assert _cap_blocks(answers[5:]) == 1
 
 
 def test_a_passive_recording_logs_the_cap_without_blocking(tmp_path: Path) -> None:
@@ -170,14 +173,14 @@ def test_a_passive_recording_logs_the_cap_without_blocking(tmp_path: Path) -> No
     recorder.startup()
     steps: list[Any] = [
         "start",
-        *[{"query": f"c{i}", "tool": "exec", "params": {"command": "ls"}} for i in range(5)],
+        *[{"query": f"c{i}", "tool": "exec", "params": {"command": "ls"}} for i in range(6)],
     ]
 
     answers = _play(recorder, steps)
 
-    assert answers == [None] * 5
+    assert answers == [None] * 6
     gate = _gate(_run(tmp_path))
-    assert [line["cap_exceeded"] for line in gate] == [False] * 3 + [True] * 2
+    assert [line["cap_exceeded"] for line in gate] == [False] * 4 + [True] * 2
     assert all(line["decision"] == "allow" for line in gate)
     report = build_run_report(_run(tmp_path))
     assert report.tool_call_gate is not None
@@ -223,3 +226,34 @@ def test_the_cli_sets_the_cap(tmp_path: Path) -> None:
     assert default.max_identical_in_flight == DEFAULT_MAX_IDENTICAL_IN_FLIGHT
     with pytest.raises(SystemExit):
         parser.parse_args(["record", "--max-identical-in-flight", "-2"])
+
+
+def test_the_cap_adds_no_stop_to_a_run_that_would_not_stop_without_it(tmp_path: Path) -> None:
+    """Every healthy scenario ends unstopped with and without the cap, the same way."""
+    for path in _SCENARIOS:
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        if scenario["label"] != "healthy":
+            continue
+        outcomes = []
+        for cap in (DEFAULT_MAX_IDENTICAL_IN_FLIGHT, 0):
+            root = tmp_path / f"{path.stem}-{cap}"
+            recorder = OpenClawRunRecorder(root, enforce=True, max_identical_in_flight=cap)
+            recorder.startup()
+            _play(recorder, scenario["steps"])
+            outcomes.append(_run(root).read_manifest()["stopped"])
+        assert outcomes[0] == outcomes[1], path.stem
+
+
+def test_a_batch_the_cap_blocks_is_one_the_loop_detector_stops_anyway(tmp_path: Path) -> None:
+    """Without the cap, the identical calls of a capped batch are a loop STOP."""
+    calls = DEFAULT_MAX_IDENTICAL_IN_FLIGHT + 1
+    steps: list[Any] = [
+        "start",
+        *[{"query": f"c{i}", "tool": "exec", "params": {"command": "ls"}} for i in range(calls)],
+        *[{"result": f"c{i}", "tool": "exec", "params": {"command": "ls"}} for i in range(calls)],
+        {"end": True},
+    ]
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True, max_identical_in_flight=0)
+    recorder.startup()
+    _play(recorder, steps)
+    assert _run(tmp_path).read_manifest()["stopped"] is True

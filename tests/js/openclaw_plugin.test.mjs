@@ -138,6 +138,10 @@ test("the fingerprint is equal for identical calls and only for them", () => {
   cycle.self = cycle;
   assert.equal(digest({ toolName: "x", params: cycle }), undefined);
   assert.equal(digest({ toolName: "x", params: { n: 1n } }), undefined);
+  // Values JSON cannot hold are compared as JSON would send them.
+  const day = (iso) => ({ toolName: "x", params: { at: new Date(iso) } });
+  assert.notEqual(digest(day("2026-01-01")), digest(day("2026-01-02")));
+  assert.equal(digest(day("2026-01-01")), digest({ toolName: "x", params: { at: "2026-01-01T00:00:00.000Z" } }));
 });
 
 test("the query waits until the run's in-flight forward is answered", async () => {
