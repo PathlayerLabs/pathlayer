@@ -13,7 +13,8 @@ later tool calls (see [Enforce STOP](#enforce-stop-opt-in)).
 ```
 OpenClaw Gateway (Node)
   └── pathlayer-plugin
-        ├── before_agent_run, llm_output, after_tool_call, agent_end
+        ├── before_agent_run, llm_output, after_tool_call, agent_end,
+        │   before_compaction, after_compaction (counters only)
         │     └── POST http://127.0.0.1:8787/ingest  (fire-and-forget)
         └── before_tool_call
               └── POST .../ingest, awaited (fails open)  ->  allow, or block after a STOP
@@ -269,10 +270,15 @@ release.
 | `persistence_error` | storage error category after fail-open, otherwise `null`      |
 | `health`            | curated verdict; live recordings remain `unknown`             |
 | `health_reason`     | observed OpenClaw/Pathlayer outcome awaiting human curation   |
-| `failed_attempts`   | attempts that ended with `success: false` (absent when none)  |
+| `failed_attempts`   | attempts that ended in error (absent when none)               |
+| `outcome`           | on a `completed` run: `stopped` / `error` / `ok` / `unknown`  |
+| `error`             | OpenClaw's error text for the last attempt, truncated (absent when none) |
 
 A run reaching `agent_end` is `completed`, which says nothing about whether it
-was sound. Live capture records OpenClaw's reported outcome and Pathlayer's
+was sound. `outcome` says which end it reached: Pathlayer stopped it
+(`stopped`), OpenClaw reported an error on its last attempt (`error`), or
+OpenClaw reported success (`ok`, OpenClaw's own claim, never a proof that the
+task was done). Live capture records OpenClaw's reported outcome and Pathlayer's
 decision in `health_reason`, but always keeps `health` and the trace label
 at `unknown` until an explicit human curation step assigns ground truth. An
 absence of intervention is not evidence that the run was healthy, and a STOP
@@ -281,8 +287,13 @@ is a detector outcome rather than a curated failure class.
 **Runs with several attempts.** An OpenClaw run is a loop of attempts sharing
 one `runId`: after a context-overflow compaction, a timeout compaction or a
 provider failover, OpenClaw starts another attempt, and every attempt sends its
-own `agent_end` and then its own `llm_output`. An `agent_end` whose `success` is
-exactly `false` therefore ends an attempt, not the run:
+own `agent_end` and then its own `llm_output`. An `agent_end` that reports an
+error therefore ends an attempt, not the run. OpenClaw reports one in three
+ways: `success: false` (an abort, or a prompt error such as the
+context-overflow precheck), a non-blank `error`, or `success: true` with a last
+assistant message whose `stopReason` is `"error"` (the provider answered with
+an error, such as a context overflow it detected itself: agent-core turns it
+into a message instead of raising):
 
 - The run becomes `awaiting_retry`. This status is not terminal: no `final.json`,
   no `trace.json`. A provisional `report.json` (outcome `in_progress`) is written
@@ -294,8 +305,8 @@ exactly `false` therefore ends an attempt, not the run:
   attempt's last tool call can arrive after its end. Such a call is recorded
   and analyzed like any other. Usage received between two attempts counts
   in-run and reaches the budget.
-- The run ends for good at an `agent_end` with any other `success` value (an
-  absent value included, as before), or when the next run of its session starts:
+- The run ends for good at any other `agent_end` (an absent `success`
+  included, as before), or when the next run of its session starts:
   OpenClaw runs one run at a time per session, so the waiting run's failed
   attempt was its end (`ended_by: next_run_in_session` in the manifest). A run
   still waiting, or cut during a later attempt, at the next listener startup is
@@ -308,6 +319,11 @@ exactly `false` therefore ends an attempt, not the run:
   waits: OpenClaw sends no signal when a failed attempt was the run's last, and
   a live timer would otherwise fire on a run that has already ended. If the
   deadline has passed, it fires at the next attempt's start.
+- `before_compaction` and `after_compaction` are journaled in the raw events of
+  the session's open run, counters only (`messageCount`, `tokenCount`,
+  `compactedCount`, ...): the plugin never forwards the session history they
+  carry. They are never analyzed. OpenClaw sends them with the session key
+  only, so they are dropped when the session has no open run, or more than one.
 - The report's duration of a multi-attempt run is the sum of the attempts'
   durations as OpenClaw measured them; the time between attempts (compaction,
   backoff) is in no measurement. A run left waiting has no duration until it

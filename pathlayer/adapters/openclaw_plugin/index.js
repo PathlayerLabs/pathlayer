@@ -45,6 +45,16 @@ const DECISION_HOOK_TIMEOUT_MS = 5000;
 // the token counters it reports (input, output, cache) or, failing those, a
 // non-negative `usage.total`; it never infers a model call from `after_tool_call`.
 const FORWARDED_HOOKS = ["before_agent_run", "llm_output", "after_tool_call", "agent_end"];
+// Compaction hooks carry the whole session history: only their counters leave
+// OpenClaw. They prove a compaction happened; Pathlayer never analyzes them.
+const COMPACTION_HOOKS = ["before_compaction", "after_compaction"];
+const COMPACTION_FIELDS = [
+  "messageCount",
+  "compactingCount",
+  "tokenCount",
+  "compactedCount",
+  "previousSessionId",
+];
 const DECISION_HOOK = "before_tool_call";
 
 // The latest in-flight forward of each run.
@@ -98,14 +108,24 @@ function track(runId, sending) {
   });
 }
 
-function registerHook(api, hook) {
+function registerHook(api, hook, project = (event) => event) {
   api.on(
     hook,
     (event, ctx) => {
-      track(runIdOf(event, ctx), forward(api, hook, event, ctx));
+      track(runIdOf(event, ctx), forward(api, hook, project(event), ctx));
     },
     { timeoutMs: SEND_TIMEOUT_MS },
   );
+}
+
+function compactionCounters(event) {
+  const counters = {};
+  for (const field of COMPACTION_FIELDS) {
+    if (event?.[field] !== undefined) {
+      counters[field] = event[field];
+    }
+  }
+  return counters;
 }
 
 function delay(ms) {
@@ -159,19 +179,24 @@ const plugin = {
     for (const hook of FORWARDED_HOOKS) {
       registerHook(api, hook);
     }
+    for (const hook of COMPACTION_HOOKS) {
+      registerHook(api, hook, compactionCounters);
+    }
     api.on(DECISION_HOOK, (event, ctx) => decide(api, event, ctx), {
       timeoutMs: DECISION_HOOK_TIMEOUT_MS,
     });
     log(
       api,
       "info",
-      `[pathlayer] plugin registered (${[...FORWARDED_HOOKS, DECISION_HOOK].join(", ")}) -> ${PATHLAYER_URL}`,
+      `[pathlayer] plugin registered (${[...FORWARDED_HOOKS, ...COMPACTION_HOOKS, DECISION_HOOK].join(", ")}) -> ${PATHLAYER_URL}`,
     );
   },
 };
 
 // Read by the plugin's tests only.
 export const _internals = {
+  COMPACTION_HOOKS,
+  compactionCounters,
   DECISION_TIMEOUT_MS,
   DECISION_HOOK_TIMEOUT_MS,
   ORDERING_WAIT_MS,

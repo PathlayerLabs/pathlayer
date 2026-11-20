@@ -71,6 +71,8 @@ from pathlayer.adapters.openclaw_lifecycle import (
     AFTER_TOOL_CALL,
     AGENT_END,
     OpenClawHookKind,
+    attempt_end_error,
+    attempt_end_failed,
     classify_openclaw_hook,
     extract_openclaw_context,
     extract_openclaw_run_id,
@@ -134,6 +136,13 @@ _LIFECYCLE_HOOK = "pathlayer_lifecycle"
 # mismatched event and raises StateConcurrencyError.
 _PROOF_HOOK = "pathlayer_progress_proof"
 _CAPTURE_METADATA_KEYS = (*PROOF_METADATA_KEYS, SESSION_METADATA_KEY)
+
+
+# The ``outcome`` of a completed run (see run_outcome).
+OUTCOME_OK = "ok"
+OUTCOME_ERROR = "error"
+OUTCOME_STOPPED = "stopped"
+OUTCOME_UNKNOWN = "unknown"
 
 
 @dataclass(slots=True)
@@ -477,14 +486,20 @@ class OpenClawRunRecorder:
                     _, events = self._restore_recorded_events(run, pipeline)
                 else:
                     pipeline, events = entry
-                health, health_reason = evaluate_health(pipeline, success=False)
+                failed_ends = _failed_attempt_ends(run)
+                last_error = (
+                    attempt_end_error(_hook_part(failed_ends[-1][0], "event"))
+                    if failed_ends
+                    else None
+                )
+                health, health_reason = evaluate_health(pipeline, success=False, error=last_error)
                 metadata: dict[str, Any] = {
                     "run_id": run.original_run_id,
                     "session_key": manifest.get("session_key"),
                     "agent_id": manifest.get("agent_id"),
                     "recorded_at": utc_now_iso(),
                     "health_reason": health_reason,
-                    "failed_attempts": len(_failed_attempt_ends(run)),
+                    "failed_attempts": len(failed_ends),
                 }
                 if waiting:
                     metadata[INTERRUPTED_WHILE_AWAITING_RETRY] = True
@@ -616,6 +631,16 @@ class OpenClawRunRecorder:
             # never journaled, never analyzed, and it never creates a run.
             return
         run_id = extract_openclaw_run_id(payload)
+        if hook_kind is OpenClawHookKind.COMPACTION:
+            # OpenClaw sends compaction hooks with the session key only. They
+            # are a fact about the session's current run, never a run of their
+            # own: no orphan directory, and dropped when that run is unknown.
+            run_id = run_id or self._current_session_run_id(payload)
+            if run_id is None:
+                return
+            with self._lock:
+                if run_id not in self._runs:
+                    return
         if run_id is None:
             run_id = self._orphan_run_id(payload)
         elif hook_kind is OpenClawHookKind.RUN_START:
@@ -795,6 +820,25 @@ class OpenClawRunRecorder:
                 },
             )
             _write_report(directory)
+
+    def _current_session_run_id(self, payload: dict[str, Any]) -> str | None:
+        """The one run of the payload's session this process is recording, if any.
+
+        OpenClaw runs one run at a time per session (its session lane has a
+        concurrency of 1), so a single open run of the session is the run the
+        hook belongs to. Zero or several open runs: no attribution.
+        """
+        session_key = extract_openclaw_context(payload).session_key
+        if session_key is None:
+            return None
+        with self._lock:
+            candidates = [
+                run_id
+                for run_id, active in self._runs.items()
+                if not active.completed
+                and active.directory.read_manifest().get("session_key") == session_key
+            ]
+        return candidates[0] if len(candidates) == 1 else None
 
     def _orphan_run_id(self, payload: dict[str, Any]) -> str:
         context = extract_openclaw_context(payload)
@@ -1701,7 +1745,15 @@ class OpenClawRunRecorder:
             "raw": payload,
         }
         atomic_write_json(active.directory.final_path, final_doc)
-        health, health_reason = evaluate_health(active.pipeline, success=hook_event.get("success"))
+        error = attempt_end_error(hook_event)
+        health, health_reason = evaluate_health(
+            active.pipeline, success=hook_event.get("success"), error=error
+        )
+        outcome = run_outcome(
+            active.pipeline,
+            success=hook_event.get("success"),
+            failed=attempt_end_failed(hook_event),
+        )
         metadata: dict[str, Any] = {
             "run_id": active.directory.original_run_id,
             "session_key": hook_ctx.get("sessionKey"),
@@ -1710,7 +1762,9 @@ class OpenClawRunRecorder:
         }
         if health_reason is not None:
             metadata["health_reason"] = health_reason
-        attempt_fields: dict[str, Any] = {}
+        attempt_fields: dict[str, Any] = {"outcome": outcome}
+        if error is not None:
+            attempt_fields["error"] = error
         if active.failed_attempts:
             attempt_fields["failed_attempts"] = active.failed_attempts
         if superseded_by is not None:
@@ -1830,7 +1884,9 @@ class OpenClawRunRecorder:
         append_jsonl(active.directory.decisions_path, decision)
 
 
-def evaluate_health(pipeline: Pipeline, *, success: Any) -> tuple[str, str]:
+def evaluate_health(
+    pipeline: Pipeline, *, success: Any, error: str | None = None
+) -> tuple[str, str]:
     """Describe the observed outcome without inventing a ground-truth label.
 
     Live capture can establish what OpenClaw reported and what Pathlayer
@@ -1850,18 +1906,38 @@ def evaluate_health(pipeline: Pipeline, *, success: Any) -> tuple[str, str]:
         return UNKNOWN_LABEL, f"dry-run would have acted: {', '.join(tiers)}"
     if not pipeline.history:
         return UNKNOWN_LABEL, "no tool call was analyzed"
+    if error is not None:
+        return UNKNOWN_LABEL, f"openclaw reported an error: {error}"
     if success is not True:
         return UNKNOWN_LABEL, f"agent_end did not report success (success={success!r})"
     return UNKNOWN_LABEL, "live recording requires human curation"
 
 
-def _is_failed_attempt_end(payload: dict[str, Any]) -> bool:
-    """An ``agent_end`` reporting ``success`` exactly ``False``: an attempt, not the run.
+def run_outcome(pipeline: Pipeline, *, success: Any, failed: bool) -> str:
+    """How a completed run ended, in one word: ``stopped``, ``error``, ``ok`` or ``unknown``.
 
-    Any other value -- ``True``, absent, ``None``, a string -- keeps the
-    historical meaning: the run ended.
+    ``completed`` only says the run reached an end. This field says which one:
+    Pathlayer stopped it, OpenClaw reported an error on its last attempt, or
+    OpenClaw reported success. ``ok`` is OpenClaw's own claim, never a proof
+    that the task was done.
     """
-    return payload.get("hook") == AGENT_END and _hook_part(payload, "event").get("success") is False
+    if pipeline.stopped:
+        return OUTCOME_STOPPED
+    if failed:
+        return OUTCOME_ERROR
+    if success is True:
+        return OUTCOME_OK
+    return OUTCOME_UNKNOWN
+
+
+def _is_failed_attempt_end(payload: dict[str, Any]) -> bool:
+    """An ``agent_end`` that closes a failed attempt: an attempt, not the run.
+
+    See :func:`~pathlayer.adapters.openclaw_lifecycle.attempt_end_failed` for
+    what counts as failed. Any other end keeps the historical meaning: the run
+    ended.
+    """
+    return payload.get("hook") == AGENT_END and attempt_end_failed(_hook_part(payload, "event"))
 
 
 def _attempt_end_digest(payload: dict[str, Any]) -> str:

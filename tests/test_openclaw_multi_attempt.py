@@ -250,7 +250,7 @@ def test_the_next_attempt_continues_the_same_run(tmp_path: Path) -> None:
     assert report["outcome"] == "completed"
     assert report["duration_seconds"] == pytest.approx(4.0)
     assert any(
-        "2 attempts, 1 of which ended with success=false" in note
+        "2 attempts, 1 of which ended in error" in note
         and "without the time between attempts" in note
         for note in report["notes"]
     )
@@ -472,7 +472,9 @@ def test_the_next_run_of_the_session_ends_a_waiting_run(tmp_path: Path) -> None:
     assert manifest["status"] == "completed"
     assert manifest["ended_by"] == "next_run_in_session"
     assert manifest["superseded_by_run_id"] == "run-b"
-    assert "did not report success" in manifest["health_reason"]
+    assert manifest["health_reason"] == "openclaw reported an error: context overflow"
+    assert manifest["outcome"] == "error"
+    assert manifest["error"] == "context overflow"
     final = json.loads(run.final_path.read_text(encoding="utf-8"))
     assert final["success"] is False
     assert final["sequence"] == _jsonl(run.raw_events_path)[-1]["sequence"]
@@ -933,3 +935,241 @@ def test_a_compaction_that_rereads_the_same_files_is_not_stopped(tmp_path: Path)
     assert run.read_manifest()["failed_attempts"] == 2
     assert "STOP" not in _live_actions(run)
     assert run.read_manifest()["stopped"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Attempts that end in error without success=false (2026-11-18 retest)
+# --------------------------------------------------------------------------- #
+
+
+def _error_end(
+    run_id: str, *, error_message: str | None = "Context overflow", session: str = "sess-1"
+) -> dict[str, Any]:
+    """An ``agent_end`` after a provider error: ``success`` stays true.
+
+    agent-core turns a provider error into an assistant message with
+    ``stopReason: "error"`` instead of raising, so OpenClaw computes
+    ``success = !aborted && !promptError`` as true.
+    """
+    last: dict[str, Any] = {"role": "assistant", "content": [], "stopReason": "error"}
+    if error_message is not None:
+        last["errorMessage"] = error_message
+    return {
+        "hook": "agent_end",
+        "event": {
+            "success": True,
+            "durationMs": 1000,
+            "messages": [{"role": "user", "content": "go"}, last],
+        },
+        "ctx": _ctx(run_id, session),
+    }
+
+
+def test_a_provider_error_ends_an_attempt_not_the_run(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    recorder.process_payload(_error_end("run-a"))
+
+    run = _run(tmp_path, "run-a")
+    manifest = run.read_manifest()
+    assert manifest["status"] == "awaiting_retry"
+    assert manifest["failed_attempts"] == 1
+    assert not run.final_path.exists()
+    assert any(
+        note.startswith(
+            "provisional report: attempt 1 of this run ended in error (Context overflow)"
+        )
+        for note in _report(run)["notes"]
+    )
+
+    # OpenClaw compacts and retries under the same runId.
+    recorder.process_payload(_start("run-a", prompt="compacted"))
+    recorder.process_payload(_tool("run-a", "c2"))
+    recorder.process_payload(_end("run-a", success=True))
+
+    manifest = run.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["failed_attempts"] == 1
+    assert manifest["outcome"] == "ok"
+    assert "error" not in manifest
+    assert [event.tool for event in load_trace(run.trace_path).events] == ["read", "read"]
+
+
+def test_a_provider_error_on_the_last_attempt_is_the_run_outcome(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    recorder.process_payload(_error_end("run-a"))
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_error_end("run-a"))
+    # OpenClaw gave up and told the user, with no further hook: the next run of
+    # the session is what proves the run is over.
+    recorder.process_payload(_start("run-b"))
+
+    run = _run(tmp_path, "run-a")
+    manifest = run.read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["outcome"] == "error"
+    assert manifest["error"] == "Context overflow"
+    assert manifest["failed_attempts"] == 2
+    assert manifest["health_reason"] == "openclaw reported an error: Context overflow"
+    trace = load_trace(run.trace_path)
+    assert trace.metadata["outcome"] == "error"
+    report = _report(run)
+    assert report["outcome"] == "completed"
+    assert any(
+        note.startswith("OpenClaw reported an error on this run's last attempt: Context overflow")
+        for note in report["notes"]
+    )
+
+
+def test_a_precheck_overflow_ends_in_error(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    end = _end("run-a", success=False)
+    end["event"]["error"] = "Context overflow: prompt too large for the model (precheck)."
+    recorder.process_payload(end)
+    recorder.process_payload(_start("run-b"))
+
+    manifest = _run(tmp_path, "run-a").read_manifest()
+    assert manifest["outcome"] == "error"
+    assert manifest["error"] == "Context overflow: prompt too large for the model (precheck)."
+
+
+def test_a_provider_error_without_a_message_still_ends_the_attempt(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_error_end("run-a", error_message=None))
+    recorder.process_payload(_start("run-b"))
+
+    manifest = _run(tmp_path, "run-a").read_manifest()
+    assert manifest["outcome"] == "error"
+    assert manifest["error"] == "the provider ended the reply with an error"
+
+
+@pytest.mark.parametrize("stop_reason", ["stop", "toolUse", "aborted", "length", None])
+def test_a_reply_that_did_not_end_in_error_ends_the_run(
+    tmp_path: Path, stop_reason: str | None
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    end = _end("run-a", success=True)
+    end["event"]["messages"] = [{"role": "assistant", "content": [], "stopReason": stop_reason}]
+    recorder.process_payload(end)
+
+    manifest = _run(tmp_path, "run-a").read_manifest()
+    assert manifest["status"] == "completed"
+    assert manifest["outcome"] == "ok"
+    assert "failed_attempts" not in manifest
+
+
+def test_an_earlier_assistant_error_does_not_fail_the_attempt(tmp_path: Path) -> None:
+    # Only the reply that ended the attempt counts: an error the agent recovered
+    # from earlier in the session history says nothing about this attempt.
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    end = _end("run-a", success=True)
+    end["event"]["messages"] = [
+        {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "overloaded"},
+        {"role": "user", "content": "retry"},
+        {"role": "assistant", "content": [], "stopReason": "stop"},
+    ]
+    recorder.process_payload(end)
+
+    assert _run(tmp_path, "run-a").read_manifest()["outcome"] == "ok"
+
+
+def test_a_stopped_run_reports_the_stop_as_its_outcome(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.process_payload(_start("run-a"))
+    _stop_in_first_attempt(recorder, "run-a")
+    recorder.process_payload(_end("run-a", success=True))
+
+    assert _run(tmp_path, "run-a").read_manifest()["outcome"] == "stopped"
+
+
+# --------------------------------------------------------------------------- #
+# Compaction hooks
+# --------------------------------------------------------------------------- #
+
+
+def _compaction(hook: str, *, session: str = "sess-1") -> dict[str, Any]:
+    # OpenClaw sends compaction hooks with the session key only, no runId.
+    return {
+        "hook": hook,
+        "event": {"messageCount": 63, "compactedCount": 1},
+        "ctx": {"sessionKey": session},
+    }
+
+
+def test_compaction_hooks_are_journaled_in_the_sessions_run_and_never_analyzed(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    recorder.process_payload(_error_end("run-a"))
+    recorder.process_payload(_compaction("before_compaction"))
+    recorder.process_payload(_compaction("after_compaction"))
+    run = _run(tmp_path, "run-a")
+    # A compaction is no new attempt: the run keeps waiting.
+    assert run.read_manifest()["status"] == "awaiting_retry"
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c2"))
+    recorder.process_payload(_end("run-a", success=True))
+
+    hooks = [record["payload"]["hook"] for record in _jsonl(run.raw_events_path)]
+    assert hooks.count("before_compaction") == 1
+    assert hooks.count("after_compaction") == 1
+    assert [line["event_index"] for line in _jsonl(run.decisions_path)] == [0, 1]
+    assert [event.tool for event in load_trace(run.trace_path).events] == ["read", "read"]
+    assert [other.original_run_id for other in RunStore(tmp_path).list_runs()] == ["run-a"]
+
+
+def test_a_compaction_hook_without_a_known_run_is_dropped(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_compaction("before_compaction"))
+    recorder.process_payload(_start("run-a", session="other"))
+    recorder.process_payload(_compaction("after_compaction", session="sess-1"))
+
+    assert [run.original_run_id for run in RunStore(tmp_path).list_runs()] == ["run-a"]
+    hooks = [
+        record["payload"]["hook"] for record in _jsonl(_run(tmp_path, "run-a").raw_events_path)
+    ]
+    assert hooks == ["before_agent_run"]
+
+
+def test_a_compaction_hook_is_not_attributed_when_the_session_has_two_open_runs(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_tool("run-a", "c1"))
+    # Not supposed to happen (one run at a time per session), so no guess.
+    recorder.process_payload(_tool("run-x", "c1"))
+    recorder.process_payload(_compaction("before_compaction"))
+
+    for run_id in ("run-a", "run-x"):
+        hooks = [r["payload"]["hook"] for r in _jsonl(_run(tmp_path, run_id).raw_events_path)]
+        assert "before_compaction" not in hooks
+
+
+def test_an_attempt_error_is_truncated() -> None:
+    from pathlayer.adapters.openclaw_lifecycle import (
+        MAX_ATTEMPT_ERROR_CHARS,
+        attempt_end_error,
+        attempt_end_failed,
+    )
+
+    long_error = "x" * (MAX_ATTEMPT_ERROR_CHARS + 50)
+    text = attempt_end_error({"success": False, "error": long_error})
+    assert text is not None and len(text) == MAX_ATTEMPT_ERROR_CHARS and text.endswith("...")
+    assert attempt_end_error({"success": False, "error": "  "}) is None
+    assert attempt_end_failed({"success": False, "error": "  "})
+    assert not attempt_end_failed("not an event")
+    assert attempt_end_error(["not", "an", "event"]) is None
+    assert not attempt_end_failed({"success": True, "messages": "not a list"})
+    assert not attempt_end_failed({"success": True, "messages": [{"role": "user"}]})
