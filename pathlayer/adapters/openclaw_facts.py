@@ -41,6 +41,13 @@ from enum import Enum
 from typing import Any
 
 from pathlayer.adapters.openclaw_lifecycle import AFTER_TOOL_CALL
+from pathlayer.postmortem import (
+    LEDGER_FAILED,
+    LEDGER_PROVEN,
+    LEDGER_UNPROVEN,
+    LedgerEntry,
+    ProofLedger,
+)
 
 # Longest command or error text kept in a fact.
 MAX_FACT_TEXT_CHARS = 200
@@ -282,3 +289,95 @@ def _sha256(text: str) -> str:
 def facts_to_json(facts: Iterable[OpenClawFact]) -> str:
     """Deterministic JSON of a fact list (sorted keys), for snapshots and exports."""
     return json.dumps([fact.to_dict() for fact in facts], sort_keys=True, ensure_ascii=False)
+
+
+def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
+    """The proof ledger of a run: its facts in three columns, identical ones grouped.
+
+    - **proven**: commands that exited 0, files written (what the runtime
+      confirmed, at that moment);
+    - **failed**: commands that exited non-zero or timed out, failed calls,
+      blocked calls;
+    - **unproven**: commands sent to the background (their exit 0 only says
+      they started), and tool calls whose result says nothing observable about
+      how they ended (a read, a search), counted per tool.
+
+    Identical facts (same kind, same command, path or error) are one entry with
+    a count, in the order of their first occurrence.
+    """
+    materialized = list(records)
+    facts = extract_facts(materialized)
+    with_fact = {fact.sequence for fact in facts}
+    groups: dict[tuple[str, str], list[OpenClawFact]] = {}
+    for fact in facts:
+        groups.setdefault((_status(fact), _statement(fact)), []).append(fact)
+    entries = [
+        LedgerEntry(
+            status=status,
+            statement=statement,
+            count=len(group),
+            sequences=tuple(fact.sequence for fact in group),
+        )
+        for (status, statement), group in groups.items()
+    ]
+    silent: dict[str, list[int]] = {}
+    for record in materialized:
+        sequence = record.get("sequence")
+        payload = record.get("payload")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence in with_fact:
+            continue
+        if not isinstance(payload, Mapping) or payload.get("hook") != AFTER_TOOL_CALL:
+            continue
+        event = payload.get("event")
+        tool = event.get("toolName") if isinstance(event, Mapping) else None
+        if isinstance(tool, str) and tool:
+            silent.setdefault(tool, []).append(sequence)
+    entries.extend(
+        LedgerEntry(
+            status=LEDGER_UNPROVEN,
+            statement=f"{tool}: no observable outcome",
+            count=len(sequences),
+            sequences=tuple(sequences),
+        )
+        for tool, sequences in silent.items()
+    )
+    return ProofLedger(entries=tuple(entries))
+
+
+def _backgrounded(fact: OpenClawFact) -> bool:
+    """A shell command sent to the background: its exit 0 only says it started."""
+    command = fact.detail.get("command")
+    if not isinstance(command, str):
+        return False
+    stripped = command.rstrip()
+    return stripped.endswith("&") and not stripped.endswith("&&")
+
+
+def _status(fact: OpenClawFact) -> str:
+    if fact.kind is FactKind.COMMAND_SUCCEEDED and _backgrounded(fact):
+        return LEDGER_UNPROVEN
+    if fact.kind in {FactKind.COMMAND_SUCCEEDED, FactKind.FILE_WRITTEN}:
+        return LEDGER_PROVEN
+    return LEDGER_FAILED
+
+
+def _statement(fact: OpenClawFact) -> str:
+    detail = fact.detail
+    command = detail.get("command") or "a command"
+    if fact.kind is FactKind.COMMAND_SUCCEEDED and _backgrounded(fact):
+        return f"`{command}` started in the background: whether it ran is not observed"
+    if fact.kind is FactKind.COMMAND_SUCCEEDED:
+        return f"`{command}` exited 0"
+    if fact.kind is FactKind.COMMAND_FAILED:
+        kind = f", {detail['failure_kind']}" if detail.get("failure_kind") else ""
+        return f"`{command}` exited {detail.get('exit_code')}{kind}"
+    if fact.kind is FactKind.COMMAND_TIMED_OUT:
+        return f"`{command}` timed out"
+    if fact.kind is FactKind.FILE_WRITTEN:
+        return f"wrote {detail.get('bytes')} bytes to {detail.get('path')}"
+    if fact.kind is FactKind.CALL_BLOCKED:
+        if detail.get("by_pathlayer"):
+            return f"{fact.tool} call blocked by Pathlayer"
+        denied = detail.get("denied_reason") or "no reason given"
+        return f"{fact.tool} call blocked by OpenClaw ({denied})"
+    return f"{fact.tool} failed: {detail.get('error')}"

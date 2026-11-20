@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from pathlayer.adapters.openclaw import translate_openclaw_llm_event
+from pathlayer.adapters.openclaw_facts import build_proof_ledger
 from pathlayer.adapters.openclaw_lifecycle import (
     AGENT_END,
     BEFORE_AGENT_RUN,
@@ -69,6 +70,7 @@ from pathlayer.postmortem import (
     CostAttribution,
     CostBreakdown,
     CostShare,
+    ProofLedger,
     SessionReport,
     SignalObservation,
     TickRecord,
@@ -861,7 +863,13 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             else "trace.json is absent: this run was cut before its final agent_end"
         )
 
-    return build_session_report(
+    try:
+        raw_records, _ = _read_journal(run.raw_events_path)
+        ledger: ProofLedger | None = build_proof_ledger(raw_records)
+    except ValueError:
+        ledger = None
+        notes.append("the raw event journal is corrupt: the proof ledger is not reported")
+    report = build_session_report(
         run_id=str(manifest.get("run_id") or run.original_run_id),
         status=status,
         ticks=ticks,
@@ -877,6 +885,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         duration_seconds=duration,
         notes=notes,
     )
+    return replace(report, proof_ledger=ledger)
 
 
 def write_run_report(run: RunDirectory) -> SessionReport:

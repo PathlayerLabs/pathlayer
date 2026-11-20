@@ -850,6 +850,74 @@ class ActionTaken:
         }
 
 
+LEDGER_PROVEN = "proven"
+LEDGER_FAILED = "failed"
+LEDGER_UNPROVEN = "unproven"
+_LEDGER_ORDER = (LEDGER_PROVEN, LEDGER_FAILED, LEDGER_UNPROVEN)
+# Ledger entries listed one by one per column in the text report.
+_MAX_LEDGER_LINES = 12
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerEntry:
+    """One line of a proof ledger: an observed fact, how often, and where.
+
+    ``status`` is :data:`LEDGER_PROVEN` (the runtime observed it done, e.g. a
+    command exited 0), :data:`LEDGER_FAILED` (the runtime observed it fail or
+    refused it) or :data:`LEDGER_UNPROVEN` (nothing observable says how it
+    ended). ``sequences`` are the raw journal records the entry rests on.
+    """
+
+    status: str
+    statement: str
+    count: int
+    sequences: tuple[int, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "statement": self.statement,
+            "count": self.count,
+            "sequences": list(self.sequences),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProofLedger:
+    """What a run's tool calls are observed to have done, in three columns.
+
+    Every entry is an observation of one or more tool calls, never a verdict on
+    the task: a command that exited 0 proves that it exited 0, not that the
+    work it was meant to check is right.
+    """
+
+    entries: tuple[LedgerEntry, ...]
+
+    def column(self, status: str) -> tuple[LedgerEntry, ...]:
+        return tuple(entry for entry in self.entries if entry.status == status)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            status: [entry.to_dict() for entry in self.column(status)] for status in _LEDGER_ORDER
+        }
+
+    def describe_lines(self) -> list[str]:
+        lines = ["proof ledger (observed facts, not a verdict on the task):"]
+        for status in _LEDGER_ORDER:
+            column = self.column(status)
+            if not column:
+                lines.append(f"  {status}: none")
+                continue
+            lines.append(f"  {status}:")
+            for entry in column[:_MAX_LEDGER_LINES]:
+                times = f" (x{entry.count})" if entry.count > 1 else ""
+                lines.append(f"    {entry.statement}{times}")
+            hidden = len(column) - _MAX_LEDGER_LINES
+            if hidden > 0:
+                lines.append(f"    ... and {hidden} more (all listed in report.json)")
+        return lines
+
+
 @dataclass(frozen=True, slots=True)
 class IncidentFinding:
     """One contiguous detector incident in the user-facing report.
@@ -1095,6 +1163,7 @@ class SessionReport:
     stop_reason: str | None = None
     dry_run: bool = False
     notes: tuple[str, ...] = ()
+    proof_ledger: ProofLedger | None = None
 
     @property
     def emitted_actions(self) -> tuple[ActionTaken, ...]:
@@ -1142,6 +1211,7 @@ class SessionReport:
             "stop_reason": self.stop_reason,
             "dry_run": self.dry_run,
             "notes": list(self.notes),
+            "proof_ledger": self.proof_ledger.to_dict() if self.proof_ledger is not None else None,
         }
 
     def summary(self) -> str:
@@ -1171,6 +1241,8 @@ class SessionReport:
         lines.extend(self._finding_lines())
         lines.append(self._fused_line())
         lines.extend(self._action_lines())
+        if self.proof_ledger is not None:
+            lines.extend(self.proof_ledger.describe_lines())
         if self.stop_reason:
             lines.append(f"stop reason: {self.stop_reason}")
         lines.extend(f"note: {note}" for note in self.notes)

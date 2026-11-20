@@ -324,6 +324,24 @@ be queued in that gap is unconfirmed). And if an attempt's `before_agent_run`
 is lost, that attempt runs with the duration watchdog paused, and a failed end
 identical to the previous one is taken for a repeated delivery.
 
+**The proof ledger says what the tool calls did.** `report.json` (and the text
+report) carries a `proof_ledger` read from the run's raw journal, in three
+columns:
+
+- `proven`: what OpenClaw's runtime observed done: a command that exited 0
+  (`result.details.exitCode`), a file the `write` tool confirmed writing;
+- `failed`: a command that exited non-zero or timed out, a failed call, a call
+  blocked by Pathlayer or by OpenClaw;
+- `unproven`: a command sent to the background (its exit 0 only says it
+  started), and calls whose result says nothing observable about how they
+  ended (a read, a search), counted per tool.
+
+The agent chooses the command, never its exit code, so these are observed
+facts. They say what each call did, not whether the task was done: a command
+that exited 0 proves it exited 0, and a write proves what was written then, not
+what the file holds now. Identical facts are grouped with a count, and every
+entry names the raw journal records it rests on. The ledger feeds no detector.
+
 **A STOP does not end recording.** Pathlayer is a passive observer in V1: after
 a STOP the detectors and arbitration stop running, but events keep being
 normalized, kept in order and appended to `trace.json`. Those events appear in

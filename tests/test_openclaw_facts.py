@@ -17,11 +17,14 @@ import pytest
 from pathlayer.adapters.openclaw_facts import (
     MAX_FACT_TEXT_CHARS,
     FactKind,
+    build_proof_ledger,
     extract_facts,
     facts_to_json,
 )
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
+from pathlayer.adapters.openclaw_report import build_run_report
 from pathlayer.adapters.openclaw_run_store import RunStore
+from pathlayer.postmortem import LEDGER_FAILED, LEDGER_PROVEN, LEDGER_UNPROVEN
 
 
 def _record(sequence: int, event: dict[str, Any], hook: str = "after_tool_call") -> dict[str, Any]:
@@ -245,3 +248,131 @@ def test_facts_point_at_the_analyzed_events(tmp_path: Path) -> None:
     assert [fact.sequence for fact in facts] == [line["sequence"] for line in decisions]
     assert [fact.tool for fact in facts] == [line["tool"] for line in decisions]
     assert [fact.kind for fact in facts] == [FactKind.COMMAND_FAILED, FactKind.COMMAND_SUCCEEDED]
+
+
+# --------------------------------------------------------------------------- #
+# Proof ledger
+# --------------------------------------------------------------------------- #
+
+
+def _write(path: str, size: int) -> dict[str, Any]:
+    return {
+        "toolName": "write",
+        "params": {"path": path, "content": "x" * size},
+        "result": {
+            "content": [{"type": "text", "text": f"Successfully wrote {size} bytes to {path}"}]
+        },
+    }
+
+
+def _blocked() -> dict[str, Any]:
+    event = _exec("cat missing")
+    event["result"]["details"] = {
+        "status": "blocked",
+        "deniedReason": "plugin-before-tool-call",
+        "reason": "Pathlayer stopped this run (retry). Do not call more tools.",
+    }
+    return event
+
+
+def test_the_ledger_sorts_facts_into_three_columns() -> None:
+    failed = _exec("node --check app.js", exitCode=127, failureKind="shell-command-not-found")
+    records = [
+        _record(1, {"prompt": "go"}, hook="before_agent_run"),
+        _record(2, _exec("mkdir -p game", exitCode=0)),
+        _record(3, _write("game/app.js", 10)),
+        _record(4, _exec("python3 -m http.server 8080 &", exitCode=0)),
+        _record(5, failed),
+        _record(6, {"toolName": "read", "params": {"path": "a"}, "result": "text"}),
+        _record(7, {"toolName": "read", "params": {"path": "b"}, "result": "text"}),
+    ]
+    ledger = build_proof_ledger(records)
+
+    assert [entry.statement for entry in ledger.column(LEDGER_PROVEN)] == [
+        "`mkdir -p game` exited 0",
+        "wrote 10 bytes to game/app.js",
+    ]
+    assert [entry.statement for entry in ledger.column(LEDGER_FAILED)] == [
+        "`node --check app.js` exited 127, shell-command-not-found"
+    ]
+    unproven = ledger.column(LEDGER_UNPROVEN)
+    assert [entry.statement for entry in unproven] == [
+        "`python3 -m http.server 8080 &` started in the background: whether it ran is not observed",
+        "read: no observable outcome",
+    ]
+    assert unproven[1].count == 2 and unproven[1].sequences == (6, 7)
+
+
+def test_identical_facts_are_one_entry_with_a_count() -> None:
+    records = [_record(i, _exec("cat missing", exitCode=1)) for i in (2, 3, 4)]
+    records.append(_record(5, _blocked()))
+    ledger = build_proof_ledger(records)
+
+    failed = ledger.column(LEDGER_FAILED)
+    assert [(entry.statement, entry.count) for entry in failed] == [
+        ("`cat missing` exited 1", 3),
+        ("exec call blocked by Pathlayer", 1),
+    ]
+    assert failed[0].sequences == (2, 3, 4)
+    text = "\n".join(ledger.describe_lines())
+    assert "`cat missing` exited 1 (x3)" in text
+    assert "proven: none" in text
+    assert text.startswith("proof ledger (observed facts, not a verdict on the task):")
+
+
+def test_a_command_chain_ending_in_and_is_not_backgrounded() -> None:
+    ledger = build_proof_ledger([_record(1, _exec("make &&", exitCode=0))])
+    assert [entry.status for entry in ledger.entries] == [LEDGER_PROVEN]
+
+
+def test_other_failures_and_blocks_are_worded_for_what_they_are() -> None:
+    other = _exec("rm -rf /")
+    other["result"]["details"] = {"status": "blocked"}
+    timed_out = _exec("sleep 99", timedOut=True)
+    failed_write = {"toolName": "write", "params": {"path": "/x"}, "error": "EACCES"}
+    ledger = build_proof_ledger(
+        [_record(1, other), _record(2, timed_out), _record(3, failed_write)]
+    )
+    assert [entry.statement for entry in ledger.column(LEDGER_FAILED)] == [
+        "exec call blocked by OpenClaw (no reason given)",
+        "`sleep 99` timed out",
+        "write failed: EACCES",
+    ]
+
+
+def test_the_text_ledger_lists_the_first_entries_of_a_column() -> None:
+    records = [_record(i, _exec(f"step {i}", exitCode=0)) for i in range(1, 21)]
+    lines = build_proof_ledger(records).describe_lines()
+    assert sum(1 for line in lines if line.startswith("    `step")) == 12
+    assert "    ... and 8 more (all listed in report.json)" in lines
+
+
+def test_the_report_carries_the_ledger(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    ctx = {"runId": "run-a", "sessionKey": "s", "agentId": "a"}
+    recorder.process_payload({"hook": "before_agent_run", "event": {}, "ctx": ctx})
+    event = _exec("make test", exitCode=0)
+    event["runId"] = "run-a"
+    recorder.process_payload({"hook": "after_tool_call", "event": event, "ctx": ctx})
+    recorder.process_payload({"hook": "agent_end", "event": {"success": True}, "ctx": ctx})
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+
+    report = json.loads(run.report_path.read_text(encoding="utf-8"))
+    assert report["proof_ledger"]["proven"][0]["statement"] == "`make test` exited 0"
+    assert report["proof_ledger"]["failed"] == []
+    assert "`make test` exited 0" in build_run_report(run).format()
+
+
+def test_a_corrupt_raw_journal_costs_only_the_ledger(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    ctx = {"runId": "run-a", "sessionKey": "s", "agentId": "a"}
+    recorder.process_payload({"hook": "before_agent_run", "event": {}, "ctx": ctx})
+    recorder.process_payload({"hook": "agent_end", "event": {"success": True}, "ctx": ctx})
+    run = RunStore(tmp_path).resolve_run("run-a")
+    assert run is not None
+    run.raw_events_path.write_text("garbage\n{}\n", encoding="utf-8")
+
+    report = build_run_report(run)
+    assert report.proof_ledger is None
+    assert any("proof ledger is not reported" in note for note in report.notes)
