@@ -138,6 +138,15 @@ class RunDirectory:
         return self.root / "report.json"
 
     @property
+    def gate_path(self) -> Path:
+        """Append-only log of the ``before_tool_call`` gate: every query and its answer.
+
+        Kept apart from ``events.raw.jsonl``: a gate query is not an
+        observation, so it is never analyzed or replayed.
+        """
+        return self.root / "gate.jsonl"
+
+    @property
     def late_events_path(self) -> Path:
         """Append-only annex of cost hooks that arrived after the run ended."""
         return self.root / "late.jsonl"

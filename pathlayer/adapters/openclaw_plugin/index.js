@@ -27,6 +27,8 @@
  * down, slow, or answers anything but a block, the tool call runs.
  */
 
+import { createHmac, randomBytes } from "node:crypto";
+
 // Keep in sync with DEFAULT_PORT in pathlayer/adapters/openclaw.py
 const DEFAULT_PORT = 8787;
 const PATHLAYER_URL = process.env.PATHLAYER_URL ?? `http://127.0.0.1:${DEFAULT_PORT}/ingest`;
@@ -173,11 +175,54 @@ function delay(ms) {
   });
 }
 
-// Identifiers only: tool arguments never leave OpenClaw for a decision.
+// Keyed per plugin process: equal calls get equal fingerprints within one
+// gateway process, and a fingerprint in gate.jsonl cannot be confirmed by
+// hashing guessed arguments.
+const DIGEST_KEY = randomBytes(32);
+
+function canonical(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonical);
+  }
+  if (value !== null && typeof value === "object") {
+    const sorted = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = canonical(value[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+// Keyed fingerprint of (tool, arguments): equal for identical calls, so
+// Pathlayer can cap identical calls in flight without seeing the arguments.
+// The JSON round trip first applies toJSON (a Date) and drops what JSON drops,
+// so canonical() only ever sees plain JSON values.
+function paramsDigest(event) {
+  try {
+    const params = event?.params === undefined ? null : JSON.parse(JSON.stringify(event.params));
+    const identity = JSON.stringify({
+      tool: event?.toolName ?? null,
+      params: canonical(params ?? null),
+    });
+    return createHmac("sha256", DIGEST_KEY).update(identity).digest("hex");
+  } catch {
+    // Unserializable arguments (a cycle, a BigInt): no fingerprint, no cap.
+    return undefined;
+  }
+}
+
+// Identifiers and a keyed fingerprint only: tool arguments never leave
+// OpenClaw for a decision.
 function decisionQuery(event, ctx) {
   return {
     hook: DECISION_HOOK,
-    event: { toolName: event?.toolName, toolCallId: event?.toolCallId, runId: event?.runId },
+    event: {
+      toolName: event?.toolName,
+      toolCallId: event?.toolCallId,
+      runId: event?.runId,
+      paramsDigest: paramsDigest(event),
+    },
     ctx: { runId: ctx?.runId, sessionKey: ctx?.sessionKey, agentId: ctx?.agentId },
   };
 }
@@ -236,6 +281,7 @@ const plugin = {
 export const _internals = {
   COMPACTION_HOOKS,
   compactionCounters,
+  paramsDigest,
   DECISION_TIMEOUT_MS,
   DECISION_HOOK_TIMEOUT_MS,
   ORDERING_WAIT_MS,

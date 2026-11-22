@@ -36,7 +36,10 @@ from pathlib import Path
 from typing import IO
 
 from pathlayer.adapters.openclaw import DEFAULT_PORT
-from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
+from pathlayer.adapters.openclaw_recorder import (
+    DEFAULT_MAX_IDENTICAL_IN_FLIGHT,
+    OpenClawRunRecorder,
+)
 from pathlayer.adapters.openclaw_run_store import runs_root_from_env
 from pathlayer.config import ConfigError, PathlayerConfig, load_config
 
@@ -86,6 +89,16 @@ def _port(value: str) -> int:
     return port
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = -1
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"invalid count {value!r}: expected 0 or more")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The ``pathlayer-openclaw`` parser. Environment defaults are read here."""
     parser = argparse.ArgumentParser(
@@ -128,6 +141,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--enforce",
         action="store_true",
         help="block the tool calls of a run after Pathlayer stops it (default: observe only)",
+    )
+    record.add_argument(
+        "--max-identical-in-flight",
+        type=_non_negative_int,
+        default=DEFAULT_MAX_IDENTICAL_IN_FLIGHT,
+        metavar="N",
+        help=(
+            "with --enforce, block a tool call when N identical calls (same tool, "
+            "same arguments) of the run are already running "
+            f"(default: {DEFAULT_MAX_IDENTICAL_IN_FLIGHT}; 0: no cap)"
+        ),
     )
 
     commands.add_parser(
@@ -196,7 +220,12 @@ def build_recorder(args: argparse.Namespace) -> OpenClawRunRecorder:
     """
     config = load_listener_config(args.config)
     try:
-        return OpenClawRunRecorder(args.runs_root, config=config, enforce=args.enforce)
+        return OpenClawRunRecorder(
+            args.runs_root,
+            config=config,
+            enforce=args.enforce,
+            max_identical_in_flight=args.max_identical_in_flight,
+        )
     except ConfigError as exc:
         raise SystemExit(f"invalid Pathlayer config: {exc}") from exc
     except OSError as exc:

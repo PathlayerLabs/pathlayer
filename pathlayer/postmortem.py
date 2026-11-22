@@ -850,6 +850,142 @@ class ActionTaken:
         }
 
 
+LEDGER_PROVEN = "proven"
+LEDGER_FAILED = "failed"
+LEDGER_UNPROVEN = "unproven"
+_LEDGER_ORDER = (LEDGER_PROVEN, LEDGER_FAILED, LEDGER_UNPROVEN)
+# Ledger entries listed one by one per column in the text report.
+_MAX_LEDGER_LINES = 12
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerEntry:
+    """One line of a proof ledger: an observed fact, how often, and where.
+
+    ``status`` is :data:`LEDGER_PROVEN` (the runtime observed it done, e.g. a
+    command exited 0), :data:`LEDGER_FAILED` (the runtime observed it fail or
+    refused it) or :data:`LEDGER_UNPROVEN` (nothing observable says how it
+    ended). ``sequences`` are the raw journal records the entry rests on.
+    """
+
+    status: str
+    statement: str
+    count: int
+    sequences: tuple[int, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "statement": self.statement,
+            "count": self.count,
+            "sequences": list(self.sequences),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProofLedger:
+    """What a run's tool calls are observed to have done, in three columns.
+
+    Every entry is an observation of one or more tool calls, never a verdict on
+    the task: a command that exited 0 proves that it exited 0, not that the
+    work it was meant to check is right.
+    """
+
+    entries: tuple[LedgerEntry, ...]
+
+    def column(self, status: str) -> tuple[LedgerEntry, ...]:
+        return tuple(entry for entry in self.entries if entry.status == status)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            status: [entry.to_dict() for entry in self.column(status)] for status in _LEDGER_ORDER
+        }
+
+    def describe_lines(self) -> list[str]:
+        lines = ["proof ledger (observed facts, not a verdict on the task):"]
+        for status in _LEDGER_ORDER:
+            column = self.column(status)
+            if not column:
+                lines.append(f"  {status}: none")
+                continue
+            lines.append(f"  {status}:")
+            for entry in column[:_MAX_LEDGER_LINES]:
+                times = f" (x{entry.count})" if entry.count > 1 else ""
+                lines.append(f"    {entry.statement}{times}")
+            hidden = len(column) - _MAX_LEDGER_LINES
+            if hidden > 0:
+                lines.append(f"    ... and {hidden} more (all listed in report.json)")
+        return lines
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedToolCall:
+    """One tool call the integration's gate refused because Pathlayer stopped the run."""
+
+    tool_name: str | None
+    tool_call_id: str | None
+    at: str | None
+    reason: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "tool_call_id": self.tool_call_id,
+            "at": self.at,
+            "reason": self.reason,
+        }
+
+
+# Blocked calls listed one by one in the text report; report.json lists all.
+_MAX_BLOCKED_LINES = 10
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallGate:
+    """What a pre-execution tool-call gate was asked, and what it answered.
+
+    ``blocked`` lists the calls the runtime was told not to run.
+    ``would_have_blocked`` counts the calls allowed only because enforcement was
+    off (the run was stopped, or the call exceeded a gate rule such as a cap on
+    identical calls in flight). Neither says the runtime obeyed: that is the
+    runtime's side of the gate.
+    """
+
+    queries: int
+    enforced: bool
+    blocked: tuple[BlockedToolCall, ...] = ()
+    would_have_blocked: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "queries": self.queries,
+            "enforced": self.enforced,
+            "blocked": [call.to_dict() for call in self.blocked],
+            "would_have_blocked": self.would_have_blocked,
+        }
+
+    def describe_lines(self) -> list[str]:
+        mode = "enforced" if self.enforced else "not enforced"
+        lines = [
+            f"tool-call gate ({mode}): {self.queries} tool call(s) checked, "
+            f"{len(self.blocked)} blocked by Pathlayer"
+        ]
+        for call in self.blocked[:_MAX_BLOCKED_LINES]:
+            name = call.tool_name or "unknown tool"
+            ident = f" ({call.tool_call_id})" if call.tool_call_id else ""
+            when = f" at {call.at}" if call.at else ""
+            lines.append(f"  blocked {name}{ident}{when}")
+        hidden = len(self.blocked) - _MAX_BLOCKED_LINES
+        if hidden > 0:
+            lines.append(f"  ... and {hidden} more blocked call(s) (all listed in report.json)")
+        if self.would_have_blocked:
+            lines.append(
+                f"  {self.would_have_blocked} tool call(s) ran that would have been "
+                "blocked with enforcement on"
+            )
+        return lines
+
+
 @dataclass(frozen=True, slots=True)
 class IncidentFinding:
     """One contiguous detector incident in the user-facing report.
@@ -1095,6 +1231,8 @@ class SessionReport:
     stop_reason: str | None = None
     dry_run: bool = False
     notes: tuple[str, ...] = ()
+    proof_ledger: ProofLedger | None = None
+    tool_call_gate: ToolCallGate | None = None
 
     @property
     def emitted_actions(self) -> tuple[ActionTaken, ...]:
@@ -1142,6 +1280,10 @@ class SessionReport:
             "stop_reason": self.stop_reason,
             "dry_run": self.dry_run,
             "notes": list(self.notes),
+            "proof_ledger": self.proof_ledger.to_dict() if self.proof_ledger is not None else None,
+            "tool_call_gate": (
+                self.tool_call_gate.to_dict() if self.tool_call_gate is not None else None
+            ),
         }
 
     def summary(self) -> str:
@@ -1171,6 +1313,10 @@ class SessionReport:
         lines.extend(self._finding_lines())
         lines.append(self._fused_line())
         lines.extend(self._action_lines())
+        if self.proof_ledger is not None:
+            lines.extend(self.proof_ledger.describe_lines())
+        if self.tool_call_gate is not None:
+            lines.extend(self.tool_call_gate.describe_lines())
         if self.stop_reason:
             lines.append(f"stop reason: {self.stop_reason}")
         lines.extend(f"note: {note}" for note in self.notes)

@@ -1,0 +1,150 @@
+{
+ "label": "healthy",
+ "description": "The same status command polled ten times, one call per message: never more than one in flight.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c4",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c8",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c8",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "query": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "result": "c9",
+   "tool": "exec",
+   "params": {
+    "command": "curl -s localhost:8080/health"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}
