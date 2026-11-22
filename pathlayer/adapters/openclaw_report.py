@@ -47,6 +47,8 @@ from pathlayer.adapters.openclaw_lifecycle import (
     AGENT_END,
     BEFORE_AGENT_RUN,
     LLM_OUTPUT,
+    attempt_end_error,
+    attempt_end_failed,
     extract_openclaw_run_id,
 )
 from pathlayer.adapters.openclaw_run_store import (
@@ -733,7 +735,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
 
     ended_at = manifest.get("ended_at")
     attempt_ends = _attempt_ends(run)
-    failed_attempts = sum(1 for end in attempt_ends if end.get("success") is False)
+    failed_attempts = sum(1 for end in attempt_ends if attempt_end_failed(end))
     if provisional:
         duration = None
     elif completed and len(attempt_ends) > 1:
@@ -749,16 +751,18 @@ def build_run_report(run: RunDirectory) -> SessionReport:
             "stops one event short"
         )
     if provisional:
+        last_error = attempt_end_error(attempt_ends[-1]) if attempt_ends else None
         notes.append(
-            f"provisional report: attempt {len(attempt_ends)} of this run ended with "
-            "success=false. OpenClaw may start another attempt of the same run (after a "
+            f"provisional report: attempt {len(attempt_ends)} of this run did not succeed "
+            f"({last_error or 'success=false'}). "
+            "OpenClaw may start another attempt of the same run (after a "
             "compaction, a timeout or a provider failover); this report is rewritten when "
             "the run ends, and until then its figures come from the hook journals"
         )
     if completed and manifest.get("ended_by") == ENDED_BY_NEXT_RUN:
         notes.append(
             "this run ended when the next run of its session started: OpenClaw runs one run "
-            "at a time per session, so its last attempt, which reported success=false, "
+            "at a time per session, so its last attempt, which did not succeed, "
             "was its end"
         )
     if completed and len(attempt_ends) > 1:
@@ -770,7 +774,13 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
         notes.append(
             f"OpenClaw ran this run in {len(attempt_ends)} attempts, {failed_attempts} of "
-            f"which ended with success=false; {measured}"
+            f"which did not succeed; {measured}"
+        )
+    error = manifest.get("error")
+    if completed and manifest.get("outcome") == "error" and isinstance(error, str):
+        notes.append(
+            f"OpenClaw reported an error on this run's last attempt: {error}. The run "
+            "reached an end, but not a successful one"
         )
     if manifest.get(INTERRUPTED_WHILE_AWAITING_RETRY) is True:
         notes.append(
