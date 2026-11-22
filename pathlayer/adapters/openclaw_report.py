@@ -877,7 +877,16 @@ def build_run_report(run: RunDirectory) -> SessionReport:
 
     try:
         raw_records, torn = _read_journal(run.raw_events_path)
-        ledger: ProofLedger | None = build_proof_ledger(raw_records)
+        built = build_proof_ledger(raw_records)
+        ledger: ProofLedger | None = built
+        if manifest.get("stopped") is True and any(
+            entry.statement.startswith("contract checkpoint") for entry in built.entries
+        ):
+            notes.append(
+                "the operator's progress probe runs only until the STOP: the contract "
+                "checkpoints are as of the last probe before it, while later tool calls "
+                "still appear in the ledger"
+            )
         if torn and not truncated_journal:
             notes.append(
                 "the last line of the raw event journal was truncated: the proof ledger "
