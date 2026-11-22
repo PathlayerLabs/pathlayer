@@ -851,6 +851,73 @@ class ActionTaken:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockedToolCall:
+    """One tool call the integration's gate refused because Pathlayer stopped the run."""
+
+    tool_name: str | None
+    tool_call_id: str | None
+    at: str | None
+    reason: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tool_name": self.tool_name,
+            "tool_call_id": self.tool_call_id,
+            "at": self.at,
+            "reason": self.reason,
+        }
+
+
+# Blocked calls listed one by one in the text report; report.json lists all.
+_MAX_BLOCKED_LINES = 10
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallGate:
+    """What a pre-execution tool-call gate was asked, and what it answered.
+
+    ``blocked`` lists the calls the runtime was told not to run.
+    ``would_have_blocked`` counts the calls allowed only because enforcement was
+    off while the run was stopped. Neither says the runtime obeyed: that is the
+    runtime's side of the gate.
+    """
+
+    queries: int
+    enforced: bool
+    blocked: tuple[BlockedToolCall, ...] = ()
+    would_have_blocked: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "queries": self.queries,
+            "enforced": self.enforced,
+            "blocked": [call.to_dict() for call in self.blocked],
+            "would_have_blocked": self.would_have_blocked,
+        }
+
+    def describe_lines(self) -> list[str]:
+        mode = "enforced" if self.enforced else "not enforced"
+        lines = [
+            f"tool-call gate ({mode}): {self.queries} tool call(s) checked, "
+            f"{len(self.blocked)} blocked by Pathlayer"
+        ]
+        for call in self.blocked[:_MAX_BLOCKED_LINES]:
+            name = call.tool_name or "unknown tool"
+            ident = f" ({call.tool_call_id})" if call.tool_call_id else ""
+            when = f" at {call.at}" if call.at else ""
+            lines.append(f"  blocked {name}{ident}{when}")
+        hidden = len(self.blocked) - _MAX_BLOCKED_LINES
+        if hidden > 0:
+            lines.append(f"  ... and {hidden} more blocked call(s) (all listed in report.json)")
+        if self.would_have_blocked:
+            lines.append(
+                f"  {self.would_have_blocked} tool call(s) ran after the STOP and would "
+                "have been blocked with enforcement on"
+            )
+        return lines
+
+
+@dataclass(frozen=True, slots=True)
 class IncidentFinding:
     """One contiguous detector incident in the user-facing report.
 
@@ -1095,6 +1162,7 @@ class SessionReport:
     stop_reason: str | None = None
     dry_run: bool = False
     notes: tuple[str, ...] = ()
+    tool_call_gate: ToolCallGate | None = None
 
     @property
     def emitted_actions(self) -> tuple[ActionTaken, ...]:
@@ -1142,6 +1210,9 @@ class SessionReport:
             "stop_reason": self.stop_reason,
             "dry_run": self.dry_run,
             "notes": list(self.notes),
+            "tool_call_gate": (
+                self.tool_call_gate.to_dict() if self.tool_call_gate is not None else None
+            ),
         }
 
     def summary(self) -> str:
@@ -1171,6 +1242,8 @@ class SessionReport:
         lines.extend(self._finding_lines())
         lines.append(self._fused_line())
         lines.extend(self._action_lines())
+        if self.tool_call_gate is not None:
+            lines.extend(self.tool_call_gate.describe_lines())
         if self.stop_reason:
             lines.append(f"stop reason: {self.stop_reason}")
         lines.extend(f"note: {note}" for note in self.notes)
