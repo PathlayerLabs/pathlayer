@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from pathlayer.adapters.openclaw import translate_openclaw_llm_event
+from pathlayer.adapters.openclaw_facts import build_proof_ledger
 from pathlayer.adapters.openclaw_lifecycle import (
     AGENT_END,
     BEFORE_AGENT_RUN,
@@ -72,6 +73,7 @@ from pathlayer.postmortem import (
     CostAttribution,
     CostBreakdown,
     CostShare,
+    ProofLedger,
     SessionReport,
     SignalObservation,
     TickRecord,
@@ -874,6 +876,17 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
 
     try:
+        raw_records, torn = _read_journal(run.raw_events_path)
+        ledger: ProofLedger | None = build_proof_ledger(raw_records)
+        if torn and not truncated_journal:
+            notes.append(
+                "the last line of the raw event journal was truncated: the proof ledger "
+                "stops one record short"
+            )
+    except ValueError:
+        ledger = None
+        notes.append("the raw event journal is corrupt: the proof ledger is not reported")
+    try:
         gate = _tool_call_gate(run)
     except ValueError:
         gate = None
@@ -894,7 +907,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         duration_seconds=duration,
         notes=notes,
     )
-    return replace(report, tool_call_gate=gate) if gate is not None else report
+    return replace(report, proof_ledger=ledger, tool_call_gate=gate)
 
 
 def _tool_call_gate(run: RunDirectory) -> ToolCallGate | None:
