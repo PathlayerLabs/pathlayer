@@ -68,30 +68,69 @@ function log(api, level, message) {
   }
 }
 
+// Reachability of the listener, as last observed: undefined (unknown), true or
+// false. Only a network error (fetch rejects or aborts) makes it unreachable;
+// an HTTP answer, whatever its status, proves the listener is up.
+let reachable;
+
+function noteReachable(api) {
+  const wasUnreachable = reachable === false;
+  reachable = true;
+  if (wasUnreachable) {
+    log(api, "info", `[pathlayer] listener reachable again at ${PATHLAYER_URL}`);
+  }
+}
+
+function noteUnreachable(api) {
+  const wasUnreachable = reachable === false;
+  reachable = false;
+  if (!wasUnreachable) {
+    log(
+      api,
+      "error",
+      `[pathlayer] listener unreachable at ${PATHLAYER_URL}: tool calls are NOT checked ` +
+        "(STOP not enforced) and runs are NOT recorded until it answers again",
+    );
+  }
+}
+
+// Per-call detail: debug when the logger has it, warn otherwise.
+function logDetail(api, message) {
+  log(api, typeof api?.logger?.debug === "function" ? "debug" : "warn", message);
+}
+
 function runIdOf(event, ctx) {
   const runId = ctx?.runId ?? event?.runId;
   return typeof runId === "string" && runId.trim() ? runId : undefined;
 }
 
-function post(payload, timeoutMs) {
-  return fetch(PATHLAYER_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source: "openclaw", payload }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+async function post(api, payload, timeoutMs) {
+  let response;
+  try {
+    response = await fetch(PATHLAYER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "openclaw", payload }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    noteUnreachable(api);
+    throw err;
+  }
+  noteReachable(api);
+  return response;
 }
 
 async function forward(api, hook, event, ctx) {
   try {
-    const response = await post({ hook, event, ctx }, SEND_TIMEOUT_MS);
+    const response = await post(api, { hook, event, ctx }, SEND_TIMEOUT_MS);
     if (response.ok) {
       log(api, "info", `[pathlayer] forwarded ${hook}`);
     } else {
       log(api, "warn", `[pathlayer] ${hook} rejected by Pathlayer: HTTP ${response.status}`);
     }
   } catch (err) {
-    log(api, "warn", `[pathlayer] failed to forward ${hook}: ${err}`);
+    logDetail(api, `[pathlayer] failed to forward ${hook}: ${err}`);
   }
 }
 
@@ -150,7 +189,7 @@ async function decide(api, event, ctx) {
     if (pending !== undefined) {
       await Promise.race([pending, delay(ORDERING_WAIT_MS)]);
     }
-    const response = await post(decisionQuery(event, ctx), DECISION_TIMEOUT_MS);
+    const response = await post(api, decisionQuery(event, ctx), DECISION_TIMEOUT_MS);
     if (!response.ok) {
       return undefined;
     }
@@ -164,7 +203,7 @@ async function decide(api, event, ctx) {
       return { block: true, blockReason: reason };
     }
   } catch (err) {
-    log(api, "warn", `[pathlayer] no decision for ${event?.toolName}, allowing it: ${err}`);
+    logDetail(api, `[pathlayer] no decision for ${event?.toolName}, allowing it: ${err}`);
   }
   return undefined;
 }
@@ -201,6 +240,9 @@ export const _internals = {
   DECISION_HOOK_TIMEOUT_MS,
   ORDERING_WAIT_MS,
   SEND_TIMEOUT_MS,
+  resetReachability: () => {
+    reachable = undefined;
+  },
 };
 
 export default plugin;
