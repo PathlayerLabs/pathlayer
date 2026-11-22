@@ -167,6 +167,107 @@ def test_a_failed_write_is_a_failed_call() -> None:
     assert fact.kind is FactKind.CALL_FAILED
 
 
+def _edit(path: str = "doc.md", text: str | None = None, **extra: Any) -> dict[str, Any]:
+    text = text if text is not None else f"Successfully replaced 1 block(s) in {path}."
+    return {
+        "toolName": "edit",
+        "params": {"path": path, "edits": [{"oldText": "a", "newText": "b"}]},
+        "result": {"content": [{"type": "text", "text": text}], "details": {"diff": "..."}},
+        **extra,
+    }
+
+
+def _read(path: str = "doc.md", text: str = "# Title\nbody") -> dict[str, Any]:
+    return {
+        "toolName": "read",
+        "params": {"path": path, "offset": -20},
+        "result": {"content": [{"type": "text", "text": text}]},
+    }
+
+
+def test_a_confirmed_edit_becomes_a_file_edited_fact() -> None:
+    event = _edit(text="Successfully replaced 3 block(s) in notes/doc.md.")
+    (fact,) = extract_facts([_record(1, event)])
+    assert fact.kind is FactKind.FILE_EDITED
+    assert fact.detail == {"path": "notes/doc.md", "blocks": 3}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Edited it",
+        "Successfully replaced x block(s) in a.",
+        "Successfully replaced 1 block(s) in a",
+    ],
+)
+def test_an_edit_without_its_confirmation_proves_nothing(text: str) -> None:
+    assert extract_facts([_record(1, _edit(text=text))]) == ()
+    no_content = {"toolName": "edit", "params": {"path": "a"}, "result": {"content": []}}
+    assert extract_facts([_record(1, no_content)]) == ()
+
+
+def test_a_failed_edit_stays_a_failed_call() -> None:
+    error = "Found 2 occurrences of the text in doc.md. The text must be unique."
+    event = _edit(text='{"status":"error"}', error=error)
+    event["result"]["details"] = {"status": "error", "tool": "edit"}
+    (fact,) = extract_facts([_record(1, event)])
+    assert fact.kind is FactKind.CALL_FAILED
+    assert fact.detail["error"] == error
+
+
+def test_a_read_keeps_its_path_and_length_never_its_text() -> None:
+    (fact,) = extract_facts([_record(1, _read(text="# Title\nsecret body"))])
+    assert fact.kind is FactKind.FILE_READ
+    assert fact.detail == {"path": "doc.md", "chars": len("# Title\nsecret body")}
+    assert "secret" not in facts_to_json([fact])
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"toolName": "read", "params": {"path": "a"}, "result": "text"},
+        {"toolName": "read", "params": {"path": "a"}, "result": {"content": []}},
+        {"toolName": "read", "params": {"path": "a"}, "result": {"content": [{"type": "image"}]}},
+        {"toolName": "read", "params": {}, "result": {"content": [{"type": "text", "text": "x"}]}},
+        {
+            "toolName": "read",
+            "params": {"path": 3},
+            "result": {"content": [{"type": "text", "text": "x"}]},
+        },
+        {"toolName": "read", "params": {"path": "a"}, "error": "ENOENT"},
+    ],
+)
+def test_a_read_without_text_or_path_is_no_proof(event: dict[str, Any]) -> None:
+    kinds = [fact.kind for fact in extract_facts([_record(1, event)])]
+    assert FactKind.FILE_READ not in kinds
+
+
+def test_edits_and_reads_are_proven_and_identical_reads_group() -> None:
+    records = [
+        _record(1, _edit()),
+        _record(2, _read()),
+        _record(3, _read()),
+        _record(4, _read(text="longer text")),
+        _record(5, _read(path="other.md")),
+    ]
+    proven = build_proof_ledger(records).column(LEDGER_PROVEN)
+    assert [(entry.statement, entry.count) for entry in proven] == [
+        ("edited doc.md (1 block(s) replaced)", 1),
+        ("read doc.md back (12 characters)", 2),
+        ("read doc.md back (11 characters)", 1),
+        ("read other.md back (12 characters)", 1),
+    ]
+
+
+def test_a_path_in_an_edit_or_read_statement_is_escaped() -> None:
+    records = [_record(1, _edit(path="a\tb.md")), _record(2, _read(path="c\nd.md"))]
+    statements = [entry.statement for entry in build_proof_ledger(records).column(LEDGER_PROVEN)]
+    assert statements == [
+        "edited a\\tb.md (1 block(s) replaced)",
+        "read c\\nd.md back (12 characters)",
+    ]
+
+
 def test_a_blocked_call_says_who_blocked_it() -> None:
     reason = "Pathlayer stopped this run (retry: 3x identical failure of 'exec'). Do not ..."
     blocked = _exec("cat missing")
@@ -283,8 +384,8 @@ def test_the_ledger_sorts_facts_into_three_columns() -> None:
         _record(3, _write("game/app.js", 10)),
         _record(4, _exec("python3 -m http.server 8080 &", exitCode=0)),
         _record(5, failed),
-        _record(6, {"toolName": "read", "params": {"path": "a"}, "result": "text"}),
-        _record(7, {"toolName": "read", "params": {"path": "b"}, "result": "text"}),
+        _record(6, {"toolName": "search", "params": {"q": "a"}, "result": "text"}),
+        _record(7, {"toolName": "search", "params": {"q": "b"}, "result": "text"}),
     ]
     ledger = build_proof_ledger(records)
 
@@ -298,7 +399,7 @@ def test_the_ledger_sorts_facts_into_three_columns() -> None:
     unproven = ledger.column(LEDGER_UNPROVEN)
     assert [entry.statement for entry in unproven] == [
         "`python3 -m http.server 8080 &` started in the background: whether it ran is not observed",
-        "read: no outcome fact in its result",
+        "search: no outcome fact in its result",
     ]
     assert unproven[1].count == 2 and unproven[1].sequences == (6, 7)
 

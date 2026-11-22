@@ -22,7 +22,10 @@ This module extracts them, and nothing else:
 - A fact says what a call did, never that the task was done. An exit code of 0
   proves that a command exited 0; a write proves that bytes were written at
   that moment, not what the file holds now, and its size is as the tool
-  reported it (characters in 2026.7.1, UTF-8 bytes later).
+  reported it (characters in 2026.7.1, UTF-8 bytes later). An edit proves the
+  tool replaced that many blocks then. A read proves only that the file was
+  readable at that moment and how long its text was; the text itself is never
+  kept, and nothing says the agent understood it or that the file is unchanged.
 
 Each fact points back to the raw journal record (``sequence``, which
 ``decisions.jsonl`` also names) and to the normalized event the recorder
@@ -58,6 +61,9 @@ MAX_FACT_TEXT_CHARS = 200
 # versions, so it is kept as reported, not as bytes.
 _WROTE = re.compile(r"^Successfully wrote (\d+) bytes to (.+)$")
 
+# "Successfully replaced 1 block(s) in doc.md.": OpenClaw's edit tool.
+_EDITED = re.compile(r"^Successfully replaced (\d+) block\(s\) in (.+)\.$")
+
 
 class FactKind(str, Enum):
     """What one tool call established."""
@@ -67,6 +73,8 @@ class FactKind(str, Enum):
     COMMAND_TIMED_OUT = "command_timed_out"
     COMMAND_BACKGROUNDED = "command_backgrounded"
     FILE_WRITTEN = "file_written"
+    FILE_EDITED = "file_edited"
+    FILE_READ = "file_read"
     CALL_BLOCKED = "call_blocked"
     CALL_FAILED = "call_failed"
 
@@ -166,6 +174,10 @@ def _fact(event: Mapping[str, Any], sequence: int) -> OpenClawFact | None:
         return make(FactKind.CALL_FAILED, {"error": _clip(error.strip())})
     if tool == "write":
         return _write_fact(event, result, make)
+    if tool == "edit":
+        return _edit_fact(result, make)
+    if tool == "read":
+        return _read_fact(event, result, make)
     return None
 
 
@@ -235,6 +247,24 @@ def _write_fact(event: Mapping[str, Any], result: Any, make: _Make) -> OpenClawF
     )
 
 
+def _edit_fact(result: Any, make: _Make) -> OpenClawFact | None:
+    text = _first_text(result)
+    match = _EDITED.match(text.strip()) if text is not None else None
+    if match is None:
+        return None
+    return make(FactKind.FILE_EDITED, {"path": match.group(2), "blocks": int(match.group(1))})
+
+
+def _read_fact(event: Mapping[str, Any], result: Any, make: _Make) -> OpenClawFact | None:
+    text = _first_text(result)
+    params = event.get("params")
+    path = params.get("path") if isinstance(params, Mapping) else None
+    if text is None or not isinstance(path, str) or not path:
+        return None
+    # Only the length: the text is the file's, never kept.
+    return make(FactKind.FILE_READ, {"path": path, "chars": len(text)})
+
+
 # exec failure kinds that mean the command ran out of time. A denied approval
 # also sets ``timedOut`` when its reason mentions a timeout, without running.
 _TIMEOUT_FAILURE_KINDS = frozenset({"overall-timeout", "no-output-timeout"})
@@ -299,13 +329,14 @@ def facts_to_json(facts: Iterable[OpenClawFact]) -> str:
 def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
     """The proof ledger of a run: its facts in three columns, identical ones grouped.
 
-    - **proven**: commands that exited 0, files written (what the runtime
-      confirmed, at that moment);
+    - **proven**: commands that exited 0, files written or edited (what the
+      runtime confirmed, at that moment), files read back (only that they were
+      readable then);
     - **failed**: commands that exited non-zero or timed out, failed calls,
       blocked calls;
     - **unproven**: commands sent to the background (their exit 0 only says
       they started), and tool calls whose result says nothing observable about
-      how they ended (a read, a search), counted per tool.
+      how they ended (a search), counted per tool.
 
     Identical facts (same kind, full command, working directory, path, content
     and error) are one entry with a count, in the order of their first
@@ -358,7 +389,12 @@ def build_proof_ledger(records: Iterable[Mapping[str, Any]]) -> ProofLedger:
 def _status(fact: OpenClawFact) -> str:
     if fact.kind is FactKind.COMMAND_BACKGROUNDED:
         return LEDGER_UNPROVEN
-    if fact.kind in {FactKind.COMMAND_SUCCEEDED, FactKind.FILE_WRITTEN}:
+    if fact.kind in {
+        FactKind.COMMAND_SUCCEEDED,
+        FactKind.FILE_WRITTEN,
+        FactKind.FILE_EDITED,
+        FactKind.FILE_READ,
+    }:
         return LEDGER_PROVEN
     return LEDGER_FAILED
 
@@ -376,6 +412,8 @@ def _identity(fact: OpenClawFact) -> tuple[Any, ...]:
         detail.get("path"),
         detail.get("content_sha256"),
         detail.get("reported_size"),
+        detail.get("blocks"),
+        detail.get("chars"),
         detail.get("error"),
         detail.get("denied_reason"),
         detail.get("by_pathlayer"),
@@ -411,6 +449,10 @@ def _statement(fact: OpenClawFact, usual_cwd: str | None = None) -> str:
         return f"{command}{where} timed out"
     if fact.kind is FactKind.FILE_WRITTEN:
         return f"wrote {_inline(detail.get('path'))} (reported size {detail.get('reported_size')})"
+    if fact.kind is FactKind.FILE_EDITED:
+        return f"edited {_inline(detail.get('path'))} ({detail.get('blocks')} block(s) replaced)"
+    if fact.kind is FactKind.FILE_READ:
+        return f"read {_inline(detail.get('path'))} back ({detail.get('chars')} characters)"
     tool = _inline(fact.tool)
     if fact.kind is FactKind.CALL_BLOCKED:
         what = command if detail.get("command") else f"{tool} call"
