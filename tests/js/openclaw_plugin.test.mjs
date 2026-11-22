@@ -171,3 +171,27 @@ test("a throwing logger never turns into a thrown gate", async () => {
     api.logger.warn = warn;
   }
 });
+
+test("compaction hooks forward their counters, never the session history", async () => {
+  for (const hook of _internals.COMPACTION_HOOKS) {
+    received.length = 0;
+    hooks.get(hook).handler(
+      {
+        messageCount: 63,
+        compactedCount: 2,
+        tokenCount: 31000,
+        messages: [{ role: "user", content: "secret prompt" }],
+        sessionFile: "/home/user/.openclaw/agents/main/sessions/s.jsonl",
+      },
+      { sessionKey: "s" },
+    );
+    const deadline = performance.now() + 1000;
+    while (received.length === 0 && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(received.length, 1);
+    assert.equal(received[0].hook, hook);
+    assert.deepEqual(received[0].event, { messageCount: 63, tokenCount: 31000, compactedCount: 2 });
+    assert.deepEqual(received[0].ctx, { sessionKey: "s" });
+  }
+});
