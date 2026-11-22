@@ -172,6 +172,34 @@ What this does and does not do:
   analysis and its replay are the same with or without `--enforce`. Blocked
   calls that OpenClaw still reports through `after_tool_call` are recorded like
   any event after a STOP.
+- **Identical calls in flight are capped.** OpenClaw runs the tool calls of
+  one assistant message in parallel, and asks the gate about all of them before
+  any runs: a STOP that needs observed failures cannot stop such a batch (in a
+  live test, 20 identical calls ran although the run was stopped at the third
+  failure). The plugin therefore sends a fingerprint of each call (an HMAC of
+  the tool name and its arguments, keyed per gateway process; the arguments
+  themselves never leave OpenClaw), and with `--enforce` a call is blocked
+  when 4 identical calls of the run are already running. Change the cap with
+  `--max-identical-in-flight N` (`0` disables it). A call stays "running"
+  until its `after_tool_call` reaches Pathlayer, so sequential calls, distinct
+  calls in one batch and up to 4 identical ones are never blocked (labeled
+  scenarios in `tests/fixtures/openclaw_gate/`), unless that hook is lost (for
+  example a payload over the ingest's 1 MB limit). The agent receives:
+
+  ```text
+  Pathlayer blocked this call (identical calls in flight: 4 exec call(s) with
+  the same arguments already running). This exact call is already running:
+  use its result and do not call it again.
+  ```
+
+  Four is one below the run of identical actions the default pipeline already
+  stops as a loop. A blocked call comes back from OpenClaw as a failed action
+  and is analyzed like any other, so a batch the cap cuts is one the loop
+  detector stops anyway: the cap prevents the extra calls from running, it
+  adds no STOP of its own.
+  On OpenAI-compatible APIs, `params.parallel_tool_calls: false` on the model
+  in OpenClaw's config also prevents parallel batches. OpenClaw 2026.10.10 and
+  later also has its own `repeated_tool_error` guard.
 - **It fails open.** OpenClaw blocks a tool call when a `before_tool_call`
   handler throws or times out (15 seconds by default). The plugin never throws,
   gives up on Pathlayer after at most 0.8 s, and then lets the call run: a

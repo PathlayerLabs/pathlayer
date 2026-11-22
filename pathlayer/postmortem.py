@@ -878,7 +878,8 @@ class ToolCallGate:
 
     ``blocked`` lists the calls the runtime was told not to run.
     ``would_have_blocked`` counts the calls allowed only because enforcement was
-    off while the run was stopped. Neither says the runtime obeyed: that is the
+    off (the run was stopped, or the call exceeded a gate rule such as a cap on
+    identical calls in flight). Neither says the runtime obeyed: that is the
     runtime's side of the gate.
     """
 
@@ -911,8 +912,8 @@ class ToolCallGate:
             lines.append(f"  ... and {hidden} more blocked call(s) (all listed in report.json)")
         if self.would_have_blocked:
             lines.append(
-                f"  {self.would_have_blocked} tool call(s) ran after the STOP and would "
-                "have been blocked with enforcement on"
+                f"  {self.would_have_blocked} tool call(s) ran that would have been "
+                "blocked with enforcement on"
             )
         return lines
 

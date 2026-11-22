@@ -1,0 +1,290 @@
+{
+ "label": "healthy",
+ "description": "Twenty reads of twenty different files in one message.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "read",
+   "params": {
+    "path": "src/m0.py"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "read",
+   "params": {
+    "path": "src/m1.py"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "read",
+   "params": {
+    "path": "src/m2.py"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "read",
+   "params": {
+    "path": "src/m3.py"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "read",
+   "params": {
+    "path": "src/m4.py"
+   }
+  },
+  {
+   "query": "c5",
+   "tool": "read",
+   "params": {
+    "path": "src/m5.py"
+   }
+  },
+  {
+   "query": "c6",
+   "tool": "read",
+   "params": {
+    "path": "src/m6.py"
+   }
+  },
+  {
+   "query": "c7",
+   "tool": "read",
+   "params": {
+    "path": "src/m7.py"
+   }
+  },
+  {
+   "query": "c8",
+   "tool": "read",
+   "params": {
+    "path": "src/m8.py"
+   }
+  },
+  {
+   "query": "c9",
+   "tool": "read",
+   "params": {
+    "path": "src/m9.py"
+   }
+  },
+  {
+   "query": "c10",
+   "tool": "read",
+   "params": {
+    "path": "src/m10.py"
+   }
+  },
+  {
+   "query": "c11",
+   "tool": "read",
+   "params": {
+    "path": "src/m11.py"
+   }
+  },
+  {
+   "query": "c12",
+   "tool": "read",
+   "params": {
+    "path": "src/m12.py"
+   }
+  },
+  {
+   "query": "c13",
+   "tool": "read",
+   "params": {
+    "path": "src/m13.py"
+   }
+  },
+  {
+   "query": "c14",
+   "tool": "read",
+   "params": {
+    "path": "src/m14.py"
+   }
+  },
+  {
+   "query": "c15",
+   "tool": "read",
+   "params": {
+    "path": "src/m15.py"
+   }
+  },
+  {
+   "query": "c16",
+   "tool": "read",
+   "params": {
+    "path": "src/m16.py"
+   }
+  },
+  {
+   "query": "c17",
+   "tool": "read",
+   "params": {
+    "path": "src/m17.py"
+   }
+  },
+  {
+   "query": "c18",
+   "tool": "read",
+   "params": {
+    "path": "src/m18.py"
+   }
+  },
+  {
+   "query": "c19",
+   "tool": "read",
+   "params": {
+    "path": "src/m19.py"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "read",
+   "params": {
+    "path": "src/m0.py"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "read",
+   "params": {
+    "path": "src/m1.py"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "read",
+   "params": {
+    "path": "src/m2.py"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "read",
+   "params": {
+    "path": "src/m3.py"
+   }
+  },
+  {
+   "result": "c4",
+   "tool": "read",
+   "params": {
+    "path": "src/m4.py"
+   }
+  },
+  {
+   "result": "c5",
+   "tool": "read",
+   "params": {
+    "path": "src/m5.py"
+   }
+  },
+  {
+   "result": "c6",
+   "tool": "read",
+   "params": {
+    "path": "src/m6.py"
+   }
+  },
+  {
+   "result": "c7",
+   "tool": "read",
+   "params": {
+    "path": "src/m7.py"
+   }
+  },
+  {
+   "result": "c8",
+   "tool": "read",
+   "params": {
+    "path": "src/m8.py"
+   }
+  },
+  {
+   "result": "c9",
+   "tool": "read",
+   "params": {
+    "path": "src/m9.py"
+   }
+  },
+  {
+   "result": "c10",
+   "tool": "read",
+   "params": {
+    "path": "src/m10.py"
+   }
+  },
+  {
+   "result": "c11",
+   "tool": "read",
+   "params": {
+    "path": "src/m11.py"
+   }
+  },
+  {
+   "result": "c12",
+   "tool": "read",
+   "params": {
+    "path": "src/m12.py"
+   }
+  },
+  {
+   "result": "c13",
+   "tool": "read",
+   "params": {
+    "path": "src/m13.py"
+   }
+  },
+  {
+   "result": "c14",
+   "tool": "read",
+   "params": {
+    "path": "src/m14.py"
+   }
+  },
+  {
+   "result": "c15",
+   "tool": "read",
+   "params": {
+    "path": "src/m15.py"
+   }
+  },
+  {
+   "result": "c16",
+   "tool": "read",
+   "params": {
+    "path": "src/m16.py"
+   }
+  },
+  {
+   "result": "c17",
+   "tool": "read",
+   "params": {
+    "path": "src/m17.py"
+   }
+  },
+  {
+   "result": "c18",
+   "tool": "read",
+   "params": {
+    "path": "src/m18.py"
+   }
+  },
+  {
+   "result": "c19",
+   "tool": "read",
+   "params": {
+    "path": "src/m19.py"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

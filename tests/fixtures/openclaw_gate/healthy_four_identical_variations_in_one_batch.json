@@ -1,0 +1,80 @@
+{
+ "label": "healthy",
+ "description": "Four identical image_generate calls in one message, for variations, then other work: the most identical calls a healthy batch may have in flight.",
+ "steps": [
+  "start",
+  {
+   "query": "c0",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "query": "c1",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "result": "c0",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "image_generate",
+   "params": {
+    "prompt": "a red fox, watercolor"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "write",
+   "params": {
+    "path": "foxes.md"
+   }
+  },
+  {
+   "result": "c4",
+   "tool": "write",
+   "params": {
+    "path": "foxes.md"
+   }
+  },
+  {
+   "end": true
+  }
+ ]
+}

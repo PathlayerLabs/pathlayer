@@ -1,0 +1,109 @@
+{
+ "label": "healthy",
+ "description": "Shape of a real healthy OpenClaw run (2026-11-03, chess game): two parallel batches of distinct calls, one of which fails.",
+ "steps": [
+  "start",
+  {
+   "query": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "mkdir -p game"
+   }
+  },
+  {
+   "query": "c2",
+   "tool": "write",
+   "params": {
+    "path": "game/index.html"
+   }
+  },
+  {
+   "query": "c3",
+   "tool": "write",
+   "params": {
+    "path": "game/style.css"
+   }
+  },
+  {
+   "query": "c4",
+   "tool": "write",
+   "params": {
+    "path": "game/app.js"
+   }
+  },
+  {
+   "result": "c1",
+   "tool": "exec",
+   "params": {
+    "command": "mkdir -p game"
+   }
+  },
+  {
+   "result": "c2",
+   "tool": "write",
+   "params": {
+    "path": "game/index.html"
+   }
+  },
+  {
+   "result": "c3",
+   "tool": "write",
+   "params": {
+    "path": "game/style.css"
+   }
+  },
+  {
+   "result": "c4",
+   "tool": "write",
+   "params": {
+    "path": "game/app.js"
+   }
+  },
+  {
+   "query": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "ls game"
+   }
+  },
+  {
+   "query": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "python3 -m http.server 8080 &"
+   }
+  },
+  {
+   "query": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "node --check game/app.js"
+   }
+  },
+  {
+   "result": "c5",
+   "tool": "exec",
+   "params": {
+    "command": "ls game"
+   }
+  },
+  {
+   "result": "c6",
+   "tool": "exec",
+   "params": {
+    "command": "python3 -m http.server 8080 &"
+   }
+  },
+  {
+   "result": "c7",
+   "tool": "exec",
+   "params": {
+    "command": "node --check game/app.js"
+   },
+   "error": "node: not found"
+  },
+  {
+   "end": true
+  }
+ ]
+}
