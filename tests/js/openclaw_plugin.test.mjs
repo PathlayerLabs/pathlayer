@@ -45,6 +45,8 @@ const api = {
   logger: {
     info: (message) => logs.push(["info", message]),
     warn: (message) => logs.push(["warn", message]),
+    error: (message) => logs.push(["error", message]),
+    debug: (message) => logs.push(["debug", message]),
   },
 };
 
@@ -191,6 +193,68 @@ test("a throwing logger never turns into a thrown gate", async () => {
     assert.equal(await gate(), undefined);
   } finally {
     api.logger.warn = warn;
+  }
+});
+
+test("an unreachable listener is reported once, and recovery once", async () => {
+  _internals.resetReachability();
+  logs.length = 0;
+  const levels = (level) => logs.filter(([l]) => l === level).map(([, m]) => m);
+  respond = (_payload, res) => res.socket.destroy();
+  assert.equal(await gate(), undefined);
+  assert.equal(await gate(), undefined);
+  assert.equal(levels("error").length, 1);
+  assert.match(levels("error")[0], /listener unreachable at http:\/\/127\.0\.0\.1:\d+\/ingest/);
+  assert.match(levels("error")[0], /NOT checked.*STOP not enforced.*NOT recorded/);
+  // Per-call detail is demoted to debug.
+  assert.equal(levels("warn").length, 0);
+  assert.equal(levels("debug").length, 2);
+  assert.equal(levels("info").length, 0);
+
+  // An HTTP error status is an answer, not an outage: it recovers.
+  respond = (_payload, res) => {
+    res.statusCode = 500;
+    res.end("{}");
+  };
+  assert.equal(await gate(), undefined);
+  assert.equal(await gate(), undefined);
+  assert.equal(levels("info").length, 1);
+  assert.match(levels("info")[0], /listener reachable again at /);
+  assert.equal(levels("error").length, 1);
+
+  // A second outage is reported again.
+  respond = (_payload, res) => res.socket.destroy();
+  assert.equal(await gate(), undefined);
+  assert.equal(levels("error").length, 2);
+  _internals.resetReachability();
+});
+
+test("a first success, or an HTTP error while unknown, logs nothing about reachability", async () => {
+  _internals.resetReachability();
+  logs.length = 0;
+  respond = (_payload, res) => {
+    res.statusCode = 500;
+    res.end("{}");
+  };
+  assert.equal(await gate(), undefined);
+  assert.deepEqual(
+    logs.filter(([l]) => l === "error" || l === "info"),
+    [],
+  );
+});
+
+test("without a debug logger, per-call messages stay at warn", async () => {
+  _internals.resetReachability();
+  logs.length = 0;
+  const { debug } = api.logger;
+  api.logger.debug = undefined;
+  try {
+    respond = (_payload, res) => res.socket.destroy();
+    assert.equal(await gate(), undefined);
+    assert.ok(logs.some(([l, m]) => l === "warn" && m.includes("no decision for exec")));
+  } finally {
+    api.logger.debug = debug;
+    _internals.resetReachability();
   }
 });
 

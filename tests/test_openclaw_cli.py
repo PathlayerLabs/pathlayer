@@ -427,6 +427,28 @@ def test_a_stop_signal_ends_the_wait_and_restores_the_handlers(
         signal.signal(signal.SIGINT, original_int)
 
 
+@_POSIX_ONLY
+def test_sighup_stops_the_listener_like_sigterm() -> None:
+    original = signal.getsignal(signal.SIGHUP)
+    stop = threading.Event()
+
+    def _send_sighup_once_handled() -> None:
+        deadline = time.monotonic() + 10
+        while signal.getsignal(signal.SIGHUP) is original:
+            if time.monotonic() > deadline:
+                stop.set()  # never SIGHUP the test process without the handler
+                return
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    sender = threading.Thread(target=_send_sighup_once_handled)
+    sender.start()
+    openclaw_cli._wait_for_stop(stop)
+    sender.join(timeout=10)
+    assert stop.is_set()
+    assert signal.getsignal(signal.SIGHUP) is original
+
+
 def _seed_started_run(runs_root: Path, run_id: str) -> None:
     OpenClawRunRecorder(runs_root).process_payload(_payloads(run_id)[0])
     assert _status(runs_root, run_id) == "started"

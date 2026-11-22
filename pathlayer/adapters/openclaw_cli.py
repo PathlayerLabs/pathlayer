@@ -349,7 +349,7 @@ def lock_runs_root(root: Path) -> Iterator[IO[str]]:
 
 
 def _wait_for_stop(stop: threading.Event, ready: Callable[[], None] | None = None) -> None:
-    """Block until SIGINT or SIGTERM (or ``stop`` is set), then restore the handlers.
+    """Block until SIGINT, SIGTERM or SIGHUP (or ``stop`` is set), then restore the handlers.
 
     ``ready`` runs once the handlers are installed: whatever it announces, a
     signal sent in reply (a service manager stopping the listener as soon as it
@@ -360,7 +360,12 @@ def _wait_for_stop(stop: threading.Event, ready: Callable[[], None] | None = Non
     def _handler(_signum: int, _frame: types.FrameType | None) -> None:
         stop.set()
 
-    signals = (signal.SIGINT, signal.SIGTERM)
+    # SIGHUP: an SSH session that closes sends it to its foreground jobs.
+    signals = (
+        signal.SIGINT,
+        signal.SIGTERM,
+        *([signal.SIGHUP] if hasattr(signal, "SIGHUP") else []),
+    )
     previous = {signum: signal.getsignal(signum) for signum in signals}
     for signum in signals:
         signal.signal(signum, _handler)

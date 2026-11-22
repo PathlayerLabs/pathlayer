@@ -109,10 +109,13 @@ export PATHLAYER_RUNS_DIR=/var/lib/pathlayer/runs
 pathlayer-openclaw record
 ```
 
-Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. Ctrl+C or SIGTERM
-stops it. To keep the listener running after you log out, run it under your
-service manager, or in the background with
-`nohup pathlayer-openclaw record > record.log 2>&1 &`.
+Expected line: `Ingest URL : http://127.0.0.1:8787/ingest`. Ctrl+C, SIGTERM or
+SIGHUP stops it. Run it under systemd, tmux or
+`nohup pathlayer-openclaw record > record.log 2>&1 &`, not in a bare SSH shell
+that may close. A stopped listener means no recording and no enforcement: the
+plugin fails open and the agent keeps running unchecked. The plugin logs one
+`error` line when the listener becomes unreachable and one `info` line when it
+answers again; per-call details go to `debug` when OpenClaw's logger has it.
 
 The listener refuses to start, with a message saying what to change, when it
 cannot create or use the runs directory (`--runs-root` or
