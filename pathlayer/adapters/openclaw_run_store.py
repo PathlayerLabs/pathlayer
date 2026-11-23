@@ -83,6 +83,58 @@ def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def read_journal(path: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Parse one append-only JSONL journal, tolerating a torn final line.
+
+    Returns the usable records and whether a truncated last line was dropped.
+
+    The journal is appended one flushed-and-fsynced line at a time, newline
+    included, so a complete record always ends with one. A last line without a
+    terminating newline is therefore the signature of a process killed
+    mid-write -- exactly the interrupted run this module exists to make
+    reportable. It is dropped, and the caller says so in the report rather than
+    refusing to report the run at all. An unparsable line anywhere else is
+    corruption rather than a torn write, and is still refused loudly.
+    """
+    if not path.is_file():
+        return [], False
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    torn_candidate = len(lines) if text and not text.endswith("\n") else None
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record: Any = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if line_number == torn_candidate:
+                return records, True
+            raise ValueError(f"invalid JSON in {path} at line {line_number}") from exc
+        if not isinstance(record, dict):
+            # Not softened for the torn line: every record starts with ``{``, so a
+            # truncated prefix of one cannot parse into something else.
+            raise ValueError(f"invalid record in {path} at line {line_number}")
+        records.append(record)
+    return records, False
+
+
+def parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
 def restrict_run_dir(path: Path) -> None:
     """Best-effort restrictive permissions (owner-only) on Unix."""
     if os.name != "nt":

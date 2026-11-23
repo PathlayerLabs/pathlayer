@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from pathlayer.adapters.openclaw_readable import report_payload
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
 from pathlayer.adapters.openclaw_report import (
     COST_BUDGET_DISABLED,
@@ -967,7 +968,7 @@ def test_a_completed_run_gets_a_report_matching_its_directory(tmp_path: Path) ->
 
     run = _run(tmp_path, "run-clean")
     stored = json.loads(run.report_path.read_text(encoding="utf-8"))
-    assert stored == build_run_report(run).to_dict()
+    assert stored == report_payload(run, build_run_report(run))
     assert stored["outcome"] == "completed"
     assert stored["run_id"] == "run-clean"
     assert stored["session_key"] == "sess-1"
@@ -1570,10 +1571,15 @@ def test_cli_shows_one_named_run_in_full(
     assert main(["run-b", "--runs-root", str(tmp_path)]) == 0
 
     out = capsys.readouterr().out
-    assert "run run-b" in out
-    assert "outcome: stopped" in out
-    assert "stop reason: loop" in out
+    assert "Run run-b" in out
+    assert "Status: Stop decided by Pathlayer" in out
+    assert "Pathlayer decided to stop the run: the agent kept repeating" in out
     assert "run-a" not in out
+
+    assert main(["run-b", "--technical", "--runs-root", str(tmp_path)]) == 0
+    technical = capsys.readouterr().out
+    assert "outcome: stopped" in technical
+    assert "stop reason: loop" in technical
 
 
 def test_cli_last_selects_the_most_recently_started_run(
@@ -1581,7 +1587,7 @@ def test_cli_last_selects_the_most_recently_started_run(
 ) -> None:
     _three_runs(tmp_path)
     assert main(["--last", "--runs-root", str(tmp_path)]) == 0
-    assert "run run-c" in capsys.readouterr().out
+    assert "Run run-c" in capsys.readouterr().out
 
 
 def test_cli_today_lists_only_todays_runs(
@@ -1605,7 +1611,7 @@ def test_cli_all_lists_every_run_one_line_each_in_order(
 
     lines = capsys.readouterr().out.strip().splitlines()
     assert [line.split()[1] for line in lines] == ["run-a", "run-b", "run-c"]
-    assert "stopped" in lines[1]
+    assert lines[1].endswith("Stop decided by Pathlayer")
 
 
 def test_cli_json_mode_emits_the_structured_report(
@@ -1629,7 +1635,7 @@ def test_cli_reads_the_runs_root_from_the_environment(
     monkeypatch.setenv("PATHLAYER_RUNS_DIR", str(tmp_path))
 
     assert main(["run-env"]) == 0
-    assert "run run-env" in capsys.readouterr().out
+    assert "Run run-env" in capsys.readouterr().out
 
 
 def test_cli_refuses_an_unknown_run_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -740,7 +740,7 @@ def test_single_run_report_prints_its_attribution(
 ) -> None:
     _mixed_store(tmp_path)
 
-    assert main(["r1", "--runs-root", str(tmp_path)]) == 0
+    assert main(["r1", "--technical", "--runs-root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "cost attribution:\n  captured: $0.0024 over 2 event(s)" in out
     assert "  attributed to a run: $0.0024 over 2 event(s)" in out
@@ -790,7 +790,7 @@ def test_2026_7_hook_order_reports_model_and_same_total(
     )
     assert run.late_events_path.exists() == (ordering == "post_run")
     assert not manifest["stopped"]
-    assert main(["fixture-run", "--runs-root", str(tmp_path)]) == 0
+    assert main(["fixture-run", "--technical", "--runs-root", str(tmp_path)]) == 0
     text = capsys.readouterr().out
     assert "$0.0210 effective" in text
     assert (
