@@ -137,7 +137,14 @@ def _report(status: str = "completed", **kwargs: Any) -> SessionReport:
             {"status": "interrupted", "interrupted_while_awaiting_retry": True},
             "Interrupted while waiting for a retry: the listener restarted",
         ),
-        ({"status": "started"}, "In progress: no end recorded yet"),
+        (
+            {"status": "started"},
+            "No end recorded: the run may still be running, or its listener stopped",
+        ),
+        (
+            {"status": "completed", "outcome": "ok", "failed_attempts": 2},
+            "Finished (OpenClaw reported success) after 2 failed attempt(s)",
+        ),
     ],
 )
 def test_one_status_line_per_situation(manifest: dict[str, Any], expected: str) -> None:
@@ -151,6 +158,12 @@ def test_a_stop_says_whether_openclaw_was_told_to_enforce_it() -> None:
 
     report = _report(stopped=True)
     report.tool_call_gate = enforced
+    assert display_status(stopped, report) == (
+        "Stop decided by Pathlayer (enforced, but no later tool call was attempted)"
+    )
+    report.tool_call_gate = ToolCallGate(
+        queries=3, enforced=True, blocked=(BlockedToolCall("exec", "c3", None, "loop: 5x"),)
+    )
     assert display_status(stopped, report) == "Stopped by Pathlayer"
     report.tool_call_gate = passive
     assert display_status(stopped, report) == (
@@ -243,7 +256,10 @@ def test_blocked_calls_are_named_with_their_tool_and_time(tmp_path: Path) -> Non
     assert gate is not None and gate.blocked
 
     text = render_run_text(run, report)
-    assert f"Calls blocked by Pathlayer: {len(gate.blocked)} of {gate.queries} checked" in text
+    assert (
+        f"Calls blocked by Pathlayer: {len(gate.blocked)} of {gate.queries} tool call(s) "
+        "OpenClaw asked about"
+    ) in text
     first = gate.blocked[0]
     assert first.at is not None
     assert f"  {first.at[11:19]} UTC  exec -- the run was stopped (loop:" in text
@@ -301,7 +317,7 @@ def test_a_quiet_run_says_pathlayer_did_nothing(tmp_path: Path) -> None:
 
     text = render_run_text(run, build_run_report(run))
     assert "Status: Finished (OpenClaw reported success)" in text
-    assert "  nothing: it checked 1 tool call(s) and never intervened" in text
+    assert "  nothing: it analyzed 1 event(s) (tool calls and model replies) and never" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -398,3 +414,59 @@ def test_a_long_reason_is_clipped_in_plain_words(tmp_path: Path) -> None:
     assert line.endswith("...)")
     assert len(line) < 250
     assert long_reason in render_run_text(run, report, technical=True)
+
+
+def test_a_stop_while_waiting_for_a_retry_keeps_its_wording() -> None:
+    manifest = {"status": "awaiting_retry", "failed_attempts": 1, "stopped": True}
+    report = _report("awaiting_retry", stopped=True)
+    report.tool_call_gate = ToolCallGate(queries=1, enforced=False)
+    assert display_status(manifest, report) == (
+        "Waiting for a retry: attempt 1 did not succeed; "
+        "stop decided by Pathlayer (not enforced: recording only)"
+    )
+
+
+def test_calls_refused_by_the_in_flight_cap_are_an_intervention(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    recorder.process_payload(_start("run-cap"))
+    recorder.process_payload(_read("run-cap", 0))
+    for index in range(6):
+        query = _query("run-cap", f"same-{index}")
+        query["event"]["paramsDigest"] = "d" * 64
+        recorder.tool_call_decision(query)
+    recorder.process_payload(_end("run-cap"))
+    run = _run(tmp_path, "run-cap")
+    report = build_run_report(run)
+    assert report.actions == ()
+    assert report.tool_call_gate is not None and report.tool_call_gate.blocked
+
+    text = render_run_text(run, report)
+    assert "nothing:" not in text
+    assert "no detector asked for an action; the tool-call gate blocked calls (below)" in text
+    assert "exec -- the same call with the same arguments was already running" in text
+
+
+def test_a_non_finite_event_index_is_skipped(tmp_path: Path) -> None:
+    run = _stopped_run(tmp_path)
+    with run.decisions_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_index": Infinity, "received_at": "x", "analyzed": false}\n')
+        handle.write('{"event_index": NaN, "received_at": "x", "analyzed": false}\n')
+    assert "x" not in event_times(run).values()
+
+
+def test_a_time_with_another_offset_is_shown_in_utc(tmp_path: Path) -> None:
+    run = _stopped_run(tmp_path)
+    _pin_times(run)
+    run.update_manifest(ended_at="2026-11-20T18:01:01+01:00")
+    assert "Ended: 17:01:01 UTC" in render_run_text(run, build_run_report(run))
+
+
+def test_cli_refuses_technical_outside_a_single_text_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stopped_run(tmp_path)
+    for extra in (["--all"], ["--today"], ["--last", "--json"]):
+        with pytest.raises(SystemExit):
+            main([*extra, "--technical", "--runs-root", str(tmp_path)])
+    assert "--technical applies to the text report of one run" in capsys.readouterr().err

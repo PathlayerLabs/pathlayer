@@ -1011,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
     modes = [args.run_id is not None, args.last, args.today, args.all]
     if sum(1 for mode in modes if mode) != 1:
         parser.error("choose exactly one of: run_id, --last, --today, --all")
+    if args.technical and (args.today or args.all or args.as_json or args.cost_attribution):
+        parser.error("--technical applies to the text report of one run (run_id or --last)")
 
     store = RunStore(args.runs_root or runs_root_from_env())
     try:

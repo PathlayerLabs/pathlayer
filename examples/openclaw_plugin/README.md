@@ -582,7 +582,7 @@ Model: eu.anthropic.claude-sonnet-4-5-20250929-v1:0 (bedrock)
 What Pathlayer did
   12:31:12 UTC  Pathlayer decided to stop the run: the agent kept repeating the same tool calls (loop: 5x repeat of 1-action block)
 
-Calls blocked by Pathlayer: 3 of 9 checked
+Calls blocked by Pathlayer: 3 of 9 tool call(s) OpenClaw asked about
   12:31:13 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
   ...
 
@@ -597,10 +597,11 @@ Detector readings: pathlayer-report run-abc123 --technical
 - **One status.** It combines how far the run got (`status` in the manifest)
   with how it ended (`outcome`): stopped by Pathlayer, ended with an error
   reported by OpenClaw, finished (OpenClaw reported success, which is its claim,
-  not a proof that the task was done), waiting for a retry, interrupted, or in
-  progress. A stop reads "Stopped by Pathlayer" only when the tool-call gate was
-  enforced; a recording-only listener says "Stop decided by Pathlayer (not
-  enforced: recording only)". On OpenClaw, only a STOP has an actuator: a
+  not a proof that the task was done), waiting for a retry, interrupted, or
+  no end recorded yet. A stop reads "Stopped by Pathlayer" only when the
+  tool-call gate was enforced and blocked at least one call; otherwise it reads
+  "Stop decided by Pathlayer", saying why (recording only, or no later tool call
+  was attempted). On OpenClaw, only a STOP has an actuator: a
   warning is said to be recorded only.
 - **Clock times.** Times are UTC, as the listener received each event; a time on
   another day than the start carries its date. `report.json` carries the same

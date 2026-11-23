@@ -22,8 +22,9 @@ is OpenClaw's claim, and is reported as such.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pathlayer.adapters.openclaw_run_store import (
@@ -113,6 +114,8 @@ def event_times(run: RunDirectory) -> dict[int, str]:
         at = record.get("received_at")
         if isinstance(index, bool) or not isinstance(index, (int, float)):
             continue
+        if not math.isfinite(index):
+            continue
         if isinstance(at, str):
             times.setdefault(int(index), at)
     return times
@@ -124,12 +127,23 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _stop_wording(gate: ToolCallGate | None) -> str:
-    """ "Stopped" only when OpenClaw was told to enforce it."""
+    """ "Stopped" only when OpenClaw was told to block, and something was blocked.
+
+    An enforced STOP that no later tool call ran into blocked nothing: the
+    agent ended on its own, and saying Pathlayer stopped it would be a claim
+    the gate log does not support.
+    """
     if gate is None:
         return "Stop decided by Pathlayer"
-    if gate.enforced:
+    if not gate.enforced:
+        return "Stop decided by Pathlayer (not enforced: recording only)"
+    if gate.blocked:
         return "Stopped by Pathlayer"
-    return "Stop decided by Pathlayer (not enforced: recording only)"
+    return "Stop decided by Pathlayer (enforced, but no later tool call was attempted)"
+
+
+def _lower_first(text: str) -> str:
+    return text[:1].lower() + text[1:]
 
 
 def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
@@ -149,7 +163,7 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
         attempts = f"attempt {failed_attempts}" if failed_attempts else "the last attempt"
         line = f"Waiting for a retry: {attempts} did not succeed"
         if manifest.get("stopped") is True:
-            line += f"; {_stop_wording(report.tool_call_gate).lower()}"
+            line += f"; {_lower_first(_stop_wording(report.tool_call_gate))}"
         return line
     if manifest.get("stopped") is True or report.outcome is SessionOutcome.STOPPED:
         line = _stop_wording(report.tool_call_gate)
@@ -162,7 +176,8 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
             detail = f": {_clip(error, _MAX_STATUS_ERROR_CHARS)}" if isinstance(error, str) else ""
             return f"Ended with an error reported by OpenClaw{detail}"
         if outcome == _OUTCOME_OK:
-            return "Finished (OpenClaw reported success)"
+            after = f" after {failed_attempts} failed attempt(s)" if failed_attempts else ""
+            return f"Finished (OpenClaw reported success){after}"
         if outcome == _OUTCOME_UNKNOWN:
             return "Ended without success, and without an error (for example, aborted)"
         return "Finished"
@@ -170,7 +185,7 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
         if interrupted_waiting:
             return "Interrupted while waiting for a retry: the listener restarted"
         return "Interrupted: the run never reached its end (the listener stopped or restarted)"
-    return "In progress: no end recorded yet"
+    return "No end recorded: the run may still be running, or its listener stopped"
 
 
 def _clock(at: str | None, start_day: str | None) -> str | None:
@@ -178,6 +193,8 @@ def _clock(at: str | None, start_day: str | None) -> str | None:
     moment = parse_iso(at)
     if moment is None:
         return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC)
     day = moment.date().isoformat()
     clock = moment.strftime("%H:%M:%S")
     return f"{clock} UTC" if day == start_day else f"{day} {clock} UTC"
@@ -230,7 +247,11 @@ def _gate_lines(gate: ToolCallGate | None, start_day: str | None) -> list[str]:
     if gate is None:
         return []
     blocked = len(gate.blocked)
-    lines = ["", f"Calls blocked by Pathlayer: {blocked} of {gate.queries} checked"]
+    lines = [
+        "",
+        f"Calls blocked by Pathlayer: {blocked} of {gate.queries} tool call(s) "
+        "OpenClaw asked about",
+    ]
     if not gate.enforced:
         lines.append("  enforcement was off: Pathlayer only recorded, OpenClaw ran every call")
     for call in gate.blocked[:_MAX_BLOCKED_LINES]:
@@ -341,13 +362,19 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
         lines.append(f"Model: {model}")
 
     lines.extend(["", "What Pathlayer did"])
+    gate = report.tool_call_gate
     if report.actions:
         lines.extend(_action_line(action, times, start_day) for action in report.actions)
+    elif gate is not None and gate.blocked:
+        # A call refused by the in-flight cap is an intervention without any
+        # detector action: never say "nothing" above the list of blocked calls.
+        lines.append("  no detector asked for an action; the tool-call gate blocked calls (below)")
     elif report.events_analyzed == 0:
-        lines.append("  nothing: no tool call of this run was analyzed")
+        lines.append("  nothing: no event of this run was analyzed")
     else:
         lines.append(
-            f"  nothing: it checked {report.events_analyzed} tool call(s) and never intervened"
+            f"  nothing: it analyzed {report.events_analyzed} event(s) (tool calls and model "
+            "replies) and never intervened"
         )
     lines.extend(_gate_lines(report.tool_call_gate, start_day))
 
