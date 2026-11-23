@@ -19,6 +19,7 @@ from pathlayer.adapters.openclaw_resume import (
     PROVEN,
     SCHEMA,
     UNKNOWN,
+    _merged_entries,
     _template_key,
     _why_stopped,
     build_resume_dossier,
@@ -28,7 +29,7 @@ from pathlayer.adapters.openclaw_resume import (
 )
 from pathlayer.adapters.openclaw_run_store import RunDirectory, RunStore
 from pathlayer.policies import Action
-from pathlayer.postmortem import TickRecord, build_session_report
+from pathlayer.postmortem import BlockedToolCall, TickRecord, ToolCallGate, build_session_report
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SECTIONS = (
@@ -592,12 +593,60 @@ def test_a_passive_stop_counts_the_calls_that_still_ran(tmp_path: Path) -> None:
     assert "After the stop decision, 3 more tool call(s) ran" in text
 
 
+def _blocked_result(run_id: str, call: str) -> dict[str, Any]:
+    payload = _read(run_id, 0)
+    details = {
+        "status": "blocked",
+        "deniedReason": "plugin-before-tool-call",
+        "reason": "Pathlayer stopped this run",
+    }
+    payload["event"] = {**payload["event"], "toolCallId": call, "result": {"details": details}}
+    return payload
+
+
 def test_an_enforced_stop_does_not_count_the_calls_it_blocked(tmp_path: Path) -> None:
-    run = _loop(OpenClawRunRecorder(tmp_path, enforce=True), "run-a")
-    dossier = _stored(run)
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.process_payload(_start("run-a"))
+    for index in range(5):
+        recorder.tool_call_decision(_query("run-a", f"call-{index}"))
+        recorder.process_payload(_read("run-a", index))
+    for index in range(5, 8):
+        assert recorder.tool_call_decision(_query("run-a", f"call-{index}"))["block"] is True
+        recorder.process_payload(_blocked_result("run-a", f"call-{index}"))
+    recorder.process_payload(_end("run-a"))
+    dossier = _stored(_run(tmp_path, "run-a"))
 
     assert dossier["why_stopped"]["tool_calls_after_stop"] == 0
+    assert dossier["why_stopped"]["headline"] == "Pathlayer stopped the run"
+    assert dossier["why_stopped"]["enforcement"] == "enforced: 3 call(s) blocked after the stop"
     assert "ran after the stop decision" not in dossier["summary"][1]
+
+
+def test_a_cap_block_alone_does_not_make_the_stop_enforced() -> None:
+    ticks = [TickRecord(index=0, ts=0.0, fused=1.0, action=Action.STOP, reason="loop: 5x")]
+    report = build_session_report(
+        run_id="r", status="completed", ticks=ticks, events_recorded=1, stopped=True
+    )
+    cap = BlockedToolCall("read", "c", None, "identical calls in flight: 4 of 4")
+    report.tool_call_gate = ToolCallGate(queries=5, enforced=True, blocked=(cap,))
+    why = _why_stopped("pathlayer_stop", {"stopped": True}, report, None, None)
+
+    assert why["headline"] == "Pathlayer decided to stop the run"
+    assert why["enforcement"] == "enforced, but no later tool call was attempted"
+
+
+def test_failures_about_different_files_stay_separate_lines() -> None:
+    entries = [
+        {"statement": "read failed: ENOENT (file_1.txt)", "count": 1},
+        {"statement": "read failed: ENOENT (file_2.txt)", "count": 1},
+        {"statement": "wrote a.md (reported size 10)", "count": 1},
+        {"statement": "wrote a.md (reported size 12)", "count": 1},
+    ]
+    assert _merged_entries(entries) == [
+        "read failed: ENOENT (file_1.txt)",
+        "read failed: ENOENT (file_2.txt)",
+        "wrote a.md (reported size 12) (x2; the last one shown)",
+    ]
 
 
 def _read_text(run_id: str, call: str, text: str) -> dict[str, Any]:

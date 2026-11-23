@@ -704,9 +704,8 @@ in `resume.md`:
 
 `resume.md` shows clock times (UTC, with the date when it is not the start
 day), leaves out an empty section (a cost that was not measured is listed under
-what is not known), and folds ledger lines that differ only by the number in
-their last parenthesis (a file read back at 11 sizes) into one line with the
-count. `resume.json` keeps every field, every ISO time and every entry.
+what is not known), and folds the reads or writes of one file that differ only
+by their size (a file read back at 11 sizes) into one line with the count. `resume.json` keeps every field, every ISO time and every entry.
 
 ```bash
 pathlayer-report "$RUN" --resume          # resume.md, rebuilt from the run directory
@@ -755,9 +754,11 @@ actuator, the tool-call gate:
 - a WARN or a lighter action is "recorded only".
 
 What happened reads "Pathlayer stopped the run" only when the gate blocked at
-least one call; otherwise "Pathlayer decided to stop the run". Tool calls that
+least one call because of the stop (not the cap on identical calls in flight);
+otherwise "Pathlayer decided to stop the run". Tool calls that
 still ran after the stop decision are counted from the `after_tool_call`
-results; a call the gate blocked, or that OpenClaw denied, is not counted. A
+results; a call whose result says it was blocked or denied is not counted, and a
+call delivered twice counts once. A
 call that ran may have started before the decision: the count says calls went
 on, not why.
 
@@ -765,8 +766,8 @@ on, not why.
 ledger proves what tool calls did, not that the work is right. The restart
 options are suggestions.
 
-**The 3-line summary.** The summary at the top is built from fixed wording and
-counts only, with no argument and no error text:
+**The 3-line summary.** `resume.json` carries a `summary` built from fixed
+wording and counts only, with no argument and no error text:
 
 - what stopped, when, and why;
 - how many facts are proven, failed and unproven, how many calls Pathlayer

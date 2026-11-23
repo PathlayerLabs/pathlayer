@@ -44,6 +44,7 @@ from pathlayer.adapters.openclaw_readable import (
     event_times,
     first_stop,
     start_day_of,
+    stop_blocks,
     tool_results_after,
 )
 from pathlayer.adapters.openclaw_report import build_run_report, llm_cost_split
@@ -372,8 +373,8 @@ def _enforcement(gate: Any) -> str:
         return "unknown: no gate log"
     if not gate.enforced:
         return "not enforced: recorded only"
-    if gate.blocked:
-        return f"enforced: {len(gate.blocked)} call(s) blocked"
+    if stop_blocks(gate):
+        return f"enforced: {stop_blocks(gate)} call(s) blocked after the stop"
     return "enforced, but no later tool call was attempted"
 
 
@@ -390,7 +391,7 @@ def _why_stopped(
         gate = report.tool_call_gate
         # "Stopped" only when the gate blocked a call; otherwise only the
         # decision is on record.
-        enforced = gate is not None and gate.enforced and bool(gate.blocked)
+        enforced = gate is not None and gate.enforced and stop_blocks(gate) > 0
         return _section(
             PROVEN if _is_proven(report.stop_reason) else DECIDED,
             cause,
@@ -747,7 +748,7 @@ def build_resume_dossier(
         # agent_end carries it.
         error = _last_attempt_error(raw)
     after_stop = tool_results_after(run, stop_sequence) if cause == CAUSE_STOP else None
-    last_record_at = max(received.values(), default=None)
+    last_record_at = received[max(received)] if received else None
     why = _why_stopped(
         cause, {**manifest, "error": error}, report, stop_at, after_stop, last_record_at
     )
@@ -807,9 +808,12 @@ _HOW_WE_KNOW = {
     UNKNOWN: "not known: the records end before it",
 }
 
-# Ledger entries that differ only by the number in their last parenthesis
-# (a file read back 11 times at 11 sizes) are one line in resume.md.
-_TRAILING_NUMBER = re.compile(r"\d+(?=[^()]*\)\s*$)")
+# Reads and writes of one file that differ only by their size (a file read back
+# 11 times at 11 sizes) are one line in resume.md. Only these two shapes: a
+# failure's error text can end in a number that tells two files apart.
+_SIZED_FILE_ENTRY = re.compile(
+    r"^((?:read .+ back|wrote .+) \((?:reported size )?)\d+(( characters)?\))$"
+)
 
 
 def _bullets(lines: Iterable[str]) -> list[str]:
@@ -819,7 +823,8 @@ def _bullets(lines: Iterable[str]) -> list[str]:
 def _merged_entries(entries: Sequence[Mapping[str, Any]]) -> list[str]:
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for entry in entries:
-        groups.setdefault(_TRAILING_NUMBER.sub("#", entry["statement"]), []).append(entry)
+        key = _SIZED_FILE_ENTRY.sub(r"\1#\2", entry["statement"])
+        groups.setdefault(key, []).append(entry)
     lines = []
     for group in groups.values():
         total = sum(entry["count"] for entry in group)
@@ -884,11 +889,16 @@ def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
     lines.extend(_bullets(facts))
 
     actions = dossier["pathlayer_actions"]
-    others = [a for a in actions["actions"] if a["reason"] != why.get("reason")]
+
+    # The stop itself is already said above, with its time and its enforcement.
+    def is_the_stop(action: Mapping[str, Any]) -> bool:
+        return bool(action["action"] == Action.STOP.name and action["reason"] == why.get("reason"))
+
+    others = [a for a in actions["actions"] if not is_the_stop(a)]
     if others or actions["blocked_calls"]:
         lines.extend(["", "## What Pathlayer did", ""])
         for action in actions["actions"]:
-            same = action["reason"] == why.get("reason")
+            same = is_the_stop(action)
             reason = "" if same or not action["reason"] else f": `{_md(action['reason'])}`"
             lines.append(
                 f"- {clock(action['at'])}: {action['action']} ({action['delivery']}){reason}"
