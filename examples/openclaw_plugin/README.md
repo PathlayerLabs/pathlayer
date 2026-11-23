@@ -682,6 +682,70 @@ For tuning, the most actionable line is often the fused score (`--technical`): a
 never reached the stop threshold is reported as exactly that, which is the signal
 you need to retune a threshold.
 
+## Resume dossier
+
+When a run does not end well, Pathlayer writes a resume dossier next to its
+report: `resume.json` (schema `pathlayer.resume/1`) and `resume.md`, both
+owner-only (`0600`). It answers, from the run directory alone:
+
+- why the run stopped;
+- what was tried, grouped by tool and arguments;
+- the last call without an error;
+- the proof ledger;
+- what Pathlayer did;
+- the estimated cost before and after the stop;
+- how to restart;
+- what is not known.
+
+```bash
+pathlayer-report "$RUN" --resume          # resume.md, rebuilt from the run directory
+pathlayer-report --last --resume --json   # resume.json
+```
+
+**When it is written.** A dossier is written:
+
+- at the end of a run that Pathlayer stopped, that OpenClaw ended with an error
+  or without success, or in which Pathlayer blocked a call;
+- provisionally, at the STOP itself and when an attempt fails (`awaiting_retry`);
+- for an interrupted run, by the startup sweep.
+
+A run that ended with OpenClaw reporting success, with nothing stopped or
+blocked, gets none. A provisional dossier is removed if a later attempt
+succeeds. `--resume` builds the dossier on the fly and writes nothing.
+
+**How each section is known.** Every section is marked with how it is known:
+
+- `observed`: the runtime reported it;
+- `decided`: Pathlayer chose it;
+- `proven`: the stop rests on facts a reader can check;
+- `unknown`.
+
+A stop is `proven` only for `loop` (identical calls), `retry` (identical
+failures) and a progress contract (an unmet checkpoint). A `no_progress`,
+`budget` or `resource` stop stays `decided`.
+
+**What it does not claim.** The dossier never says the task succeeded. The
+ledger proves what tool calls did, not that the work is right. The restart
+options are suggestions.
+
+**The 3-line summary.** The summary at the top is built from fixed wording and
+counts only, with no argument and no error text:
+
+- what stopped, and why;
+- how many facts are proven, failed and unproven;
+- the decision a person has to make.
+
+**Privacy.**
+
+- Arguments appear only as the plugin's digest. That digest groups identical
+  calls within one OpenClaw plugin process only: after a gateway restart, the
+  same call gets another digest.
+- Errors and reasons are clipped to 120 characters. Token-like strings (API
+  keys, bearer tokens, e-mail addresses, long hex or base64 runs) are masked.
+- The ledger keeps the report's own statements, with commands and paths
+  clipped and masked the same way. Review `resume.md` before sharing it, as
+  you would `report.json`.
+
 ## Export one run
 
 ```bash

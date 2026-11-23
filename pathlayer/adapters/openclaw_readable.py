@@ -201,7 +201,7 @@ def stop_blocks(gate: ToolCallGate | None) -> int:
     )
 
 
-def _stop_wording(gate: ToolCallGate | None) -> str:
+def stop_wording(gate: ToolCallGate | None) -> str:
     """ "Stopped" only when OpenClaw was told to block, and something was blocked.
 
     An enforced STOP that no later tool call ran into blocked nothing: the
@@ -238,10 +238,10 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
         attempts = f"attempt {failed_attempts}" if failed_attempts else "the last attempt"
         line = f"Waiting for a retry: {attempts} did not succeed"
         if manifest.get("stopped") is True:
-            line += f"; {_lower_first(_stop_wording(report.tool_call_gate))}"
+            line += f"; {_lower_first(stop_wording(report.tool_call_gate))}"
         return line
     if manifest.get("stopped") is True or report.outcome is SessionOutcome.STOPPED:
-        line = _stop_wording(report.tool_call_gate)
+        line = stop_wording(report.tool_call_gate)
         if status != COMPLETED_STATUS:
             line += " -- record incomplete: the run never reached its end"
         return line
@@ -280,15 +280,20 @@ def _start_day(started_at: Any) -> str | None:
     return moment.date().isoformat() if moment is not None else None
 
 
-def _plain_reason(reason: str) -> str:
+def detector_meaning(reason: str) -> str | None:
+    """What the detector named at the head of a reason means, without the reason."""
+    name, sep, _ = reason.partition(":")
+    return _DETECTOR_MEANING.get(name.strip()) if sep or reason in _DETECTOR_MEANING else None
+
+
+def plain_reason(reason: str) -> str:
     """A detector's reason in plain words, keeping the reason itself as evidence.
 
     The reason is clipped: a retry reason quotes the tool's error, which can be
     long and is kept whole in ``report.json`` and the appendix.
     """
-    name, sep, _ = reason.partition(":")
+    meaning = detector_meaning(reason)
     reason = _clip(reason, _MAX_REASON_CHARS)
-    meaning = _DETECTOR_MEANING.get(name.strip()) if sep or reason in _DETECTOR_MEANING else None
     if meaning is None:
         return reason or "no reason recorded"
     return f"{meaning} ({reason})"
@@ -301,7 +306,7 @@ def _action_line(action: ActionTaken, times: Mapping[int, str], start_day: str |
     else:
         verb = _DRY_RUN_VERB.get(action.action, f"would have chosen {action.action.name}")
         verb += " (observe-only mode, never applied)"
-    reason = f": {_plain_reason(action.reason)}" if action.reason else ""
+    reason = f": {plain_reason(action.reason)}" if action.reason else ""
     return f"  {when}  Pathlayer {verb}{reason}"
 
 
@@ -496,13 +501,16 @@ def summary_line(run: RunDirectory, report: SessionReport) -> str:
 
 
 __all__ = [
+    "detector_meaning",
     "display_status",
     "event_times",
     "first_stop",
+    "plain_reason",
     "readable_fields",
     "render_run_text",
     "report_payload",
     "stop_blocks",
+    "stop_wording",
     "summary_line",
     "tool_results_after",
 ]

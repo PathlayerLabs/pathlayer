@@ -88,6 +88,7 @@ from pathlayer.adapters.openclaw_report import (
     tick_columns,
     write_run_report,
 )
+from pathlayer.adapters.openclaw_resume import write_resume_dossier
 from pathlayer.adapters.openclaw_run_store import (
     ENDED_BY_NEXT_RUN,
     INTERRUPTED_WHILE_AWAITING_RETRY,
@@ -273,7 +274,24 @@ def _write_report(directory: RunDirectory) -> bool:
             exc,
         )
         return False
+    _write_resume(directory)
     return True
+
+
+def _write_resume(directory: RunDirectory) -> None:
+    """Write (or remove) a run's resume dossier, never letting a failure escape.
+
+    Same contract as :func:`_write_report`: the dossier summarizes durable
+    files, so a failure costs the dossier only, and is logged.
+    """
+    try:
+        write_resume_dossier(directory)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "could not write the resume dossier for run %r: %s",
+            directory.original_run_id,
+            exc,
+        )
 
 
 def _budget_detector_for(config: PathlayerConfig | None) -> BudgetDetector | None:
@@ -1714,6 +1732,10 @@ class OpenClawRunRecorder:
             self._record_pipeline_durability(active.directory, active.pipeline)
             active.persistence_reported = True
         self._record_decision(active, record, event, action, index=index)
+        if active.pipeline.stopped:
+            # The STOP was just latched (the stopped branch above returned
+            # otherwise): a provisional dossier now, rewritten when the run ends.
+            _write_resume(active.directory)
         return True
 
     def _handle_run_end(
