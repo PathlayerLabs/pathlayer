@@ -20,6 +20,7 @@ from pathlayer.adapters.openclaw_readable import (
     first_stop,
     render_run_text,
     report_payload,
+    stop_blocks,
     tool_results_after,
 )
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
@@ -369,21 +370,32 @@ def test_calls_that_ran_after_the_stop_are_counted_never_the_blocked_ones(
     recorder.process_payload(_start("run-a"))
     for index in range(5):
         recorder.process_payload(_read("run-a", index))
-    # Blocked by the gate: its failed result never ran.
+    # Blocked by the gate: its result says so, and it never ran.
     assert recorder.tool_call_decision(_query("run-a", "gated"))["block"] is True
-    recorder.process_payload(_result("run-a", "gated", {"error": "blocked"}))
+    blocked = {
+        "details": {
+            "status": "blocked",
+            "deniedReason": "plugin-before-tool-call",
+            "reason": "Pathlayer stopped this run",
+        }
+    }
+    recorder.process_payload(_result("run-a", "gated", blocked))
+    # The gate said block, but the plugin failed open and the call ran.
+    assert recorder.tool_call_decision(_query("run-a", "leaked"))["block"] is True
+    recorder.process_payload(_result("run-a", "leaked", "ok"))
     # Denied by OpenClaw itself.
     denied = {"details": {"status": "blocked", "deniedReason": "approval"}}
     recorder.process_payload(_result("run-a", "denied", denied))
-    # Already running when Pathlayer decided: it ran.
+    # Already running when Pathlayer decided: it ran, and is delivered twice.
+    recorder.process_payload(_result("run-a", "running", "ok"))
     recorder.process_payload(_result("run-a", "running", "ok"))
     recorder.process_payload(_end("run-a"))
     run = _run(tmp_path, "run-a")
 
     sequence, _ = first_stop(run)
-    assert tool_results_after(run, sequence) == 1
+    assert tool_results_after(run, sequence) == 2
     text = render_run_text(run, build_run_report(run))
-    assert "after the stop decision, 1 more tool call(s) ran (already running" in text
+    assert "after the stop decision, 2 more tool call(s) ran (already running" in text
 
 
 def test_no_stop_means_no_count_of_calls_after_it(tmp_path: Path) -> None:
@@ -522,3 +534,17 @@ def test_cli_refuses_technical_outside_a_single_text_report(
         with pytest.raises(SystemExit):
             main([*extra, "--technical", "--runs-root", str(tmp_path)])
     assert "--technical applies to the text report of one run" in capsys.readouterr().err
+
+
+def test_calls_blocked_by_the_in_flight_cap_alone_are_not_a_stop() -> None:
+    cap = BlockedToolCall(
+        tool_name="read", tool_call_id="c", at=None, reason="identical calls in flight: 4 of 4"
+    )
+    gate = ToolCallGate(queries=5, blocked=(cap,), enforced=True, would_have_blocked=0)
+    report = _report(stopped=True)
+    report.tool_call_gate = gate
+
+    assert stop_blocks(gate) == 0
+    assert display_status({"status": "completed", "stopped": True}, report) == (
+        "Stop decided by Pathlayer (enforced, but no later tool call was attempted)"
+    )

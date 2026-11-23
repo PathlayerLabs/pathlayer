@@ -599,11 +599,16 @@ Detector readings: pathlayer-report run-abc123 --technical
   reported by OpenClaw, finished (OpenClaw reported success, which is its claim,
   not a proof that the task was done), waiting for a retry, interrupted, or
   no end recorded yet. A stop reads "Stopped by Pathlayer" only when the
-  tool-call gate was enforced and blocked at least one call; otherwise it reads
+  tool-call gate was enforced and blocked at least one call because of the stop
+  (a call blocked by the cap on identical calls in flight does not count);
+  otherwise it reads
   "Stop decided by Pathlayer", saying why: not enforced (recorded only), no later
   tool call attempted, or enforcement unknown because the run has no gate log.
   When OpenClaw still reported tool call results after the stop decision, their
-  count is given: those calls were already running, or were not blocked. On
+  count is given: those calls were already running, or were not blocked. A call
+  counts when its own result does not say it was blocked or denied, even if the
+  gate answered "block" (the plugin fails open when its decision times out); a
+  call delivered twice counts once. On
   OpenClaw, only a STOP has an actuator: a warning is said to be recorded only.
   "Blocked" always means blocked by Pathlayer's gate; a call OpenClaw itself
   refused is "denied by OpenClaw".

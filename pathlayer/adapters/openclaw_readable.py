@@ -150,9 +150,11 @@ def tool_results_after(run: RunDirectory, sequence: int | None) -> int | None:
     """How many tool calls OpenClaw reported as run after raw record ``sequence``.
 
     Counted from ``events.raw.jsonl`` (``after_tool_call`` records). A blocked
-    call comes back as a result too: one the gate blocked (its id is a
-    ``block`` in ``gate.jsonl``) or one whose result says it was blocked or
-    denied is not counted, since it never ran. A result that arrives after a
+    call comes back as a result too: one whose own result says it was blocked
+    (by Pathlayer's gate) or denied (by OpenClaw) is not counted, since it
+    never ran. A ``block`` in ``gate.jsonl`` is not enough: when the plugin's
+    decision times out it fails open and the call runs, which is exactly what
+    this count must show. A call delivered twice counts once. A result that arrives after a
     STOP decision comes from a call already running when Pathlayer decided, or
     one the stop did not block: the count says that calls went on, never which
     of the two. ``None`` without a stop or a readable journal.
@@ -163,13 +165,6 @@ def tool_results_after(run: RunDirectory, sequence: int | None) -> int | None:
         records, _ = read_journal(run.raw_events_path)
     except (OSError, ValueError):
         return None
-    try:
-        gate_records, _ = read_journal(run.gate_path)
-    except (OSError, ValueError):
-        gate_records = []
-    blocked_ids = {
-        record.get("tool_call_id") for record in gate_records if record.get("decision") == "block"
-    }
     later = [
         record
         for record in records
@@ -178,19 +173,32 @@ def tool_results_after(run: RunDirectory, sequence: int | None) -> int | None:
         and record["payload"].get("hook") == AFTER_TOOL_CALL
     ]
     not_run = {fact.sequence for fact in extract_facts(later) if fact.kind is FactKind.CALL_BLOCKED}
-    count = 0
+    ran: set[Any] = set()
     for record in later:
+        if record.get("sequence") in not_run:
+            continue
         event = record["payload"].get("event")
         call_id = event.get("toolCallId") if isinstance(event, Mapping) else None
-        if record.get("sequence") in not_run or (call_id is not None and call_id in blocked_ids):
-            continue
-        count += 1
-    return count
+        ran.add(call_id if isinstance(call_id, str) else ("sequence", record.get("sequence")))
+    return len(ran)
 
 
 def _clip(text: str, limit: int) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 3].rstrip() + "..."
+
+
+def stop_blocks(gate: ToolCallGate | None) -> int:
+    """Calls the gate blocked because the run was stopped.
+
+    The cap on identical calls in flight blocks calls too, before any stop:
+    those are not the stop's doing.
+    """
+    if gate is None:
+        return 0
+    return sum(
+        1 for call in gate.blocked if not (call.reason or "").startswith(_IN_FLIGHT_REASON_PREFIX)
+    )
 
 
 def _stop_wording(gate: ToolCallGate | None) -> str:
@@ -204,7 +212,7 @@ def _stop_wording(gate: ToolCallGate | None) -> str:
         return "Stop decided by Pathlayer (enforcement unknown: no gate log)"
     if not gate.enforced:
         return "Stop decided by Pathlayer (not enforced: recorded only)"
-    if gate.blocked:
+    if stop_blocks(gate):
         return "Stopped by Pathlayer"
     return "Stop decided by Pathlayer (enforced, but no later tool call was attempted)"
 
@@ -494,6 +502,7 @@ __all__ = [
     "readable_fields",
     "render_run_text",
     "report_payload",
+    "stop_blocks",
     "summary_line",
     "tool_results_after",
 ]
