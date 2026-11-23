@@ -1,0 +1,23 @@
+Run run-a (session sess-1, agent agent-1)
+Status: Stopped by Pathlayer
+Started: 2026-11-20 17:00:00 UTC   Ended: 17:01:01 UTC   (1m01s)
+
+What Pathlayer did
+  17:00:14 UTC  Pathlayer decided to stop the run: the agent kept repeating the same tool calls (loop: 5x repeat of 1-action block)
+  after the stop decision, 3 more tool call(s) ran (already running when Pathlayer decided, or not blocked)
+
+Calls blocked by Pathlayer: 4 of 8 tool call(s) OpenClaw asked about
+  17:00:14 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
+  17:00:15 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
+  17:00:16 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
+  17:00:17 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
+
+Proof ledger (observed facts, not a verdict on the task)
+  proven: none
+  failed: none
+  unproven:
+    read: no outcome fact in its result (x8)
+
+Cost: not measured
+
+Detector readings: pathlayer-report run-a --technical

@@ -52,12 +52,16 @@ from pathlayer.adapters.openclaw_lifecycle import (
     attempt_end_failed,
     extract_openclaw_run_id,
 )
+from pathlayer.adapters.openclaw_readable import render_run_text, report_payload, summary_line
 from pathlayer.adapters.openclaw_run_store import (
     ENDED_BY_NEXT_RUN,
     INTERRUPTED_WHILE_AWAITING_RETRY,
     RunDirectory,
     RunStore,
     atomic_write_json,
+    parse_iso,
+    read_journal,
+    read_json_object,
     runs_root_from_env,
 )
 from pathlayer.detectors.budget import BudgetDetector, BudgetState, budget_delta
@@ -154,42 +158,6 @@ def cost_manifest_fields(detector: BudgetDetector, state: BudgetState) -> dict[s
     }
 
 
-def _read_journal(path: Path) -> tuple[list[dict[str, Any]], bool]:
-    """Parse one append-only JSONL journal, tolerating a torn final line.
-
-    Returns the usable records and whether a truncated last line was dropped.
-
-    The journal is appended one flushed-and-fsynced line at a time, newline
-    included, so a complete record always ends with one. A last line without a
-    terminating newline is therefore the signature of a process killed
-    mid-write -- exactly the interrupted run this module exists to make
-    reportable. It is dropped, and the caller says so in the report rather than
-    refusing to report the run at all. An unparsable line anywhere else is
-    corruption rather than a torn write, and is still refused loudly.
-    """
-    if not path.is_file():
-        return [], False
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    torn_candidate = len(lines) if text and not text.endswith("\n") else None
-    records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            record: Any = json.loads(line)
-        except json.JSONDecodeError as exc:
-            if line_number == torn_candidate:
-                return records, True
-            raise ValueError(f"invalid JSON in {path} at line {line_number}") from exc
-        if not isinstance(record, dict):
-            # Not softened for the torn line: every record starts with ``{``, so a
-            # truncated prefix of one cannot parse into something else.
-            raise ValueError(f"invalid record in {path} at line {line_number}")
-        records.append(record)
-    return records, False
-
-
 def _is_legacy_decision(record: dict[str, Any]) -> bool:
     """True for an analyzed line written before OBS-2 added the tick columns."""
     return not any(column in record for column in _OBS2_COLUMNS)
@@ -270,8 +238,8 @@ def _duration_seconds(
         return float(duration_ms) / 1000.0
     if not completed:
         return None
-    start = _parse_iso(started_at)
-    end = _parse_iso(ended_at)
+    start = parse_iso(started_at)
+    end = parse_iso(ended_at)
     if start is None or end is None:
         return None
     return (end - start).total_seconds()
@@ -287,7 +255,7 @@ def _attempt_ends(run: RunDirectory) -> list[dict[str, Any]]:
     the cost attribution already names that corruption.
     """
     try:
-        records, _ = _read_journal(run.raw_events_path)
+        records, _ = read_journal(run.raw_events_path)
     except ValueError:
         return []
     ends: list[dict[str, Any]] = []
@@ -315,22 +283,6 @@ def _attempts_duration_seconds(ends: Sequence[dict[str, Any]]) -> float | None:
             return None
         total += float(value)
     return total / 1000.0
-
-
-def _parse_iso(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    return raw if isinstance(raw, dict) else {}
 
 
 def _optional_float(value: Any) -> float | None:
@@ -652,8 +604,8 @@ def build_cost_attribution(run: RunDirectory) -> CostAttribution:
     """
     manifest = run.read_manifest()
     pricing = _pinned_pricing(manifest)
-    raw, _ = _read_journal(run.raw_events_path)
-    late, _ = _read_journal(run.late_events_path)
+    raw, _ = read_journal(run.raw_events_path)
+    late, _ = read_journal(run.late_events_path)
     turn_started = any(_record_payload(record).get("hook") == BEFORE_AGENT_RUN for record in raw)
     attributed = late_share = without_start = CostShare()
     unattributed: dict[str, CostShare] = {}
@@ -695,7 +647,7 @@ def build_store_cost_attribution(runs: Sequence[RunDirectory]) -> CostAttributio
 def _journal_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[ToolEvent]:
     """The LLM cost events of a run that never wrote ``trace.json``, from its raw journal."""
     pricing = _pinned_pricing(manifest)
-    records, _ = _read_journal(run.raw_events_path)
+    records, _ = read_journal(run.raw_events_path)
     return [
         event
         for record in records
@@ -707,7 +659,7 @@ def _journal_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[Too
 def _post_run_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[ToolEvent]:
     """The LLM cost events of the usage received after the run ended, as attributed."""
     pricing = _pinned_pricing(manifest)
-    records, _ = _read_journal(run.late_events_path)
+    records, _ = read_journal(run.late_events_path)
     return [
         event
         for record in records
@@ -720,9 +672,9 @@ def _post_run_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[To
 def build_run_report(run: RunDirectory) -> SessionReport:
     """Rebuild the session report of one recorded run from its directory alone."""
     manifest = run.read_manifest()
-    decisions, truncated_journal = _read_journal(run.decisions_path)
+    decisions, truncated_journal = read_journal(run.decisions_path)
     ticks = [tick for tick in (_tick_from_decision(record) for record in decisions) if tick]
-    final = _read_json_object(run.final_path)
+    final = read_json_object(run.final_path)
 
     status = str(manifest.get("status") or "")
     completed = status == COMPLETED_STATUS
@@ -876,7 +828,7 @@ def build_run_report(run: RunDirectory) -> SessionReport:
         )
 
     try:
-        raw_records, torn = _read_journal(run.raw_events_path)
+        raw_records, torn = read_journal(run.raw_events_path)
         built = build_proof_ledger(raw_records)
         ledger: ProofLedger | None = built
         if manifest.get("stopped") is True and any(
@@ -926,7 +878,7 @@ def _tool_call_gate(run: RunDirectory) -> ToolCallGate | None:
     run was recorded before the log existed). A torn last line is dropped like
     in every other journal.
     """
-    records, _ = _read_journal(run.gate_path)
+    records, _ = read_journal(run.gate_path)
     if not records:
         return None
     blocked = tuple(
@@ -958,9 +910,13 @@ def _optional_str(value: Any) -> str | None:
 
 
 def write_run_report(run: RunDirectory) -> SessionReport:
-    """Build the report and persist it as ``report.json`` (same atomic writer)."""
+    """Build the report and persist it as ``report.json`` (same atomic writer).
+
+    The file is the session report plus its plain-language fields (the one
+    status line and clock times, see :func:`report_payload`).
+    """
     report = build_run_report(run)
-    atomic_write_json(run.report_path, report.to_dict())
+    atomic_write_json(run.report_path, report_payload(run, report))
     return report
 
 
@@ -1038,6 +994,11 @@ def main(argv: list[str] | None = None) -> int:
         help="print the structured report instead of the human-readable summary",
     )
     parser.add_argument(
+        "--technical",
+        action="store_true",
+        help="append the technical details of a single run: every detector reading",
+    )
+    parser.add_argument(
         "--cost-attribution",
         action="store_true",
         help=(
@@ -1050,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
     modes = [args.run_id is not None, args.last, args.today, args.all]
     if sum(1 for mode in modes if mode) != 1:
         parser.error("choose exactly one of: run_id, --last, --today, --all")
+    if args.technical and (args.today or args.all or args.as_json or args.cost_attribution):
+        parser.error("--technical applies to the text report of one run (run_id or --last)")
 
     store = RunStore(args.runs_root or runs_root_from_env())
     try:
@@ -1057,7 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cost_attribution:
             attribution = build_store_cost_attribution(runs)
         else:
-            reports = [build_run_report(run) for run in runs]
+            reports = [(run, build_run_report(run)) for run in runs]
     except (LookupError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1071,7 +1034,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.as_json:
-        payload: Any = reports[0].to_dict() if len(reports) == 1 else [r.to_dict() for r in reports]
+        payloads = [report_payload(run, report) for run, report in reports]
+        payload: Any = payloads[0] if len(payloads) == 1 else payloads
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
     if not reports:
@@ -1081,10 +1045,11 @@ def main(argv: list[str] | None = None) -> int:
     # One full report when a single run was asked for; one line per run when a
     # whole set was, so a long history stays readable.
     if len(reports) == 1:
-        print(reports[0].format())
+        run, report = reports[0]
+        print(render_run_text(run, report, technical=args.technical))
     else:
-        for report in reports:
-            print(report.summary())
+        for run, report in reports:
+            print(summary_line(run, report))
     return 0
 
 

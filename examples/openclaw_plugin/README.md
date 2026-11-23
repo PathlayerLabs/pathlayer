@@ -404,7 +404,7 @@ that exited 0 proves it exited 0, and a write proves what was written then, not
 what the file holds now (its size is as the tool reported it: characters in
 OpenClaw 2026.7.1, UTF-8 bytes later). A read proves only that the file was
 readable at that moment, with its length; the text is never kept. A timeout counts only when OpenClaw's
-failure kind says so; an `exec` whose approval was denied is a blocked call.
+failure kind says so; an `exec` whose approval was denied is a call denied by OpenClaw.
 Identical facts are grouped with a count, and every
 entry names the raw journal records it rests on. The ledger feeds no detector.
 
@@ -509,11 +509,12 @@ arbitrated. This grouping affects only how the report presents the run:
 any live state, so an `interrupted` run is reportable too:
 
 ```bash
-pathlayer-report "$RUN"     # one named run, in full
-pathlayer-report --last     # the most recently started run, in full
+pathlayer-report "$RUN"     # one named run, in plain words
+pathlayer-report "$RUN" --technical   # the same, plus every detector reading
+pathlayer-report --last     # the most recently started run, in plain words
 pathlayer-report --today    # one line per run started today (UTC)
 pathlayer-report --all      # one line per recorded run
-pathlayer-report --last --json   # the structured report instead of the summary
+pathlayer-report --last --json   # the structured report instead of the text
 ```
 
 ### Captured, attributed and unattributed cost
@@ -569,6 +570,55 @@ An unknown or ambiguous run id, and `--last` with nothing recorded, fail with a
 message on stderr and a non-zero exit; `--today` or `--all` matching nothing is
 not an error.
 
+A single run is printed for whoever ran the agent, not for whoever tunes
+Pathlayer:
+
+```
+Run run-abc123 (session sess-1, agent agent-1)
+Status: Stopped by Pathlayer
+Started: 2026-08-10 12:30:58 UTC   Ended: 12:31:40 UTC   (42.0s)
+Model: eu.anthropic.claude-sonnet-4-5-20250929-v1:0 (bedrock)
+
+What Pathlayer did
+  12:31:12 UTC  Pathlayer decided to stop the run: the agent kept repeating the same tool calls (loop: 5x repeat of 1-action block)
+
+Calls blocked by Pathlayer: 3 of 9 tool call(s) OpenClaw asked about
+  12:31:13 UTC  exec -- the run was stopped (loop: 5x repeat of 1-action block)
+  ...
+
+Proof ledger (observed facts, not a verdict on the task)
+  ...
+
+Cost: $0.0123 (an estimate at local prices; its sources with --technical)
+
+Detector readings: pathlayer-report run-abc123 --technical
+```
+
+- **One status.** It combines how far the run got (`status` in the manifest)
+  with how it ended (`outcome`): stopped by Pathlayer, ended with an error
+  reported by OpenClaw, finished (OpenClaw reported success, which is its claim,
+  not a proof that the task was done), waiting for a retry, interrupted, or
+  no end recorded yet. A stop reads "Stopped by Pathlayer" only when the
+  tool-call gate was enforced and blocked at least one call because of the stop
+  (a call blocked by the cap on identical calls in flight does not count);
+  otherwise it reads
+  "Stop decided by Pathlayer", saying why: not enforced (recorded only), no later
+  tool call attempted, or enforcement unknown because the run has no gate log.
+  When OpenClaw still reported tool call results after the stop decision, their
+  count is given: those calls were already running, or were not blocked. A call
+  counts when its own result does not say it was blocked or denied, even if the
+  gate answered "block" (the plugin fails open when its decision times out); a
+  call delivered twice counts once. On
+  OpenClaw, only a STOP has an actuator: a warning is said to be recorded only.
+  "Blocked" always means blocked by Pathlayer's gate; a call OpenClaw itself
+  refused is "denied by OpenClaw".
+- **Clock times.** Times are UTC, as the listener received each event; a time on
+  another day than the start carries its date. `report.json` carries the same
+  status as `display_status`, and an `at` on each action (`first_at` and
+  `last_at` on each finding), next to every field it already had.
+- **Technical details.** `--technical` appends the session report below,
+  unchanged: detector readings per event, the fused score, and every note.
+
 ```
 run run-abc123 (session sess-1, agent agent-1)
 outcome: stopped -- Pathlayer halted the run
@@ -590,7 +640,8 @@ actions: 1 arbitrated
 stop reason: loop: 5x repeat of 1-action block
 ```
 
-The five outcomes are `completed` (reached its end without being halted — the
+In this appendix, `event N (t=N)` is the event's position in the run, not a
+time. The five outcomes are `completed` (reached its end without being halted — the
 actions section says what was emitted), `stopped`, `escalated` (reached the
 ESCALATE tier without stopping), `interrupted` (never reached its end) and
 `in_progress` (a provisional report of a run waiting for another attempt; it is
@@ -627,7 +678,7 @@ reported even when it comes out at zero:
   report existed, has no per-tick confidence and no fused score in its journal. The report says both are unknown, not that
   no detector reacted and not that the score was zero.
 
-The most actionable line is often the fused score: a run that peaked at 0.85 and
+For tuning, the most actionable line is often the fused score (`--technical`): a run that peaked at 0.85 and
 never reached the stop threshold is reported as exactly that, which is the signal
 you need to retune a threshold.
 
