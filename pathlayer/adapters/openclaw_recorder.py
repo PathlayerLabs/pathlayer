@@ -48,6 +48,7 @@ or at the startup sweep.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -88,6 +89,7 @@ from pathlayer.adapters.openclaw_report import (
     tick_columns,
     write_run_report,
 )
+from pathlayer.adapters.openclaw_resume import write_resume_dossier
 from pathlayer.adapters.openclaw_run_store import (
     ENDED_BY_NEXT_RUN,
     INTERRUPTED_WHILE_AWAITING_RETRY,
@@ -108,7 +110,7 @@ from pathlayer.detectors.session import SESSION_METADATA_KEY
 from pathlayer.events import EventKind, ToolEvent
 from pathlayer.pipeline import Pipeline
 from pathlayer.policies.actions import Action, action_name
-from pathlayer.postmortem import AWAITING_RETRY_STATUS, TickRecord
+from pathlayer.postmortem import AWAITING_RETRY_STATUS, SessionReport, TickRecord
 from pathlayer.resource_sampling import sample_rss_bytes
 from pathlayer.runtime import Scheduler, WatchdogEventSink, stamp_rss, wrap_with_rss_sampling
 from pathlayer.session import SessionJournal
@@ -265,15 +267,38 @@ def _write_report(directory: RunDirectory) -> bool:
     raised exception. The failure is logged rather than swallowed silently.
     """
     try:
-        write_run_report(directory)
+        report = write_run_report(directory)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "could not write the session report for run %r: %s",
             directory.original_run_id,
             exc,
         )
+        _write_resume(directory)
         return False
+    _write_resume(directory, report)
     return True
+
+
+def _write_resume(directory: RunDirectory, report: SessionReport | None = None) -> None:
+    """Write (or remove) a run's resume dossier, never letting a failure escape.
+
+    Same contract as :func:`_write_report`: the dossier summarizes durable
+    files, so a failure costs the dossier only, and is logged. A dossier that
+    could not be rebuilt is removed rather than left stale: an older one could
+    describe an attempt the run has since recovered from.
+    """
+    try:
+        write_resume_dossier(directory, report)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "could not write the resume dossier for run %r: %s",
+            directory.original_run_id,
+            exc,
+        )
+        for path in (directory.resume_json_path, directory.resume_md_path):
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
 
 
 def _budget_detector_for(config: PathlayerConfig | None) -> BudgetDetector | None:
@@ -1714,6 +1739,10 @@ class OpenClawRunRecorder:
             self._record_pipeline_durability(active.directory, active.pipeline)
             active.persistence_reported = True
         self._record_decision(active, record, event, action, index=index)
+        if active.pipeline.stopped:
+            # The STOP was just latched (the stopped branch above returned
+            # otherwise): a provisional dossier now, rewritten when the run ends.
+            _write_resume(active.directory)
         return True
 
     def _handle_run_end(

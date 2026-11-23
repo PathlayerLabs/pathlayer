@@ -74,6 +74,22 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically and owner-only, like :func:`atomic_write_json`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        restrict_file(tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, ensure_ascii=False) + "\n"
@@ -202,6 +218,16 @@ class RunDirectory:
     def late_events_path(self) -> Path:
         """Append-only annex of cost hooks that arrived after the run ended."""
         return self.root / "late.jsonl"
+
+    @property
+    def resume_json_path(self) -> Path:
+        """Resume dossier (``pathlayer.resume/1``), only for a run that did not end well."""
+        return self.root / "resume.json"
+
+    @property
+    def resume_md_path(self) -> Path:
+        """The resume dossier as Markdown, written next to ``resume.json``."""
+        return self.root / "resume.md"
 
     def read_manifest(self) -> dict[str, Any]:
         raw: Any = json.loads(self.manifest_path.read_text(encoding="utf-8"))

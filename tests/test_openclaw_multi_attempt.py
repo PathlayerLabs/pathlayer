@@ -488,14 +488,17 @@ def test_the_next_run_of_the_session_ends_a_waiting_run(tmp_path: Path) -> None:
     assert _run(tmp_path, "run-b").read_manifest()["status"] == "started"
 
     # The failed attempt's usage arrives after: post-run spend of the ended run.
-    files = {name: data for name, data in _files(run).items() if name != "report.json"}
+    # The report and the resume dossier are derived, and rewritten with the cost.
+    derived = {"report.json", "resume.json", "resume.md"}
+    files = {name: data for name, data in _files(run).items() if name not in derived}
     recorder.process_payload(_llm("run-a"))
     assert len(_jsonl(run.late_events_path)) == 1
     assert {
-        name: data
-        for name, data in _files(run).items()
-        if name not in {"report.json", "late.jsonl"}
+        name: data for name, data in _files(run).items() if name not in {*derived, "late.jsonl"}
     } == files
+    cost = json.loads(run.resume_json_path.read_text())["cost"]
+    assert cost["before_stop"]["usd"] == pytest.approx(_CALL_USD)
+    assert cost["after_stop"] is None
     assert _report(run)["cost"]["post_run_estimated_usd"] == pytest.approx(_CALL_USD)
 
 

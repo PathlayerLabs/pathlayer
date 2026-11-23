@@ -201,7 +201,7 @@ def stop_blocks(gate: ToolCallGate | None) -> int:
     )
 
 
-def _stop_wording(gate: ToolCallGate | None) -> str:
+def stop_wording(gate: ToolCallGate | None) -> str:
     """ "Stopped" only when OpenClaw was told to block, and something was blocked.
 
     An enforced STOP that no later tool call ran into blocked nothing: the
@@ -238,10 +238,10 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
         attempts = f"attempt {failed_attempts}" if failed_attempts else "the last attempt"
         line = f"Waiting for a retry: {attempts} did not succeed"
         if manifest.get("stopped") is True:
-            line += f"; {_lower_first(_stop_wording(report.tool_call_gate))}"
+            line += f"; {_lower_first(stop_wording(report.tool_call_gate))}"
         return line
     if manifest.get("stopped") is True or report.outcome is SessionOutcome.STOPPED:
-        line = _stop_wording(report.tool_call_gate)
+        line = stop_wording(report.tool_call_gate)
         if status != COMPLETED_STATUS:
             line += " -- record incomplete: the run never reached its end"
         return line
@@ -263,7 +263,7 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
     return "No end recorded: the run may still be running, or its listener stopped"
 
 
-def _clock(at: str | None, start_day: str | None) -> str | None:
+def clock_text(at: str | None, start_day: str | None) -> str | None:
     """``HH:MM:SS UTC``, with the date when it is not the run's start day."""
     moment = parse_iso(at)
     if moment is None:
@@ -275,38 +275,43 @@ def _clock(at: str | None, start_day: str | None) -> str | None:
     return f"{clock} UTC" if day == start_day else f"{day} {clock} UTC"
 
 
-def _start_day(started_at: Any) -> str | None:
+def start_day_of(started_at: Any) -> str | None:
     moment = parse_iso(started_at)
     return moment.date().isoformat() if moment is not None else None
 
 
-def _plain_reason(reason: str) -> str:
+def detector_meaning(reason: str) -> str | None:
+    """What the detector named at the head of a reason means, without the reason."""
+    name, sep, _ = reason.partition(":")
+    return _DETECTOR_MEANING.get(name.strip()) if sep or reason in _DETECTOR_MEANING else None
+
+
+def plain_reason(reason: str) -> str:
     """A detector's reason in plain words, keeping the reason itself as evidence.
 
     The reason is clipped: a retry reason quotes the tool's error, which can be
     long and is kept whole in ``report.json`` and the appendix.
     """
-    name, sep, _ = reason.partition(":")
+    meaning = detector_meaning(reason)
     reason = _clip(reason, _MAX_REASON_CHARS)
-    meaning = _DETECTOR_MEANING.get(name.strip()) if sep or reason in _DETECTOR_MEANING else None
     if meaning is None:
         return reason or "no reason recorded"
     return f"{meaning} ({reason})"
 
 
 def _action_line(action: ActionTaken, times: Mapping[int, str], start_day: str | None) -> str:
-    when = _clock(times.get(action.index), start_day) or "time unknown"
+    when = clock_text(times.get(action.index), start_day) or "time unknown"
     if action.emitted:
         verb = _ACTION_VERB.get(action.action, action.action.name.lower())
     else:
         verb = _DRY_RUN_VERB.get(action.action, f"would have chosen {action.action.name}")
         verb += " (observe-only mode, never applied)"
-    reason = f": {_plain_reason(action.reason)}" if action.reason else ""
+    reason = f": {plain_reason(action.reason)}" if action.reason else ""
     return f"  {when}  Pathlayer {verb}{reason}"
 
 
 def _blocked_line(call: BlockedToolCall, start_day: str | None) -> str:
-    when = _clock(call.at, start_day) or "time unknown"
+    when = clock_text(call.at, start_day) or "time unknown"
     tool = call.tool_name or "unknown tool"
     reason = call.reason or ""
     if reason.startswith(_IN_FLIGHT_REASON_PREFIX):
@@ -410,7 +415,7 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
     """
     manifest = run.read_manifest()
     times = event_times(run)
-    start_day = _start_day(report.started_at)
+    start_day = start_day_of(report.started_at)
     identity = [f"session {report.session_key}"] if report.session_key else []
     if report.agent_id:
         identity.append(f"agent {report.agent_id}")
@@ -420,7 +425,7 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
     start_text = (
         started.strftime("%Y-%m-%d %H:%M:%S UTC") if isinstance(started, datetime) else "unknown"
     )
-    ended = _clock(report.ended_at, start_day)
+    ended = clock_text(report.ended_at, start_day)
     if report.status == COMPLETED_STATUS:
         end_text = ended or "unknown"
     elif report.status == INTERRUPTED_STATUS and ended:
@@ -496,13 +501,18 @@ def summary_line(run: RunDirectory, report: SessionReport) -> str:
 
 
 __all__ = [
+    "clock_text",
+    "detector_meaning",
     "display_status",
     "event_times",
     "first_stop",
+    "plain_reason",
     "readable_fields",
     "render_run_text",
     "report_payload",
+    "start_day_of",
     "stop_blocks",
+    "stop_wording",
     "summary_line",
     "tool_results_after",
 ]

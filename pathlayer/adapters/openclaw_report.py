@@ -669,6 +669,43 @@ def _post_run_llm_events(run: RunDirectory, manifest: dict[str, Any]) -> list[To
     ]
 
 
+def llm_cost_split(run: RunDirectory, after_sequence: int | None) -> tuple[CostShare, CostShare]:
+    """Captured model cost up to raw record ``after_sequence``, and after it.
+
+    Split by when each ``llm_output`` reached Pathlayer, at the recording's
+    pinned prices: OpenClaw can report a turn's usage late, so a usage report
+    received after the split may cover a model call made before it. Usage
+    received after the run ended (``late.jsonl``) is after any split point.
+    With no split point, everything is before, late usage included.
+    """
+    manifest = run.read_manifest()
+    pricing = _pinned_pricing(manifest)
+    before = CostShare()
+    after = CostShare()
+    raw, _ = read_journal(run.raw_events_path)
+    late, _ = read_journal(run.late_events_path)
+    for records, is_late in ((raw, False), (late, True)):
+        for record in records:
+            payload = _record_payload(record)
+            if payload.get("hook") != LLM_OUTPUT:
+                continue
+            share = _share_of(_llm_events(payload, pricing))
+            sequence = record.get("sequence")
+            past = after_sequence is not None and (
+                is_late
+                or (
+                    isinstance(sequence, int)
+                    and not isinstance(sequence, bool)
+                    and sequence > after_sequence
+                )
+            )
+            if past:
+                after = after.plus(share)
+            else:
+                before = before.plus(share)
+    return before, after
+
+
 def build_run_report(run: RunDirectory) -> SessionReport:
     """Rebuild the session report of one recorded run from its directory alone."""
     manifest = run.read_manifest()
@@ -994,6 +1031,14 @@ def main(argv: list[str] | None = None) -> int:
         help="print the structured report instead of the human-readable summary",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "print the resume dossier of a single run (resume.md; resume.json with --json), "
+            "rebuilt from its directory"
+        ),
+    )
+    parser.add_argument(
         "--technical",
         action="store_true",
         help="append the technical details of a single run: every detector reading",
@@ -1013,8 +1058,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("choose exactly one of: run_id, --last, --today, --all")
     if args.technical and (args.today or args.all or args.as_json or args.cost_attribution):
         parser.error("--technical applies to the text report of one run (run_id or --last)")
+    if args.resume and (args.today or args.all or args.technical or args.cost_attribution):
+        parser.error("--resume applies to one run (run_id or --last)")
 
     store = RunStore(args.runs_root or runs_root_from_env())
+    if args.resume:
+        return _print_resume(store, run_id=args.run_id, last=args.last, as_json=args.as_json)
     try:
         runs = _select_runs(store, run_id=args.run_id, last=args.last, today=args.today)
         if args.cost_attribution:
@@ -1050,6 +1099,30 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for run, report in reports:
             print(summary_line(run, report))
+    return 0
+
+
+def _print_resume(store: RunStore, *, run_id: str | None, last: bool, as_json: bool) -> int:
+    """Print one run's resume dossier, built on the fly: nothing is written."""
+    # Imported here: the dossier module builds on this one.
+    from pathlayer.adapters.openclaw_resume import build_resume_dossier, render_resume_markdown
+
+    try:
+        (run,) = _select_runs(store, run_id=run_id, last=last, today=False)
+        dossier = build_resume_dossier(run)
+    except (LookupError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if dossier is None:
+        print(
+            "no resume dossier: this run ended normally (OpenClaw reported success, "
+            "and Pathlayer neither stopped it nor blocked a call)"
+        )
+        return 0
+    if as_json:
+        print(json.dumps(dossier, indent=2, ensure_ascii=False))
+    else:
+        print(render_resume_markdown(dossier), end="")
     return 0
 
 
