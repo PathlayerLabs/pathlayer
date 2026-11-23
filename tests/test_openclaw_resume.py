@@ -287,15 +287,17 @@ def test_calls_refused_by_the_in_flight_cap_alone_get_a_dossier(tmp_path: Path) 
     [
         ("loop: 5x repeat of 1-action block", PROVEN, "loop"),
         ("retry: 3x identical failure of 'exec' (error 'x')", PROVEN, "retry"),
-        ("progress_proof: checkpoint tests_pass not satisfied", PROVEN, "progress_proof"),
+        # The same detectors' inferred components are not proven.
+        ("loop: 3/5 overlapping 2-action windows are the same recurring pattern", DECIDED, "stop"),
+        ("retry: 'exec' dominates the last 8 calls regardless of result", DECIDED, "stop"),
+        # A progress contract surfaces as a no_progress stall: an inference.
         ("no_progress: 6 steps without new progress (cusum)", DECIDED, "no_progress"),
-        ("coding_tests: no test progress", DECIDED, "no_progress"),
         ("budget: $5.00 over the $4.00 limit", DECIDED, "budget"),
         ("resource: run exceeded 600s", DECIDED, "resource"),
         ("custom: something", DECIDED, "stop"),
     ],
 )
-def test_only_loop_retry_and_contracts_make_a_stop_proven(
+def test_only_identical_calls_or_failures_make_a_stop_proven(
     reason: str, status: str, template: str
 ) -> None:
     ticks = [TickRecord(index=0, ts=0.0, fused=1.0, action=Action.STOP, reason=reason)]
@@ -304,7 +306,8 @@ def test_only_loop_retry_and_contracts_make_a_stop_proven(
     )
     why = _why_stopped("pathlayer_stop", {"stopped": True}, report, None)
     assert why["status"] == status
-    assert _template_key("pathlayer_stop", why["detector"], None) == template
+    proven = why["status"] == PROVEN
+    assert _template_key("pathlayer_stop", why["detector"], None, proven=proven) == template
 
 
 # --------------------------------------------------------------------------- #
@@ -364,6 +367,11 @@ def test_masking_keeps_paths_and_hides_tokens() -> None:
     assert mask_text("AKIAABCDEFGHIJKLMNOP and ghp_" + "x" * 30) == "[masked] and [masked]"
     assert mask_text("mail me at a.b@example.com") == "mail me at [masked]"
     assert mask_text("x\ny\tz") == "x y z"
+    assert mask_text("PGPASSWORD=hunter2 psql") == "PGPASSWORD=[masked] psql"
+    assert mask_text("X-Api-Key: abcdef123456") == "X-Api-Key: [masked]"
+    assert mask_text("postgres://bob:pw@db/x") == "postgres://[masked]@db/x"
+    assert mask_text("sk_live_" + "a" * 24) == "[masked]"
+    assert mask_text("npm i react@18.3.1") == "npm i react@18.3.1"
     assert len(mask_text("a " * 200)) == 120
 
 
@@ -411,3 +419,125 @@ def test_cli_says_when_a_run_needs_no_dossier(
 def test_cli_refuses_resume_over_several_runs(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(["--all", "--resume", "--runs-root", str(tmp_path)])
+
+
+def test_a_passive_stop_is_not_said_to_be_enforced(tmp_path: Path) -> None:
+    run = _loop(OpenClawRunRecorder(tmp_path), "run-a")
+    dossier = _stored(run)
+    (stop,) = [a for a in dossier["pathlayer_actions"]["actions"] if a["action"] == "STOP"]
+    assert stop["emitted"] is True
+    assert stop["delivery"] == "recorded only: enforcement was off"
+    assert dossier["why_stopped"]["headline"] == (
+        "Stop decided by Pathlayer (not enforced: recording only)"
+    )
+    assert "(recorded only: enforcement was off)" in run.resume_md_path.read_text()
+
+
+def test_late_usage_counts_in_the_whole_run_cost_when_nothing_stopped(tmp_path: Path) -> None:
+    payloads = json.loads((FIXTURES / "openclaw_2026_7" / "post_run.json").read_text())
+    recorder = OpenClawRunRecorder(tmp_path)
+    for payload in payloads:
+        recorder.process_payload(payload)
+    run = _run(tmp_path, "fixture-run")
+    assert run.late_events_path.exists()
+
+    whole, after = llm_cost_split(run, None)
+    assert whole.total_usd == pytest.approx(0.021)
+    assert after.costed_events == 0
+    before, late = llm_cost_split(run, 10**9)
+    assert before.costed_events == 0
+    assert late.total_usd == pytest.approx(0.021)
+
+
+def test_a_secret_in_a_command_is_masked_in_the_ledger(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-s"))
+    command = "curl -H 'Authorization: Bearer abc.def' https://u:pw@example.org/x"
+    recorder.process_payload(
+        {
+            "hook": "after_tool_call",
+            "event": {
+                "toolName": "exec",
+                "params": {"command": command},
+                "result": {"details": {"status": "failed", "exitCode": 7}},
+                "toolCallId": "e1",
+                "runId": "run-s",
+            },
+            "ctx": _ctx("run-s"),
+        }
+    )
+    recorder.process_payload(_error_end("run-s", "boom"))
+    recorder.process_payload(_start("run-t"))
+    run = _run(tmp_path, "run-s")
+    text = run.resume_json_path.read_text() + run.resume_md_path.read_text()
+    assert "abc.def" not in text
+    assert "u:pw@" not in text
+    (failed,) = _stored(run)["proof_ledger"]["failed"]
+    assert failed["statement"].startswith("`curl -H 'Authorization: [masked]")
+
+
+def test_a_dossier_that_cannot_be_rebuilt_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pathlayer.adapters import openclaw_recorder
+
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_read("run-a", 0))
+    recorder.process_payload(_error_end("run-a"))
+    run = _run(tmp_path, "run-a")
+    assert run.resume_json_path.exists()
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise ValueError("unreadable journal")
+
+    monkeypatch.setattr(openclaw_recorder, "write_run_report", broken)
+    monkeypatch.setattr(openclaw_recorder, "write_resume_dossier", broken)
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_end("run-a"))
+    assert not run.resume_json_path.exists()
+    assert not run.resume_md_path.exists()
+
+
+def test_an_old_manifest_with_an_error_and_no_outcome_gets_a_dossier(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("old"))
+    recorder.process_payload(_read("old", 0))
+    recorder.process_payload(_end("old"))
+    run = _run(tmp_path, "old")
+    manifest = run.read_manifest()
+    del manifest["outcome"]
+    manifest["error"] = "provider failed"
+    run.update_manifest(**manifest)
+    run.update_manifest(outcome=None)
+
+    dossier = build_resume_dossier(run)
+    assert dossier is not None
+    assert dossier["why_stopped"]["cause"] == "openclaw_error"
+
+
+def _every_dossier(root: Path) -> list[str]:
+    """resume.md of each kind of run this module covers."""
+    _loop(OpenClawRunRecorder(root / "a", enforce=True), "loop")
+    _loop(OpenClawRunRecorder(root / "b"), "passive")
+    overflow = OpenClawRunRecorder(root / "c")
+    overflow.process_payload(_start("err"))
+    overflow.process_payload(_error_end("err"))
+    waiting = OpenClawRunRecorder(root / "d")
+    waiting.process_payload(_start("wait"))
+    waiting.process_payload(_error_end("wait"))
+    overflow.process_payload(_start("next"))
+    cut = OpenClawRunRecorder(root / "e")
+    cut.process_payload(_start("cut"))
+    cut.process_payload(_read("cut", 0))
+    OpenClawRunRecorder(root / "e").startup()
+    return [path.read_text() for path in sorted(root.rglob("resume.md"))]
+
+
+def test_no_dossier_of_any_kind_promises_anything(tmp_path: Path) -> None:
+    texts = _every_dossier(tmp_path)
+    assert len(texts) == 5
+    for text in texts:
+        lowered = text.lower()
+        for word in BANNED:
+            assert word not in lowered, (word, text)

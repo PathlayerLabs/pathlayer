@@ -496,7 +496,9 @@ def test_the_next_run_of_the_session_ends_a_waiting_run(tmp_path: Path) -> None:
     assert {
         name: data for name, data in _files(run).items() if name not in {*derived, "late.jsonl"}
     } == files
-    assert json.loads(run.resume_json_path.read_text())["cost"]["status"] == "observed"
+    cost = json.loads(run.resume_json_path.read_text())["cost"]
+    assert cost["before_stop"]["usd"] == pytest.approx(_CALL_USD)
+    assert cost["after_stop"] is None
     assert _report(run)["cost"]["post_run_estimated_usd"] == pytest.approx(_CALL_USD)
 
 

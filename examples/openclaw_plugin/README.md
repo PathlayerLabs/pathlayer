@@ -710,8 +710,10 @@ pathlayer-report --last --resume --json   # resume.json
 - for an interrupted run, by the startup sweep.
 
 A run that ended with OpenClaw reporting success, with nothing stopped or
-blocked, gets none. A provisional dossier is removed if a later attempt
-succeeds. `--resume` builds the dossier on the fly and writes nothing.
+blocked, gets none, even after failed attempts: it recovered on its own. A
+provisional dossier is removed if a later attempt succeeds, and whenever it
+cannot be rebuilt. The dossier written at the STOP is not refreshed while the
+run goes on: calls blocked after it appear when the run ends. `--resume` builds the dossier on the fly and writes nothing.
 
 **How each section is known.** Every section is marked with how it is known:
 
@@ -720,9 +722,18 @@ succeeds. `--resume` builds the dossier on the fly and writes nothing.
 - `proven`: the stop rests on facts a reader can check;
 - `unknown`.
 
-A stop is `proven` only for `loop` (identical calls), `retry` (identical
-failures) and a progress contract (an unmet checkpoint). A `no_progress`,
-`budget` or `resource` stop stays `decided`.
+A stop is `proven` only when its reason is identical calls (`loop: Nx repeat
+of ...`) or identical failures (`retry: Nx identical failure of ...`). The same
+detectors' other components (a recurring pattern over overlapping windows, one
+tool dominating the recent calls) stay `decided`. So do `no_progress`
+(including a progress contract, which surfaces as a `no_progress` stall),
+`budget` and `resource`.
+
+Each action says how it reached OpenClaw. On OpenClaw only a STOP has an
+actuator, the tool-call gate:
+
+- a STOP reads "enforced by the tool-call gate" only when enforcement was on;
+- a WARN or a lighter action is "recorded only".
 
 **What it does not claim.** The dossier never says the task succeeded. The
 ledger proves what tool calls did, not that the work is right. The restart
@@ -742,9 +753,11 @@ counts only, with no argument and no error text:
   same call gets another digest.
 - Errors and reasons are clipped to 120 characters. Token-like strings (API
   keys, bearer tokens, e-mail addresses, long hex or base64 runs) are masked.
+- Secret-named values (`PASSWORD=`, `X-Api-Key:`) and URL credentials are
+  masked too.
 - The ledger keeps the report's own statements, with commands and paths
-  clipped and masked the same way. Review `resume.md` before sharing it, as
-  you would `report.json`.
+  clipped to 200 characters and masked the same way. Masking is best effort:
+  review `resume.md` before sharing it, as you would `report.json`.
 
 ## Export one run
 

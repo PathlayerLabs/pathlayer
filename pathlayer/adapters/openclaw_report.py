@@ -675,8 +675,8 @@ def llm_cost_split(run: RunDirectory, after_sequence: int | None) -> tuple[CostS
     Split by when each ``llm_output`` reached Pathlayer, at the recording's
     pinned prices: OpenClaw can report a turn's usage late, so a usage report
     received after the split may cover a model call made before it. Usage
-    received after the run ended (``late.jsonl``) is always after. With no
-    split point, everything is before.
+    received after the run ended (``late.jsonl``) is after any split point.
+    With no split point, everything is before, late usage included.
     """
     manifest = run.read_manifest()
     pricing = _pinned_pricing(manifest)
@@ -691,11 +691,13 @@ def llm_cost_split(run: RunDirectory, after_sequence: int | None) -> tuple[CostS
                 continue
             share = _share_of(_llm_events(payload, pricing))
             sequence = record.get("sequence")
-            past = is_late or (
-                after_sequence is not None
-                and isinstance(sequence, int)
-                and not isinstance(sequence, bool)
-                and sequence > after_sequence
+            past = after_sequence is not None and (
+                is_late
+                or (
+                    isinstance(sequence, int)
+                    and not isinstance(sequence, bool)
+                    and sequence > after_sequence
+                )
             )
             if past:
                 after = after.plus(share)

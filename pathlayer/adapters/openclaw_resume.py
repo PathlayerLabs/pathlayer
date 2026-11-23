@@ -88,17 +88,37 @@ CAUSE_AWAITING_RETRY = "awaiting_retry"
 CAUSE_INTERRUPTED = "interrupted"
 CAUSE_BLOCKED = "blocked_calls"
 
-# Detectors whose stop rests on facts a reader can check in the dossier itself.
-_PROVEN_DETECTORS = frozenset({"loop", "retry", "progress_proof"})
+# Stop reasons that rest on facts a reader can check: the loop detector's exact
+# repeat component (``Nx repeat of a K-action block``) and the retry detector's
+# identical-failure component. The same detectors' other components (a
+# recurring pattern over overlapping windows, one tool dominating the recent
+# calls) are inferences, and stay ``decided``. A progress contract surfaces as a
+# ``no_progress`` stall, which is an inference too.
+_PROVEN_REASONS = (
+    re.compile(r"^loop: \d+x repeat of "),
+    re.compile(r"^retry: \d+x identical failure of "),
+)
 
 _MASKED = "[masked]"
 _SECRET_PATTERNS = (
+    # ``NAME=value`` / ``Name: value`` where the name says it is a secret.
+    re.compile(
+        r"(?i)\b([A-Za-z0-9_-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)"
+        r"[A-Za-z0-9_-]*)(\s*[=:]\s*)(?!\[masked\])\S+"
+    ),
+    # user:password@ in a URL.
+    re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+@"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*"),
+    re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/]{8,}=*"),
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}"),
     re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"),
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
     re.compile(r"\b[A-Fa-f0-9]{32,}\b"),
     # A long base64-like run with at least one digit; ``/`` and ``-`` are left
     # out so that file paths and slugs stay readable.
@@ -114,7 +134,9 @@ def mask_text(value: Any, limit: int = MAX_TEXT_CHARS) -> str:
     a line of the Markdown dossier.
     """
     text = " ".join(str(value).split())
-    for pattern in _SECRET_PATTERNS:
+    text = _SECRET_PATTERNS[0].sub(lambda m: f"{m.group(1)}{m.group(2)}{_MASKED}", text)
+    text = _SECRET_PATTERNS[1].sub(f"{_MASKED}@", text)
+    for pattern in _SECRET_PATTERNS[2:]:
         text = pattern.sub(_MASKED, text)
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
@@ -167,15 +189,6 @@ _TEMPLATES: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             "The run reached its configured time or size limit. Split the task into smaller "
             "runs, or raise the limit.",
-        ),
-    ),
-    "progress_proof": (
-        "look at the unmet checkpoint before resuming",
-        (
-            "A declared progress checkpoint was not met: its line in the proof ledger says "
-            "which one.",
-            "Resume once the agent has a way to meet it, or revise the contract if the "
-            "checkpoint no longer fits the task.",
         ),
     ),
     "stop": (
@@ -264,7 +277,11 @@ def needs_dossier(manifest: Mapping[str, Any], report: SessionReport) -> bool:
     if status in {AWAITING_RETRY_STATUS, INTERRUPTED_STATUS}:
         return True
     if status == COMPLETED_STATUS:
-        return manifest.get("outcome") not in {None, "ok", "stopped"}
+        outcome = manifest.get("outcome")
+        if outcome is None:
+            # A manifest older than ``outcome``: only an error says it went wrong.
+            return isinstance(manifest.get("error"), str)
+        return outcome not in {"ok", "stopped"}
     return False
 
 
@@ -304,7 +321,10 @@ def _cause(manifest: Mapping[str, Any], report: SessionReport) -> str:
     status = str(manifest.get("status") or "")
     if manifest.get("stopped") is True or report.stop_reason is not None:
         return CAUSE_STOP
-    if status == COMPLETED_STATUS and manifest.get("outcome") == "error":
+    if status == COMPLETED_STATUS and (
+        manifest.get("outcome") == "error"
+        or (manifest.get("outcome") is None and isinstance(manifest.get("error"), str))
+    ):
         return CAUSE_ERROR
     if status == COMPLETED_STATUS and manifest.get("outcome") == "unknown":
         return CAUSE_NO_SUCCESS
@@ -315,13 +335,17 @@ def _cause(manifest: Mapping[str, Any], report: SessionReport) -> str:
     return CAUSE_BLOCKED
 
 
-def _template_key(cause: str, detector: str | None, error: str | None) -> str:
+def _is_proven(reason: str | None) -> bool:
+    return reason is not None and any(pattern.match(reason) for pattern in _PROVEN_REASONS)
+
+
+def _template_key(
+    cause: str, detector: str | None, error: str | None, *, proven: bool = True
+) -> str:
     if cause == CAUSE_STOP:
-        if detector in _TEMPLATES:
-            return detector
-        if detector is not None and detector.startswith(("coding_", "state_")):
-            return "no_progress"
-        return "stop"
+        if detector in {"loop", "retry"} and not proven:
+            return "stop"
+        return detector if detector in _TEMPLATES else "stop"
     if cause in {CAUSE_ERROR, CAUSE_AWAITING_RETRY} and _is_overflow(error):
         return "overflow"
     return cause
@@ -360,7 +384,7 @@ def _why_stopped(
     if cause == CAUSE_STOP:
         detector = _detector(report.stop_reason)
         return _section(
-            PROVEN if detector in _PROVEN_DETECTORS else DECIDED,
+            PROVEN if _is_proven(report.stop_reason) else DECIDED,
             cause,
             stop_wording(report.tool_call_gate),
             detector_meaning(report.stop_reason or ""),
@@ -532,6 +556,19 @@ def _ledger(report: SessionReport) -> dict[str, Any]:
     return section
 
 
+def _delivery(action: Action, emitted: bool, gate: Any) -> str:
+    """Whether OpenClaw was told: only a STOP has an actuator there, the gate."""
+    if not emitted:
+        return "observe-only: never applied"
+    if action is not Action.STOP:
+        return "recorded only: OpenClaw has no channel for it"
+    if gate is None:
+        return "unknown: this run has no gate log"
+    if gate.enforced:
+        return "enforced by the tool-call gate"
+    return "recorded only: enforcement was off"
+
+
 def _actions(report: SessionReport, times: Mapping[int, str]) -> dict[str, Any]:
     gate = report.tool_call_gate
     blocked = list(gate.blocked) if gate is not None else []
@@ -542,7 +579,8 @@ def _actions(report: SessionReport, times: Mapping[int, str]) -> dict[str, Any]:
                 "action": action.action.name,
                 "at": times.get(action.index),
                 "reason": mask_text(action.reason) if action.reason else None,
-                "applied": action.emitted,
+                "emitted": action.emitted,
+                "delivery": _delivery(action.action, action.emitted, gate),
             }
             for action in report.actions
         ],
@@ -650,9 +688,16 @@ def _last_attempt_error(raw: Sequence[Mapping[str, Any]]) -> str | None:
     return None
 
 
-def build_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
-    """The resume dossier of one run, rebuilt from its directory; ``None`` if healthy."""
-    report = build_run_report(run)
+def build_resume_dossier(
+    run: RunDirectory, report: SessionReport | None = None
+) -> dict[str, Any] | None:
+    """The resume dossier of one run, rebuilt from its directory; ``None`` if healthy.
+
+    ``report`` is the run's report when the caller has just built it from the
+    same files, to avoid rebuilding it.
+    """
+    if report is None:
+        report = build_run_report(run)
     manifest = run.read_manifest()
     if not needs_dossier(manifest, report):
         return None
@@ -668,7 +713,10 @@ def build_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
     times = event_times(run)
     stop_sequence, stop_index = _first_stop_sequence(run)
     stop_action = next((a for a in report.actions if a.action is Action.STOP and a.emitted), None)
-    stop_at = times.get(stop_action.index if stop_action is not None else stop_index or -1)
+    if stop_action is not None:
+        stop_at = times.get(stop_action.index)
+    else:
+        stop_at = times.get(stop_index) if stop_index is not None else None
 
     cause = _cause(manifest, report)
     error = manifest.get("error") if isinstance(manifest.get("error"), str) else None
@@ -677,7 +725,9 @@ def build_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
         # agent_end carries it.
         error = _last_attempt_error(raw)
     why = _why_stopped(cause, {**manifest, "error": error}, report, stop_at)
-    decision, options = _TEMPLATES[_template_key(cause, why["detector"], error)]
+    decision, options = _TEMPLATES[
+        _template_key(cause, why["detector"], error, proven=why["status"] == PROVEN)
+    ]
     stopped = cause == CAUSE_STOP
     cost = _cost(run, stop_sequence, stopped)
     status = str(manifest.get("status") or "")
@@ -688,7 +738,7 @@ def build_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
         "identity": {
             "status": OBSERVED,
             "run_id": report.run_id,
-            "session_key": report.session_key,
+            "session_key": mask_text(report.session_key, 200) if report.session_key else None,
             "agent_id": report.agent_id,
             "model": model if isinstance(model, str) else None,
             "provider": manifest.get("openclaw_provider"),
@@ -716,6 +766,11 @@ def build_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------- #
 # Rendering and writing
 # --------------------------------------------------------------------------- #
+
+
+def _md(text: Any) -> str:
+    """Text safe inside a table cell or a code span: no backtick, no pipe."""
+    return str(text).replace("`", "'").replace("|", "\\|")
 
 
 def _tag(section: Mapping[str, Any]) -> str:
@@ -759,7 +814,7 @@ def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
         ]
     )
     if why.get("reason"):
-        lines.extend(["", f"Recorded reason: `{why['reason']}`"])
+        lines.extend(["", f"Recorded reason: `{_md(why['reason'])}`"])
     if why.get("at"):
         lines.append(f"At: {why['at']}")
 
@@ -774,13 +829,16 @@ def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
         )
         for group in attempts["groups"]:
             lines.append(
-                f"| {mask_text(group['tool'], 40)} | {group['params_digest'] or '-'} | "
+                f"| {_md(mask_text(group['tool'], 40))} | {group['params_digest'] or '-'} | "
                 f"{group['calls']} | {group['failed']} | {group['blocked']} | "
                 f"{group['first_at'] or '-'} | {group['last_at'] or '-'} |"
             )
         if attempts["more_groups"]:
             lines.append(f"\n... and {attempts['more_groups']} more group(s) in resume.json")
-        lines.extend(["", f"Note: {attempts['digest_scope']}."])
+        if any(group["params_digest"] for group in attempts["groups"]):
+            lines.extend(["", f"Note: {attempts['digest_scope']}."])
+        else:
+            lines.extend(["", "Grouped by tool only: this run has no gate log with digests."])
     else:
         lines.append("No tool call was recorded.")
 
@@ -812,9 +870,10 @@ def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
     if not actions["actions"] and not actions["blocked_calls"]:
         lines.append("- no action")
     for action in actions["actions"]:
-        applied = "" if action["applied"] else " (observe-only, never applied)"
-        reason = f": `{action['reason']}`" if action["reason"] else ""
-        lines.append(f"- {action['at'] or 'time unknown'}: {action['action']}{applied}{reason}")
+        reason = f": `{_md(action['reason'])}`" if action["reason"] else ""
+        lines.append(
+            f"- {action['at'] or 'time unknown'}: {action['action']} ({action['delivery']}){reason}"
+        )
     gate = actions["gate"]
     if gate is not None:
         mode = "enforced" if gate["enforced"] else "recording only"
@@ -853,13 +912,15 @@ def _usd(share: Mapping[str, Any] | None) -> str:
     return f"${share['usd']:.4f} over {share['costed_events']} model call(s)"
 
 
-def write_resume_dossier(run: RunDirectory) -> dict[str, Any] | None:
+def write_resume_dossier(
+    run: RunDirectory, report: SessionReport | None = None
+) -> dict[str, Any] | None:
     """Write ``resume.json`` and ``resume.md``, or remove them for a healthy run.
 
     A provisional dossier written at a STOP or a failed attempt must not
     outlive a run that then ended well.
     """
-    dossier = build_resume_dossier(run)
+    dossier = build_resume_dossier(run, report)
     if dossier is None:
         run.resume_json_path.unlink(missing_ok=True)
         run.resume_md_path.unlink(missing_ok=True)
