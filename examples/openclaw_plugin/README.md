@@ -686,16 +686,27 @@ you need to retune a threshold.
 
 When a run does not end well, Pathlayer writes a resume dossier next to its
 report: `resume.json` (schema `pathlayer.resume/1`) and `resume.md`, both
-owner-only (`0600`). It answers, from the run directory alone:
+owner-only (`0600`). It answers, from the run directory alone, in this order
+in `resume.md`:
 
-- why the run stopped;
+- the decision a person has to make, then how to restart;
+- what happened: the stop or the error, when, whether the stop was enforced,
+  how many tool calls still ran after the stop decision, and how that is known
+  (for an interrupted run: the time of its last record, and when the
+  interruption was noticed);
+- what Pathlayer did, when it did more than the stop above;
+- the proof ledger;
 - what was tried, grouped by tool and arguments;
 - the last call without an error;
-- the proof ledger;
-- what Pathlayer did;
-- the estimated cost before and after the stop;
-- how to restart;
-- what is not known.
+- the estimated cost before and after the stop decision;
+- what is not known;
+- the run's details (status, session, model, times, Pathlayer version).
+
+`resume.md` shows clock times (UTC, with the date when it is not the start
+day), leaves out an empty section (a cost that was not measured is listed under
+what is not known), and folds ledger lines that differ only by the number in
+their last parenthesis (a file read back at 11 sizes) into one line with the
+count. `resume.json` keeps every field, every ISO time and every entry.
 
 ```bash
 pathlayer-report "$RUN" --resume          # resume.md, rebuilt from the run directory
@@ -715,12 +726,18 @@ provisional dossier is removed if a later attempt succeeds, and whenever it
 cannot be rebuilt. The dossier written at the STOP is not refreshed while the
 run goes on: calls blocked after it appear when the run ends. `--resume` builds the dossier on the fly and writes nothing.
 
-**How each section is known.** Every section is marked with how it is known:
+**How each section is known.** In `resume.json`, every section is marked with
+how it is known; `resume.md` says it in words under "What happened":
 
 - `observed`: the runtime reported it;
-- `decided`: Pathlayer chose it;
+- `decided`: Pathlayer chose it, a judgement on the records;
 - `proven`: the stop rests on facts a reader can check;
 - `unknown`.
+
+"Proven" has a second, narrower use: the ledger's `proven` column holds the
+calls whose own result shows they were done (a command exited 0, a file was
+written or read). A stop can be `proven` while the ledger proves nothing done,
+as when the same command failed again and again.
 
 A stop is `proven` only when its reason is identical calls (`loop: Nx repeat
 of ...`) or identical failures (`retry: Nx identical failure of ...`). The same
@@ -732,8 +749,17 @@ tool dominating the recent calls) stay `decided`. So do `no_progress`
 Each action says how it reached OpenClaw. On OpenClaw only a STOP has an
 actuator, the tool-call gate:
 
-- a STOP reads "enforced by the tool-call gate" only when enforcement was on;
+- a STOP reads "enforced by the tool-call gate" only when enforcement was on,
+  "recorded only: not enforced" when it was off, and "enforcement unknown: no
+  gate log" for a run without `gate.jsonl` (recorded before 0.1.2);
 - a WARN or a lighter action is "recorded only".
+
+What happened reads "Pathlayer stopped the run" only when the gate blocked at
+least one call; otherwise "Pathlayer decided to stop the run". Tool calls that
+still ran after the stop decision are counted from the `after_tool_call`
+results; a call the gate blocked, or that OpenClaw denied, is not counted. A
+call that ran may have started before the decision: the count says calls went
+on, not why.
 
 **What it does not claim.** The dossier never says the task succeeded. The
 ledger proves what tool calls did, not that the work is right. The restart
@@ -742,8 +768,9 @@ options are suggestions.
 **The 3-line summary.** The summary at the top is built from fixed wording and
 counts only, with no argument and no error text:
 
-- what stopped, and why;
-- how many facts are proven, failed and unproven;
+- what stopped, when, and why;
+- how many facts are proven, failed and unproven, how many calls Pathlayer
+  blocked, and how many still ran after the stop decision;
 - the decision a person has to make.
 
 **Privacy.**

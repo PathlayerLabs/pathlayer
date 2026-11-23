@@ -263,7 +263,7 @@ def display_status(manifest: Mapping[str, Any], report: SessionReport) -> str:
     return "No end recorded: the run may still be running, or its listener stopped"
 
 
-def _clock(at: str | None, start_day: str | None) -> str | None:
+def clock_text(at: str | None, start_day: str | None) -> str | None:
     """``HH:MM:SS UTC``, with the date when it is not the run's start day."""
     moment = parse_iso(at)
     if moment is None:
@@ -275,7 +275,7 @@ def _clock(at: str | None, start_day: str | None) -> str | None:
     return f"{clock} UTC" if day == start_day else f"{day} {clock} UTC"
 
 
-def _start_day(started_at: Any) -> str | None:
+def start_day_of(started_at: Any) -> str | None:
     moment = parse_iso(started_at)
     return moment.date().isoformat() if moment is not None else None
 
@@ -300,7 +300,7 @@ def plain_reason(reason: str) -> str:
 
 
 def _action_line(action: ActionTaken, times: Mapping[int, str], start_day: str | None) -> str:
-    when = _clock(times.get(action.index), start_day) or "time unknown"
+    when = clock_text(times.get(action.index), start_day) or "time unknown"
     if action.emitted:
         verb = _ACTION_VERB.get(action.action, action.action.name.lower())
     else:
@@ -311,7 +311,7 @@ def _action_line(action: ActionTaken, times: Mapping[int, str], start_day: str |
 
 
 def _blocked_line(call: BlockedToolCall, start_day: str | None) -> str:
-    when = _clock(call.at, start_day) or "time unknown"
+    when = clock_text(call.at, start_day) or "time unknown"
     tool = call.tool_name or "unknown tool"
     reason = call.reason or ""
     if reason.startswith(_IN_FLIGHT_REASON_PREFIX):
@@ -415,7 +415,7 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
     """
     manifest = run.read_manifest()
     times = event_times(run)
-    start_day = _start_day(report.started_at)
+    start_day = start_day_of(report.started_at)
     identity = [f"session {report.session_key}"] if report.session_key else []
     if report.agent_id:
         identity.append(f"agent {report.agent_id}")
@@ -425,7 +425,7 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
     start_text = (
         started.strftime("%Y-%m-%d %H:%M:%S UTC") if isinstance(started, datetime) else "unknown"
     )
-    ended = _clock(report.ended_at, start_day)
+    ended = clock_text(report.ended_at, start_day)
     if report.status == COMPLETED_STATUS:
         end_text = ended or "unknown"
     elif report.status == INTERRUPTED_STATUS and ended:
@@ -501,6 +501,7 @@ def summary_line(run: RunDirectory, report: SessionReport) -> str:
 
 
 __all__ = [
+    "clock_text",
     "detector_meaning",
     "display_status",
     "event_times",
@@ -509,6 +510,7 @@ __all__ = [
     "readable_fields",
     "render_run_text",
     "report_payload",
+    "start_day_of",
     "stop_blocks",
     "stop_wording",
     "summary_line",

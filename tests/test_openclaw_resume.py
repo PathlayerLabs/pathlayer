@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Any
@@ -157,7 +158,8 @@ def test_a_loop_stop_writes_a_dossier_whose_stop_is_proven(tmp_path: Path) -> No
     why = dossier["why_stopped"]
     assert why["status"] == PROVEN
     assert why["detector"] == "loop"
-    assert why["headline"] == "Stopped by Pathlayer"
+    assert why["headline"] == "Pathlayer stopped the run"
+    assert why["enforcement"].startswith("enforced: ")
     assert why["at"] is not None
     (group,) = dossier["attempts"]["groups"]
     assert group == {
@@ -181,7 +183,7 @@ def test_the_summary_is_three_lines_of_template_text(tmp_path: Path) -> None:
     summary = _stored(run)["summary"]
 
     assert len(summary) == 3
-    assert summary[0].startswith("Stopped by Pathlayer at ")
+    assert re.match(r"Pathlayer stopped the run at \d\d:\d\d:\d\d UTC: ", summary[0])
     assert summary[0].endswith(": the agent kept repeating the same tool calls.")
     assert summary[1].startswith("8 proven, 0 failed, 0 unproven fact(s); ")
     assert summary[2].startswith("Decision needed: change the approach")
@@ -260,6 +262,11 @@ def test_the_startup_sweep_writes_a_dossier_for_an_interrupted_run(tmp_path: Pat
     assert "what the run did after the listener's last record" in dossier["unknowns"]["items"]
     assert dossier["last_clean_call"]["status"] == OBSERVED
     assert dossier["last_clean_call"]["event_id"] == "openclaw:2:0"
+    raw = [json.loads(line) for line in run.raw_events_path.read_text().splitlines()]
+    assert why["last_record_at"] == raw[-1]["received_at"]
+    assert why["noticed_at"] == run.read_manifest()["ended_at"]
+    assert "- Last record from the run: " in run.resume_md_path.read_text()
+    assert "the interruption was noticed at " in run.resume_md_path.read_text()
 
 
 def test_calls_refused_by_the_in_flight_cap_alone_get_a_dossier(tmp_path: Path) -> None:
@@ -304,7 +311,7 @@ def test_only_identical_calls_or_failures_make_a_stop_proven(
     report = build_session_report(
         run_id="r", status="completed", ticks=ticks, events_recorded=1, stopped=True
     )
-    why = _why_stopped("pathlayer_stop", {"stopped": True}, report, None)
+    why = _why_stopped("pathlayer_stop", {"stopped": True}, report, None, None)
     assert why["status"] == status
     proven = why["status"] == PROVEN
     assert _template_key("pathlayer_stop", why["detector"], None, proven=proven) == template
@@ -426,11 +433,12 @@ def test_a_passive_stop_is_not_said_to_be_enforced(tmp_path: Path) -> None:
     dossier = _stored(run)
     (stop,) = [a for a in dossier["pathlayer_actions"]["actions"] if a["action"] == "STOP"]
     assert stop["emitted"] is True
-    assert stop["delivery"] == "recorded only: enforcement was off"
-    assert dossier["why_stopped"]["headline"] == (
-        "Stop decided by Pathlayer (not enforced: recording only)"
-    )
-    assert "(recorded only: enforcement was off)" in run.resume_md_path.read_text()
+    assert stop["delivery"] == "recorded only: not enforced"
+    assert dossier["why_stopped"]["headline"] == "Pathlayer decided to stop the run"
+    assert dossier["why_stopped"]["enforcement"] == "not enforced: recorded only"
+    text = run.resume_md_path.read_text()
+    assert "Pathlayer stopped" not in text
+    assert "- Enforcement: not enforced: recorded only." in text
 
 
 def test_late_usage_counts_in_the_whole_run_cost_when_nothing_stopped(tmp_path: Path) -> None:
@@ -541,3 +549,79 @@ def test_no_dossier_of_any_kind_promises_anything(tmp_path: Path) -> None:
         lowered = text.lower()
         for word in BANNED:
             assert word not in lowered, (word, text)
+
+
+# --------------------------------------------------------------------------- #
+# resume.md: decision first, readable, nothing empty
+# --------------------------------------------------------------------------- #
+
+
+def test_the_markdown_puts_the_decision_first_and_the_run_details_last(tmp_path: Path) -> None:
+    run = _loop(OpenClawRunRecorder(tmp_path, enforce=True), "run-a")
+    text = run.resume_md_path.read_text(encoding="utf-8")
+
+    headings = [line for line in text.splitlines() if line.startswith(("**Decision", "## "))]
+    assert headings[0].startswith("**Decision needed:** change the approach")
+    assert headings[1] == "## How to restart"
+    assert headings[2] == "## What happened"
+    assert headings[-2:] == ["## Not known", "## Run details"]
+    assert "How we know: proven by the records" in text
+    # Clock times, never raw ISO stamps, and no status tag in a heading.
+    assert not re.search(r"\d{4}-\d\d-\d\dT\d\d:", text)
+    assert "_observed_" not in text and "_proven_" not in text
+    # The stop reason is said once.
+    assert text.count("loop: 5x repeat of 1-action block") == 1
+
+
+def test_an_unmeasured_cost_and_an_empty_ledger_column_are_left_out(tmp_path: Path) -> None:
+    run = _loop(OpenClawRunRecorder(tmp_path, enforce=True), "run-a")
+    text = run.resume_md_path.read_text(encoding="utf-8")
+
+    assert "## Cost" not in text
+    assert "the cost: no model usage report could be priced" in text
+    assert "**failed**" not in text and "- none" not in text
+
+
+def test_a_passive_stop_counts_the_calls_that_still_ran(tmp_path: Path) -> None:
+    run = _loop(OpenClawRunRecorder(tmp_path), "run-a")
+    dossier = _stored(run)
+
+    assert dossier["why_stopped"]["tool_calls_after_stop"] == 3
+    assert dossier["summary"][1].endswith("; 3 call(s) ran after the stop decision.")
+    text = run.resume_md_path.read_text(encoding="utf-8")
+    assert "After the stop decision, 3 more tool call(s) ran" in text
+
+
+def test_an_enforced_stop_does_not_count_the_calls_it_blocked(tmp_path: Path) -> None:
+    run = _loop(OpenClawRunRecorder(tmp_path, enforce=True), "run-a")
+    dossier = _stored(run)
+
+    assert dossier["why_stopped"]["tool_calls_after_stop"] == 0
+    assert "ran after the stop decision" not in dossier["summary"][1]
+
+
+def _read_text(run_id: str, call: str, text: str) -> dict[str, Any]:
+    payload = _read(run_id, 0)
+    payload["event"] = {
+        **payload["event"],
+        "toolCallId": call,
+        "result": {"content": [{"type": "text", "text": text}]},
+    }
+    return payload
+
+
+def test_reads_of_one_file_at_several_sizes_are_one_markdown_line(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.process_payload(_start("run-a"))
+    for index, text in enumerate(("a", "bb", "ccc")):
+        recorder.process_payload(_read_text("run-a", f"call-{index}", text))
+    recorder.process_payload(_error_end("run-a"))
+    run = _run(tmp_path, "run-a")
+
+    assert len(_stored(run)["proof_ledger"]["proven"]) == 3
+    lines = [
+        line
+        for line in run.resume_md_path.read_text().splitlines()
+        if "a.py" in line and "read" in line
+    ]
+    assert lines == ["- read a.py back (3 characters) (x3; the last one shown)"]

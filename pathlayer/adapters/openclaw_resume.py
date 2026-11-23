@@ -38,16 +38,20 @@ from typing import Any
 from pathlayer.adapters.openclaw_facts import FactKind, OpenClawFact, extract_facts
 from pathlayer.adapters.openclaw_lifecycle import AGENT_END, attempt_end_error
 from pathlayer.adapters.openclaw_readable import (
+    clock_text,
     detector_meaning,
     display_status,
     event_times,
-    stop_wording,
+    first_stop,
+    start_day_of,
+    tool_results_after,
 )
 from pathlayer.adapters.openclaw_report import build_run_report, llm_cost_split
 from pathlayer.adapters.openclaw_run_store import (
     RunDirectory,
     atomic_write_json,
     atomic_write_text,
+    parse_iso,
     read_journal,
 )
 from pathlayer.policies import Action
@@ -234,7 +238,7 @@ _TEMPLATES: dict[str, tuple[str, tuple[str, ...]]] = {
     CAUSE_BLOCKED: (
         "let the calls already running finish instead of repeating them",
         (
-            "Pathlayer refused calls identical to ones already running. Use their results "
+            "Pathlayer blocked calls identical to ones already running. Use their results "
             "rather than calling them again.",
         ),
     ),
@@ -297,26 +301,6 @@ def _is_overflow(error: str | None) -> bool:
     return "overflow" in lowered or "context length" in lowered or "too many tokens" in lowered
 
 
-def _first_stop_sequence(run: RunDirectory) -> tuple[int | None, int | None]:
-    """The raw sequence and event index of the first emitted STOP, from ``decisions.jsonl``."""
-    try:
-        records, _ = read_journal(run.decisions_path)
-    except (OSError, ValueError):
-        return None, None
-    for record in records:
-        if not record.get("analyzed", True) or record.get("dry_run") is True:
-            continue
-        action = record.get("arbitrated_action", record.get("action"))
-        if action == Action.STOP.name:
-            sequence = record.get("sequence")
-            index = record.get("event_index")
-            return (
-                sequence if isinstance(sequence, int) and not isinstance(sequence, bool) else None,
-                index if isinstance(index, int) and not isinstance(index, bool) else None,
-            )
-    return None, None
-
-
 def _cause(manifest: Mapping[str, Any], report: SessionReport) -> str:
     status = str(manifest.get("status") or "")
     if manifest.get("stopped") is True or report.stop_reason is not None:
@@ -360,6 +344,10 @@ def _section(
     detector: str | None = None,
     reason: str | None = None,
     at: Any = None,
+    enforcement: str | None = None,
+    tool_calls_after_stop: int | None = None,
+    last_record_at: str | None = None,
+    noticed_at: Any = None,
 ) -> dict[str, Any]:
     """``headline`` and ``detail`` are template text only: the summary reuses them."""
     return {
@@ -371,7 +359,22 @@ def _section(
         "explanation": f"{headline}: {detail}" if detail else headline,
         "reason": reason,
         "at": at if isinstance(at, str) else None,
+        "enforcement": enforcement,
+        "tool_calls_after_stop": tool_calls_after_stop,
+        "last_record_at": last_record_at,
+        "noticed_at": noticed_at if isinstance(noticed_at, str) else None,
     }
+
+
+def _enforcement(gate: Any) -> str:
+    """Whether OpenClaw was told to block the run's calls after the stop."""
+    if gate is None:
+        return "unknown: no gate log"
+    if not gate.enforced:
+        return "not enforced: recorded only"
+    if gate.blocked:
+        return f"enforced: {len(gate.blocked)} call(s) blocked"
+    return "enforced, but no later tool call was attempted"
 
 
 def _why_stopped(
@@ -379,18 +382,25 @@ def _why_stopped(
     manifest: Mapping[str, Any],
     report: SessionReport,
     stop_at: str | None,
+    after_stop: int | None,
+    last_record_at: str | None = None,
 ) -> dict[str, Any]:
     error = manifest.get("error") if isinstance(manifest.get("error"), str) else None
     if cause == CAUSE_STOP:
-        detector = _detector(report.stop_reason)
+        gate = report.tool_call_gate
+        # "Stopped" only when the gate blocked a call; otherwise only the
+        # decision is on record.
+        enforced = gate is not None and gate.enforced and bool(gate.blocked)
         return _section(
             PROVEN if _is_proven(report.stop_reason) else DECIDED,
             cause,
-            stop_wording(report.tool_call_gate),
+            "Pathlayer stopped the run" if enforced else "Pathlayer decided to stop the run",
             detector_meaning(report.stop_reason or ""),
-            detector=detector,
+            detector=_detector(report.stop_reason),
             reason=mask_text(report.stop_reason) if report.stop_reason else None,
             at=stop_at,
+            enforcement=_enforcement(gate),
+            tool_calls_after_stop=after_stop,
         )
     if cause == CAUSE_ERROR:
         return _section(
@@ -424,12 +434,15 @@ def _why_stopped(
             "Interrupted",
             "the listener stopped or restarted before the run ended, so how it ended is "
             "not observed",
+            last_record_at=last_record_at,
+            # The recorder stamps an interrupted run's end when it notices it.
+            noticed_at=manifest.get("ended_at"),
         )
     return _section(
         DECIDED,
         cause,
         "Calls blocked by Pathlayer",
-        "tool calls identical to ones already running were refused",
+        "tool calls identical to ones already running were blocked",
     )
 
 
@@ -457,7 +470,9 @@ def _fact_status(fact: OpenClawFact) -> str:
 
 
 def _attempts(
-    gate_records: Sequence[Mapping[str, Any]], facts: Sequence[OpenClawFact]
+    gate_records: Sequence[Mapping[str, Any]],
+    facts: Sequence[OpenClawFact],
+    received: Mapping[int, str],
 ) -> dict[str, Any]:
     """The tool calls the run tried, grouped by tool and params digest.
 
@@ -512,6 +527,9 @@ def _attempts(
             )
             group["calls"] += 1
             group["failed"] += int(_fact_status(fact) == LEDGER_FAILED)
+            at = received.get(fact.sequence)
+            group["first_at"] = group["first_at"] or at
+            group["last_at"] = at or group["last_at"]
         source = "events.raw.jsonl"
     ordered = sorted(groups.values(), key=lambda g: (-g["calls"], g["first_at"] or "", g["tool"]))
     return {
@@ -563,10 +581,10 @@ def _delivery(action: Action, emitted: bool, gate: Any) -> str:
     if action is not Action.STOP:
         return "recorded only: OpenClaw has no channel for it"
     if gate is None:
-        return "unknown: this run has no gate log"
+        return "enforcement unknown: no gate log"
     if gate.enforced:
         return "enforced by the tool-call gate"
-    return "recorded only: enforcement was off"
+    return "recorded only: not enforced"
 
 
 def _actions(report: SessionReport, times: Mapping[int, str]) -> dict[str, Any]:
@@ -662,8 +680,8 @@ def _summary(dossier: Mapping[str, Any]) -> list[str]:
     the agent's own session.
     """
     why = dossier["why_stopped"]
-    at = why.get("at")
-    clock = f" at {at[11:19]} UTC" if isinstance(at, str) and len(at) >= 19 else ""
+    clock = clock_text(why.get("at"), start_day_of(dossier["identity"]["started_at"]))
+    when = f" at {clock}" if clock else ""
     detail = f": {why['detail']}" if why.get("detail") else ""
     ledger = dossier["proof_ledger"]
     blocked = (dossier["pathlayer_actions"]["gate"] or {}).get("blocked", 0)
@@ -671,10 +689,13 @@ def _summary(dossier: Mapping[str, Any]) -> list[str]:
         column: sum(entry["count"] for entry in ledger[column])
         for column in (LEDGER_PROVEN, LEDGER_FAILED, LEDGER_UNPROVEN)
     }
+    after = why.get("tool_calls_after_stop")
+    ran_after = f"; {after} call(s) ran after the stop decision" if after else ""
     return [
-        f"{why['headline']}{clock}{detail}.",
+        f"{why['headline']}{when}{detail}.",
         f"{counts[LEDGER_PROVEN]} proven, {counts[LEDGER_FAILED]} failed, "
-        f"{counts[LEDGER_UNPROVEN]} unproven fact(s); {blocked} call(s) blocked by Pathlayer.",
+        f"{counts[LEDGER_UNPROVEN]} unproven fact(s); {blocked} call(s) blocked by "
+        f"Pathlayer{ran_after}.",
         f"Decision needed: {dossier['options']['decision']}.",
     ]
 
@@ -710,8 +731,9 @@ def build_resume_dossier(
     except ValueError:
         gate_records = []
     facts = extract_facts(raw)
+    received = _received_at(raw)
     times = event_times(run)
-    stop_sequence, stop_index = _first_stop_sequence(run)
+    stop_sequence, stop_index = first_stop(run)
     stop_action = next((a for a in report.actions if a.action is Action.STOP and a.emitted), None)
     if stop_action is not None:
         stop_at = times.get(stop_action.index)
@@ -724,7 +746,11 @@ def build_resume_dossier(
         # Between two attempts the manifest has no error yet: the last
         # agent_end carries it.
         error = _last_attempt_error(raw)
-    why = _why_stopped(cause, {**manifest, "error": error}, report, stop_at)
+    after_stop = tool_results_after(run, stop_sequence) if cause == CAUSE_STOP else None
+    last_record_at = max(received.values(), default=None)
+    why = _why_stopped(
+        cause, {**manifest, "error": error}, report, stop_at, after_stop, last_record_at
+    )
     decision, options = _TEMPLATES[
         _template_key(cause, why["detector"], error, proven=why["status"] == PROVEN)
     ]
@@ -751,8 +777,8 @@ def build_resume_dossier(
             "pathlayer_version": manifest.get("pathlayer_version"),
         },
         "why_stopped": why,
-        "attempts": _attempts(gate_records, facts),
-        "last_clean_call": _last_clean_call(facts, _received_at(raw)),
+        "attempts": _attempts(gate_records, facts, received),
+        "last_clean_call": _last_clean_call(facts, received),
         "proof_ledger": _ledger(report),
         "pathlayer_actions": _actions(report, times),
         "cost": cost,
@@ -773,29 +799,173 @@ def _md(text: Any) -> str:
     return str(text).replace("`", "'").replace("|", "\\|")
 
 
-def _tag(section: Mapping[str, Any]) -> str:
-    return f"_{section['status']}_"
+# How each status reads in resume.md. resume.json keeps the bare status.
+_HOW_WE_KNOW = {
+    PROVEN: "proven by the records: the stop reason counts the identical calls it saw",
+    DECIDED: "decided by Pathlayer: a judgement on the records, not a proof",
+    OBSERVED: "observed: OpenClaw reported it",
+    UNKNOWN: "not known: the records end before it",
+}
+
+# Ledger entries that differ only by the number in their last parenthesis
+# (a file read back 11 times at 11 sizes) are one line in resume.md.
+_TRAILING_NUMBER = re.compile(r"\d+(?=[^()]*\)\s*$)")
 
 
 def _bullets(lines: Iterable[str]) -> list[str]:
     return [f"- {line}" for line in lines]
 
 
+def _merged_entries(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault(_TRAILING_NUMBER.sub("#", entry["statement"]), []).append(entry)
+    lines = []
+    for group in groups.values():
+        total = sum(entry["count"] for entry in group)
+        last = group[-1]["statement"]
+        if len(group) > 1:
+            lines.append(f"{last} (x{total}; the last one shown)")
+        else:
+            lines.append(f"{last} (x{total})" if total > 1 else last)
+    return lines
+
+
 def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
-    """``resume.md``: the dossier for a person, every section with how it is known."""
+    """``resume.md``: what to decide first, then what happened, then the evidence.
+
+    Times are clock times (UTC, with the date when not the start day); an empty
+    section is left out, and what is not known is said once, at the end.
+    ``resume.json`` keeps every field, every ISO time and every status.
+    """
     identity = dossier["identity"]
     why = dossier["why_stopped"]
-    lines = [
-        f"# Resume dossier: run {identity['run_id']}",
-        "",
-        *dossier["summary"],
-        "",
-    ]
+    day = start_day_of(identity["started_at"])
+
+    def clock(at: Any) -> str:
+        return clock_text(at, day) or "time unknown"
+
+    lines = [f"# Resume dossier: run {identity['run_id']}", ""]
     if dossier["provisional"]:
         lines.extend(["> Provisional: the run has not ended; this dossier is rewritten.", ""])
+    options = dossier["options"]
     lines.extend(
         [
-            f"## Run {_tag(identity)}",
+            f"**Decision needed:** {options['decision']}.",
+            "",
+            "## How to restart",
+            "",
+            *_bullets(options["steps"]),
+        ]
+    )
+
+    # What happened: one statement, then how it is known and its evidence.
+    when = f" at {clock_text(why.get('at'), day)}" if clock_text(why.get("at"), day) else ""
+    detail = f": {why['detail']}" if why.get("detail") else ""
+    lines.extend(["", "## What happened", "", f"{why['headline']}{when}{detail}.", ""])
+    facts = []
+    if why.get("enforcement"):
+        facts.append(f"Enforcement: {why['enforcement']}.")
+    after = why.get("tool_calls_after_stop")
+    if after:
+        facts.append(
+            f"After the stop decision, {after} more tool call(s) ran (already running when "
+            "Pathlayer decided, or not blocked)."
+        )
+    if why.get("last_record_at"):
+        noticed = clock_text(why.get("noticed_at"), day)
+        facts.append(
+            f"Last record from the run: {clock(why['last_record_at'])}"
+            + (f"; the interruption was noticed at {noticed}." if noticed else ".")
+        )
+    if why.get("reason"):
+        facts.append(f"Recorded reason: `{_md(why['reason'])}`")
+    facts.append(f"How we know: {_HOW_WE_KNOW[why['status']]}.")
+    lines.extend(_bullets(facts))
+
+    actions = dossier["pathlayer_actions"]
+    others = [a for a in actions["actions"] if a["reason"] != why.get("reason")]
+    if others or actions["blocked_calls"]:
+        lines.extend(["", "## What Pathlayer did", ""])
+        for action in actions["actions"]:
+            same = action["reason"] == why.get("reason")
+            reason = "" if same or not action["reason"] else f": `{_md(action['reason'])}`"
+            lines.append(
+                f"- {clock(action['at'])}: {action['action']} ({action['delivery']}){reason}"
+            )
+        for call in actions["blocked_calls"]:
+            lines.append(f"- {clock(call['at'])}: {call['tool']} blocked ({call['why']})")
+        if actions["more_blocked_calls"]:
+            lines.append(f"- ... and {actions['more_blocked_calls']} more blocked call(s)")
+
+    ledger = dossier["proof_ledger"]
+    columns = [c for c in (LEDGER_PROVEN, LEDGER_FAILED, LEDGER_UNPROVEN) if ledger[c]]
+    if columns:
+        lines.extend(
+            [
+                "",
+                "## Proof ledger",
+                "",
+                "Observed facts, not a verdict on the task. Proven: the call's own result shows "
+                "it was done (a command exited 0, a file was written or read). Failed: its "
+                "result shows it was not. Unproven: its result says neither.",
+            ]
+        )
+        for column in columns:
+            lines.extend(["", f"**{column}**", *_bullets(_merged_entries(ledger[column]))])
+
+    attempts = dossier["attempts"]
+    if attempts["groups"]:
+        digests = any(group["params_digest"] for group in attempts["groups"])
+        head = "| Tool | Calls | Failed | Blocked | First | Last |"
+        rule = "|---|---|---|---|---|---|"
+        if digests:
+            head = "| Tool | Same arguments (digest) | Calls | Failed | Blocked | First | Last |"
+            rule = "|---|---|---|---|---|---|---|"
+        lines.extend(["", "## What was tried", "", head, rule])
+        for group in attempts["groups"]:
+            digest = f" {group['params_digest'] or '-'} |" if digests else ""
+            lines.append(
+                f"| {_md(mask_text(group['tool'], 40))} |{digest} {group['calls']} | "
+                f"{group['failed']} | {group['blocked']} | {clock(group['first_at'])} | "
+                f"{clock(group['last_at'])} |"
+            )
+        if attempts["more_groups"]:
+            lines.append(f"\n... and {attempts['more_groups']} more group(s) in resume.json")
+        if digests:
+            lines.extend(["", f"Note: {attempts['digest_scope']}."])
+        else:
+            lines.extend(["", "Grouped by tool only: this run has no gate log with digests."])
+
+    clean = dossier["last_clean_call"]
+    if clean["event_id"]:
+        lines.extend(
+            [
+                "",
+                "## Last call without an error",
+                "",
+                f"{clean['tool']} ({clean['kind'].replace('_', ' ')}) at {clock(clean['at'])}.",
+            ]
+        )
+
+    cost = dossier["cost"]
+    if cost["status"] != UNKNOWN:
+        before = cost["before_stop"]
+        after_cost = cost["after_stop"]
+        lines.extend(["", "## Cost (estimated)", ""])
+        label = "Before the stop decision" if after_cost is not None else "Whole run"
+        lines.append(f"- {label}: {_usd(before)}")
+        if after_cost is not None:
+            lines.append(f"- After it: {_usd(after_cost)}")
+            lines.append(f"- Split by {cost['split_by']}.")
+
+    lines.extend(["", "## Not known", "", *_bullets(dossier["unknowns"]["items"])])
+
+    started = parse_iso(identity["started_at"])
+    lines.extend(
+        [
+            "",
+            "## Run details",
             "",
             *_bullets(
                 [
@@ -803,106 +973,14 @@ def render_resume_markdown(dossier: Mapping[str, Any]) -> str:
                     f"Session: {identity['session_key'] or 'unknown'}; "
                     f"agent: {identity['agent_id'] or 'unknown'}",
                     f"Model: {identity['model'] or 'unknown'}",
-                    f"Started: {identity['started_at'] or 'unknown'}; "
-                    f"ended: {identity['ended_at'] or 'not recorded'}",
+                    "Started: "
+                    + (started.strftime("%Y-%m-%d %H:%M:%S UTC") if started else "unknown")
+                    + f"; ended: {clock_text(identity['ended_at'], day) or 'not recorded'}",
+                    f"Pathlayer: {identity['pathlayer_version'] or 'unknown version'}",
                 ]
             ),
-            "",
-            f"## Why it stopped {_tag(why)}",
-            "",
-            f"{why['explanation']}.",
         ]
     )
-    if why.get("reason"):
-        lines.extend(["", f"Recorded reason: `{_md(why['reason'])}`"])
-    if why.get("at"):
-        lines.append(f"At: {why['at']}")
-
-    attempts = dossier["attempts"]
-    lines.extend(["", f"## What was tried {_tag(attempts)}", ""])
-    if attempts["groups"]:
-        lines.extend(
-            [
-                "| Tool | Same arguments (digest) | Calls | Failed | Blocked | First | Last |",
-                "|---|---|---|---|---|---|---|",
-            ]
-        )
-        for group in attempts["groups"]:
-            lines.append(
-                f"| {_md(mask_text(group['tool'], 40))} | {group['params_digest'] or '-'} | "
-                f"{group['calls']} | {group['failed']} | {group['blocked']} | "
-                f"{group['first_at'] or '-'} | {group['last_at'] or '-'} |"
-            )
-        if attempts["more_groups"]:
-            lines.append(f"\n... and {attempts['more_groups']} more group(s) in resume.json")
-        if any(group["params_digest"] for group in attempts["groups"]):
-            lines.extend(["", f"Note: {attempts['digest_scope']}."])
-        else:
-            lines.extend(["", "Grouped by tool only: this run has no gate log with digests."])
-    else:
-        lines.append("No tool call was recorded.")
-
-    clean = dossier["last_clean_call"]
-    lines.extend(["", f"## Last call without an error {_tag(clean)}", ""])
-    if clean["event_id"]:
-        lines.append(
-            f"{clean['tool']} ({clean['kind']}), event `{clean['event_id']}`"
-            + (f", at {clean['at']}" if clean["at"] else "")
-        )
-    else:
-        lines.append("None observed.")
-
-    ledger = dossier["proof_ledger"]
-    lines.extend(
-        ["", f"## Proof ledger {_tag(ledger)}", "", "Observed facts, not a verdict on the task."]
-    )
-    for column in (LEDGER_PROVEN, LEDGER_FAILED, LEDGER_UNPROVEN):
-        lines.extend(["", f"**{column}**"])
-        entries = ledger[column]
-        if not entries:
-            lines.append("- none")
-        for entry in entries:
-            times = f" (x{entry['count']})" if entry["count"] > 1 else ""
-            lines.append(f"- {entry['statement']}{times}")
-
-    actions = dossier["pathlayer_actions"]
-    lines.extend(["", f"## What Pathlayer did {_tag(actions)}", ""])
-    if not actions["actions"] and not actions["blocked_calls"]:
-        lines.append("- no action")
-    for action in actions["actions"]:
-        reason = f": `{_md(action['reason'])}`" if action["reason"] else ""
-        lines.append(
-            f"- {action['at'] or 'time unknown'}: {action['action']} ({action['delivery']}){reason}"
-        )
-    gate = actions["gate"]
-    if gate is not None:
-        mode = "enforced" if gate["enforced"] else "recording only"
-        lines.append(
-            f"- tool-call gate ({mode}): {gate['blocked']} blocked of "
-            f"{gate['tool_calls_asked_about']} asked about"
-        )
-    for call in actions["blocked_calls"]:
-        lines.append(f"  - {call['at'] or 'time unknown'}: {call['tool']} blocked ({call['why']})")
-
-    cost = dossier["cost"]
-    lines.extend(["", f"## Cost {_tag(cost)}", ""])
-    before = cost["before_stop"]
-    after = cost["after_stop"]
-    if cost["status"] == UNKNOWN:
-        lines.append("Not measured.")
-    else:
-        label = "Before the stop" if after is not None else "Whole run"
-        lines.append(f"- {label}: {_usd(before)} (estimated)")
-        if after is not None:
-            lines.append(f"- After the stop: {_usd(after)} (estimated)")
-            lines.append(f"- Split by {cost['split_by']}.")
-
-    options = dossier["options"]
-    lines.extend(["", f"## How to restart {_tag(options)}", ""])
-    lines.extend(_bullets(options["steps"]))
-    unknowns = dossier["unknowns"]
-    lines.extend(["", f"## Not known {_tag(unknowns)}", ""])
-    lines.extend(_bullets(unknowns["items"]))
     return "\n".join(lines) + "\n"
 
 
