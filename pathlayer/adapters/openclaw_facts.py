@@ -551,5 +551,5 @@ def _statement(fact: OpenClawFact, usual_cwd: str | None = None) -> str:
         if detail.get("by_pathlayer"):
             return f"{what} blocked by Pathlayer"
         denied = _inline(detail.get("denied_reason") or "no reason given")
-        return f"{what} blocked by OpenClaw ({denied})"
+        return f"{what} denied by OpenClaw ({denied})"
     return f"{tool} failed: {_inline(detail.get('error'))}"

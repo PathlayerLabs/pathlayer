@@ -404,7 +404,7 @@ that exited 0 proves it exited 0, and a write proves what was written then, not
 what the file holds now (its size is as the tool reported it: characters in
 OpenClaw 2026.7.1, UTF-8 bytes later). A read proves only that the file was
 readable at that moment, with its length; the text is never kept. A timeout counts only when OpenClaw's
-failure kind says so; an `exec` whose approval was denied is a blocked call.
+failure kind says so; an `exec` whose approval was denied is a call denied by OpenClaw.
 Identical facts are grouped with a count, and every
 entry names the raw journal records it rests on. The ledger feeds no detector.
 
@@ -600,9 +600,13 @@ Detector readings: pathlayer-report run-abc123 --technical
   not a proof that the task was done), waiting for a retry, interrupted, or
   no end recorded yet. A stop reads "Stopped by Pathlayer" only when the
   tool-call gate was enforced and blocked at least one call; otherwise it reads
-  "Stop decided by Pathlayer", saying why (recording only, or no later tool call
-  was attempted). On OpenClaw, only a STOP has an actuator: a
-  warning is said to be recorded only.
+  "Stop decided by Pathlayer", saying why: not enforced (recorded only), no later
+  tool call attempted, or enforcement unknown because the run has no gate log.
+  When OpenClaw still reported tool call results after the stop decision, their
+  count is given: those calls were already running, or were not blocked. On
+  OpenClaw, only a STOP has an actuator: a warning is said to be recorded only.
+  "Blocked" always means blocked by Pathlayer's gate; a call OpenClaw itself
+  refused is "denied by OpenClaw".
 - **Clock times.** Times are UTC, as the listener received each event; a time on
   another day than the start carries its date. `report.json` carries the same
   status as `display_status`, and an `at` on each action (`first_at` and

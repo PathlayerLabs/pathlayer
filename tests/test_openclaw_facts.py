@@ -435,7 +435,7 @@ def test_other_failures_and_blocks_are_worded_for_what_they_are() -> None:
         [_record(1, other), _record(2, timed_out), _record(3, failed_write)]
     )
     assert [entry.statement for entry in ledger.column(LEDGER_FAILED)] == [
-        "`rm -rf /` blocked by OpenClaw (no reason given)",
+        "`rm -rf /` denied by OpenClaw (no reason given)",
         "`sleep 99` timed out",
         "write failed: EACCES",
     ]

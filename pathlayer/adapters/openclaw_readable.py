@@ -27,6 +27,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from pathlayer.adapters.openclaw_facts import FactKind, extract_facts
+from pathlayer.adapters.openclaw_lifecycle import AFTER_TOOL_CALL
 from pathlayer.adapters.openclaw_run_store import (
     INTERRUPTED_WHILE_AWAITING_RETRY,
     RunDirectory,
@@ -121,6 +123,71 @@ def event_times(run: RunDirectory) -> dict[int, str]:
     return times
 
 
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def first_stop(run: RunDirectory) -> tuple[int | None, int | None]:
+    """The raw sequence and event index of the run's first applied STOP decision.
+
+    From ``decisions.jsonl``: the first analyzed, non-dry-run line whose
+    arbitrated action is STOP. ``(None, None)`` when there is none, or when the
+    journal cannot be read.
+    """
+    try:
+        records, _ = read_journal(run.decisions_path)
+    except (OSError, ValueError):
+        return None, None
+    for record in records:
+        if not record.get("analyzed", True) or record.get("dry_run") is True:
+            continue
+        if record.get("arbitrated_action", record.get("action")) == Action.STOP.name:
+            return _int_or_none(record.get("sequence")), _int_or_none(record.get("event_index"))
+    return None, None
+
+
+def tool_results_after(run: RunDirectory, sequence: int | None) -> int | None:
+    """How many tool calls OpenClaw reported as run after raw record ``sequence``.
+
+    Counted from ``events.raw.jsonl`` (``after_tool_call`` records). A blocked
+    call comes back as a result too: one the gate blocked (its id is a
+    ``block`` in ``gate.jsonl``) or one whose result says it was blocked or
+    denied is not counted, since it never ran. A result that arrives after a
+    STOP decision comes from a call already running when Pathlayer decided, or
+    one the stop did not block: the count says that calls went on, never which
+    of the two. ``None`` without a stop or a readable journal.
+    """
+    if sequence is None:
+        return None
+    try:
+        records, _ = read_journal(run.raw_events_path)
+    except (OSError, ValueError):
+        return None
+    try:
+        gate_records, _ = read_journal(run.gate_path)
+    except (OSError, ValueError):
+        gate_records = []
+    blocked_ids = {
+        record.get("tool_call_id") for record in gate_records if record.get("decision") == "block"
+    }
+    later = [
+        record
+        for record in records
+        if (_int_or_none(record.get("sequence")) or 0) > sequence
+        and isinstance(record.get("payload"), Mapping)
+        and record["payload"].get("hook") == AFTER_TOOL_CALL
+    ]
+    not_run = {fact.sequence for fact in extract_facts(later) if fact.kind is FactKind.CALL_BLOCKED}
+    count = 0
+    for record in later:
+        event = record["payload"].get("event")
+        call_id = event.get("toolCallId") if isinstance(event, Mapping) else None
+        if record.get("sequence") in not_run or (call_id is not None and call_id in blocked_ids):
+            continue
+        count += 1
+    return count
+
+
 def _clip(text: str, limit: int) -> str:
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 3].rstrip() + "..."
@@ -134,9 +201,9 @@ def _stop_wording(gate: ToolCallGate | None) -> str:
     the gate log does not support.
     """
     if gate is None:
-        return "Stop decided by Pathlayer"
+        return "Stop decided by Pathlayer (enforcement unknown: no gate log)"
     if not gate.enforced:
-        return "Stop decided by Pathlayer (not enforced: recording only)"
+        return "Stop decided by Pathlayer (not enforced: recorded only)"
     if gate.blocked:
         return "Stopped by Pathlayer"
     return "Stop decided by Pathlayer (enforced, but no later tool call was attempted)"
@@ -253,7 +320,7 @@ def _gate_lines(gate: ToolCallGate | None, start_day: str | None) -> list[str]:
         "OpenClaw asked about",
     ]
     if not gate.enforced:
-        lines.append("  enforcement was off: Pathlayer only recorded, OpenClaw ran every call")
+        lines.append("  not enforced: recorded only, OpenClaw ran every call")
     for call in gate.blocked[:_MAX_BLOCKED_LINES]:
         lines.append(_blocked_line(call, start_day))
     hidden = blocked - _MAX_BLOCKED_LINES
@@ -365,6 +432,12 @@ def render_run_text(run: RunDirectory, report: SessionReport, *, technical: bool
     gate = report.tool_call_gate
     if report.actions:
         lines.extend(_action_line(action, times, start_day) for action in report.actions)
+        after = tool_results_after(run, first_stop(run)[0])
+        if after:
+            lines.append(
+                f"  after the stop decision, {after} more tool call(s) ran (already running "
+                "when Pathlayer decided, or not blocked)"
+            )
     elif gate is not None and gate.blocked:
         # A call refused by the in-flight cap is an intervention without any
         # detector action: never say "nothing" above the list of blocked calls.
@@ -417,8 +490,10 @@ def summary_line(run: RunDirectory, report: SessionReport) -> str:
 __all__ = [
     "display_status",
     "event_times",
+    "first_stop",
     "readable_fields",
     "render_run_text",
     "report_payload",
     "summary_line",
+    "tool_results_after",
 ]

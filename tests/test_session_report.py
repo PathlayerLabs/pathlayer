@@ -1611,7 +1611,7 @@ def test_cli_all_lists_every_run_one_line_each_in_order(
 
     lines = capsys.readouterr().out.strip().splitlines()
     assert [line.split()[1] for line in lines] == ["run-a", "run-b", "run-c"]
-    assert lines[1].endswith("Stop decided by Pathlayer")
+    assert lines[1].endswith("Stop decided by Pathlayer (enforcement unknown: no gate log)")
 
 
 def test_cli_json_mode_emits_the_structured_report(

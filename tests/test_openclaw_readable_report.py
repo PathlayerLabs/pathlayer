@@ -17,8 +17,10 @@ import pytest
 from pathlayer.adapters.openclaw_readable import (
     display_status,
     event_times,
+    first_stop,
     render_run_text,
     report_payload,
+    tool_results_after,
 )
 from pathlayer.adapters.openclaw_recorder import OpenClawRunRecorder
 from pathlayer.adapters.openclaw_report import build_run_report, main
@@ -167,16 +169,19 @@ def test_a_stop_says_whether_openclaw_was_told_to_enforce_it() -> None:
     assert display_status(stopped, report) == "Stopped by Pathlayer"
     report.tool_call_gate = passive
     assert display_status(stopped, report) == (
-        "Stop decided by Pathlayer (not enforced: recording only)"
+        "Stop decided by Pathlayer (not enforced: recorded only)"
     )
     report.tool_call_gate = None
-    assert display_status(stopped, report) == "Stop decided by Pathlayer"
+    assert display_status(stopped, report) == (
+        "Stop decided by Pathlayer (enforcement unknown: no gate log)"
+    )
 
 
 def test_a_stopped_run_that_never_ended_says_its_record_is_incomplete() -> None:
     manifest = {"status": "interrupted", "stopped": True}
     assert display_status(manifest, _report("interrupted", stopped=True)) == (
-        "Stop decided by Pathlayer -- record incomplete: the run never reached its end"
+        "Stop decided by Pathlayer (enforcement unknown: no gate log) -- record incomplete: "
+        "the run never reached its end"
     )
 
 
@@ -269,8 +274,8 @@ def test_a_passive_recording_says_nothing_was_blocked(tmp_path: Path) -> None:
     run = _stopped_run(tmp_path, enforce=False)
     text = render_run_text(run, build_run_report(run))
 
-    assert "Status: Stop decided by Pathlayer (not enforced: recording only)" in text
-    assert "enforcement was off: Pathlayer only recorded, OpenClaw ran every call" in text
+    assert "Status: Stop decided by Pathlayer (not enforced: recorded only)" in text
+    assert "not enforced: recorded only, OpenClaw ran every call" in text
     assert "call(s) ran that enforcement would have blocked" in text
 
 
@@ -347,6 +352,53 @@ def test_reference_rendering_of_a_stopped_run(tmp_path: Path) -> None:
     assert text + "\n" == expected
 
 
+def _result(run_id: str, call: str, result: Any) -> dict[str, Any]:
+    event = {"toolName": "exec", "params": {"command": "ls"}, "toolCallId": call}
+    return {
+        "hook": "after_tool_call",
+        "event": {**event, "result": result, "runId": run_id},
+        "ctx": _ctx(run_id),
+    }
+
+
+def test_calls_that_ran_after_the_stop_are_counted_never_the_blocked_ones(
+    tmp_path: Path,
+) -> None:
+    recorder = OpenClawRunRecorder(tmp_path, enforce=True)
+    recorder.startup()
+    recorder.process_payload(_start("run-a"))
+    for index in range(5):
+        recorder.process_payload(_read("run-a", index))
+    # Blocked by the gate: its failed result never ran.
+    assert recorder.tool_call_decision(_query("run-a", "gated"))["block"] is True
+    recorder.process_payload(_result("run-a", "gated", {"error": "blocked"}))
+    # Denied by OpenClaw itself.
+    denied = {"details": {"status": "blocked", "deniedReason": "approval"}}
+    recorder.process_payload(_result("run-a", "denied", denied))
+    # Already running when Pathlayer decided: it ran.
+    recorder.process_payload(_result("run-a", "running", "ok"))
+    recorder.process_payload(_end("run-a"))
+    run = _run(tmp_path, "run-a")
+
+    sequence, _ = first_stop(run)
+    assert tool_results_after(run, sequence) == 1
+    text = render_run_text(run, build_run_report(run))
+    assert "after the stop decision, 1 more tool call(s) ran (already running" in text
+
+
+def test_no_stop_means_no_count_of_calls_after_it(tmp_path: Path) -> None:
+    recorder = OpenClawRunRecorder(tmp_path)
+    recorder.startup()
+    recorder.process_payload(_start("run-a"))
+    recorder.process_payload(_read("run-a", 0))
+    recorder.process_payload(_end("run-a"))
+    run = _run(tmp_path, "run-a")
+
+    assert first_stop(run) == (None, None)
+    assert tool_results_after(run, None) is None
+    assert "after the stop decision" not in render_run_text(run, build_run_report(run))
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
@@ -387,7 +439,7 @@ def test_cli_listing_ends_each_line_with_the_status(
     assert main(["--all", "--runs-root", str(tmp_path)]) == 0
     lines = sorted(capsys.readouterr().out.strip().splitlines(), key=lambda x: x.split()[1])
     assert re.match(r"\S+  run-a  \d+ event\(s\)  cost n/a  Stopped by Pathlayer$", lines[0])
-    assert lines[1].endswith("  Stop decided by Pathlayer (not enforced: recording only)")
+    assert lines[1].endswith("  Stop decided by Pathlayer (not enforced: recorded only)")
 
 
 def test_notes_about_detector_internals_stay_in_the_appendix(tmp_path: Path) -> None:
@@ -422,7 +474,7 @@ def test_a_stop_while_waiting_for_a_retry_keeps_its_wording() -> None:
     report.tool_call_gate = ToolCallGate(queries=1, enforced=False)
     assert display_status(manifest, report) == (
         "Waiting for a retry: attempt 1 did not succeed; "
-        "stop decided by Pathlayer (not enforced: recording only)"
+        "stop decided by Pathlayer (not enforced: recorded only)"
     )
 
 
